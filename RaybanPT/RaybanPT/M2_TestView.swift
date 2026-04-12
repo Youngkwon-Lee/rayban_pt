@@ -167,7 +167,7 @@ struct M2_TestView: View {
 
     // MARK: - 카메라 탭
     var cameraTab: some View {
-        NavigationLink(destination: StreamView()) {
+        NavigationLink(destination: StreamView(client: vm.client)) {
             VStack(spacing: 12) {
                 Image(systemName: "video.circle.fill")
                     .font(.system(size: 48))

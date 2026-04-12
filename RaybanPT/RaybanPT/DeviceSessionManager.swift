@@ -55,6 +55,9 @@ final class DeviceSessionManager {
         if let id = current.first {
             activeDeviceId = id
             monitorLinkState(for: id)
+        } else {
+            activeDeviceId = nil
+            cancelLinkListener()
         }
 
         devicesTask?.cancel()
@@ -66,6 +69,8 @@ final class DeviceSessionManager {
                 if let id {
                     self.monitorLinkState(for: id)
                 } else {
+                    self.cancelLinkListener()
+                    self.activeDeviceId = nil
                     self.linkState = .disconnected
                     self.statusMessage = "연결된 기기 없음"
                 }
@@ -79,13 +84,28 @@ final class DeviceSessionManager {
             return
         }
 
+        activeDeviceId = deviceId
+        cancelLinkListener()
+
         // 현재 linkState 즉시 반영
         updateLinkState(device.linkState, deviceName: device.nameOrId())
 
         // 변경 리스닝
         linkListenerToken = device.addLinkStateListener { [weak self] state in
             Task { @MainActor in
-                self?.updateLinkState(state, deviceName: device.nameOrId())
+                guard let self, self.activeDeviceId == deviceId else { return }
+                self.updateLinkState(state, deviceName: device.nameOrId())
+            }
+        }
+    }
+
+    private func cancelLinkListener() {
+        let existingToken = linkListenerToken
+        linkListenerToken = nil
+
+        if let existingToken {
+            Task {
+                await existingToken.cancel()
             }
         }
     }
@@ -106,7 +126,9 @@ final class DeviceSessionManager {
     func stop() {
         devicesTask?.cancel()
         registrationTask?.cancel()
-        Task { await linkListenerToken?.cancel() }
-        linkListenerToken = nil
+        devicesTask = nil
+        registrationTask = nil
+        activeDeviceId = nil
+        cancelLinkListener()
     }
 }

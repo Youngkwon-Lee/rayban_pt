@@ -3,11 +3,13 @@ import MWDATCore
 
 struct StreamView: View {
     @State private var vm = StreamViewModel()
-    @StateObject private var bridgeVm = AdapterViewModel(
-        client: BridgeClient(baseURL: URL(string: "http://YOUR_SERVER_HOST:8791")!)
-    )
+    @StateObject private var bridgeVm: AdapterViewModel
     @State private var analysisResult: String? = nil
     @State private var isAnalyzing = false
+
+    init(client: BridgeClient) {
+        _bridgeVm = StateObject(wrappedValue: AdapterViewModel(client: client))
+    }
 
     var body: some View {
         ScrollView {
@@ -207,17 +209,17 @@ struct StreamView: View {
         }
         .navigationTitle("Ray-Ban 카메라")
         .onAppear { vm.setup() }
-        .onDisappear { Task { await vm.stopStreaming() } }
+        .onDisappear { Task { await vm.tearDown() } }
     }
 
     private func uploadVideo(_ url: URL) async {
         isAnalyzing = true
         analysisResult = "영상 업로드 중..."
         do {
-            let accepted = try await bridgeVm.client.uploadVideo(fileURL: url)
+            let accepted = try await bridgeVm.uploadVideo(fileURL: url)
             let kb = accepted.size_kb ?? 0
-            analysisResult = "✅ 영상 저장됨: \(accepted.video_saved ?? accepted.event_id) (\(kb)KB)"
-            bridgeVm.markDone()
+            let detail = bridgeVm.lastMessage.isEmpty ? "" : "\n\(bridgeVm.lastMessage)"
+            analysisResult = "✅ 영상 저장됨: \(accepted.video_saved ?? accepted.event_id) (\(kb)KB)\(detail)"
         } catch {
             let msg = (error as? BridgeError).map { e in
                 switch e {
@@ -226,7 +228,8 @@ struct StreamView: View {
                 default: return e.localizedDescription
                 }
             } ?? error.localizedDescription
-            analysisResult = "⚠️ 영상 업로드 실패: \(msg)"
+            let detail = bridgeVm.lastMessage.isEmpty ? "" : "\n\(bridgeVm.lastMessage)"
+            analysisResult = "⚠️ 영상 업로드 실패: \(msg)\(detail)"
         }
         isAnalyzing = false
     }

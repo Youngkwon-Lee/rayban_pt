@@ -27,6 +27,8 @@ final class StreamViewModel {
     private var wearables: any WearablesInterface { Wearables.shared }
 
     func setup() {
+        guard streamSession == nil else { return }
+
         let selector = AutoDeviceSelector(wearables: wearables)
         let config = StreamSessionConfig(
             videoCodec: .raw,
@@ -101,6 +103,22 @@ final class StreamViewModel {
         }
         await streamSession?.stop()
         currentFrame = nil
+        isStreaming = false
+    }
+
+    func tearDown() async {
+        if recorder.isRecording {
+            recordedVideoURL = await recorder.stop()
+        }
+
+        await streamSession?.stop()
+        releaseResources()
+        currentFrame = nil
+        capturedPhoto = nil
+        isStreaming = false
+        hasActiveDevice = false
+        errorMessage = nil
+        statusMessage = "대기 중"
     }
 
     func startRecording() {
@@ -141,6 +159,28 @@ final class StreamViewModel {
             statusMessage = "✅ 스트리밍 중"
         @unknown default:
             break
+        }
+    }
+
+    private func releaseResources() {
+        deviceTask?.cancel()
+        deviceTask = nil
+        streamSession = nil
+        cancel(token: stateToken)
+        cancel(token: frameToken)
+        cancel(token: errorToken)
+        cancel(token: photoToken)
+        stateToken = nil
+        frameToken = nil
+        errorToken = nil
+        photoToken = nil
+    }
+
+    private func cancel(token: (any AnyListenerToken)?) {
+        guard let token else { return }
+
+        Task {
+            await token.cancel()
         }
     }
 }

@@ -58,4 +58,42 @@ final class AdapterViewModel: ObservableObject {
             }
         }
     }
+
+    @discardableResult
+    func uploadVideo(fileURL: URL) async throws -> UploadAccepted {
+        do {
+            state = .uploading
+            lastMessage = ""
+
+            let accepted = try await client.uploadVideo(fileURL: fileURL)
+            state = .processing(eventId: accepted.event_id)
+            lastMessage = accepted.message
+
+            let final = try await client.waitUntilDone(eventId: accepted.event_id)
+            if final.status == "done" {
+                state = .done
+                if let result = final.result {
+                    lastMessage = "done intent=\(result.intent ?? "-") ack=\(result.ack ?? "-") event=\(result.event_id)"
+                } else {
+                    lastMessage = accepted.message
+                }
+                return accepted
+            }
+
+            let message: String
+            if final.status == "error" {
+                message = final.error ?? "processing error"
+            } else {
+                message = final.message ?? "timeout"
+            }
+
+            state = .failed(message: message)
+            lastMessage = message
+            throw BridgeError.network(message)
+        } catch {
+            state = .failed(message: UserFacingError.message(for: error))
+            lastMessage = UserFacingError.message(for: error)
+            throw error
+        }
+    }
 }
