@@ -240,14 +240,19 @@ struct StreamView: View {
 
         // 1) 온디바이스 Vision 분석
         let result = await ImageAnalyzer.analyze(image)
-        analysisResult = result.summary
+        var displayParts = [result.summary]
+        if let pose = result.pose {
+            displayParts.append(pose.summary)
+        }
+        analysisResult = displayParts.joined(separator: "\n")
 
         // 2) 이미지 + 분석 설명을 서버에 직접 업로드
-        let description = """
-        [Ray-Ban 카메라 캡처 분석]
-        \(result.summary)
-        위 이미지를 참고해 임상 메모를 작성해주세요.
-        """
+        var descParts = ["[Ray-Ban 카메라 캡처 분석]", result.summary]
+        if let pose = result.pose {
+            descParts.append(pose.summary)
+        }
+        descParts.append("위 이미지를 참고해 임상 메모를 작성해주세요.")
+        let description = descParts.joined(separator: "\n")
 
         do {
             let resp = try await bridgeVm.client.uploadImage(image, description: description)
