@@ -45,6 +45,7 @@ struct PatientPickerView: View {
 
                 // 환자 목록
                 if results.isEmpty && !query.isEmpty {
+                    // 검색했는데 없음 → 새 환자로 추가 제안
                     Section {
                         Button {
                             newName = query
@@ -52,6 +53,14 @@ struct PatientPickerView: View {
                             newNameFocused = true
                         } label: {
                             Label("\"\(query)\" 새 환자로 추가", systemImage: "person.badge.plus")
+                        }
+                    }
+                } else if results.isEmpty && query.isEmpty && !showNewPatient {
+                    // 처음 사용 — 빈 상태
+                    EmptyPatientState {
+                        withAnimation {
+                            showNewPatient = true
+                            newNameFocused = true
                         }
                     }
                 } else {
@@ -107,6 +116,51 @@ struct PatientPickerView: View {
         selectedPatient = patient
         onSelect(patient)
         dismiss()
+    }
+}
+
+// MARK: - 빈 상태
+
+private struct EmptyPatientState: View {
+    let onAdd: () -> Void
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer(minLength: 40)
+
+            ZStack {
+                Circle()
+                    .fill(Color.blue.opacity(0.1))
+                    .frame(width: 88, height: 88)
+                Image(systemName: "person.3.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.blue.opacity(0.7))
+            }
+
+            VStack(spacing: 8) {
+                Text("등록된 환자가 없어요")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Text("치료를 시작하기 전에\n환자를 먼저 등록해주세요")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button(action: onAdd) {
+                Label("첫 번째 환자 추가", systemImage: "person.badge.plus")
+                    .font(.headline)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.blue)
+
+            Spacer()
+        }
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .frame(maxWidth: .infinity)
     }
 }
 
