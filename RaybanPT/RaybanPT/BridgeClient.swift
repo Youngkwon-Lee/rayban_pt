@@ -15,6 +15,7 @@ struct IngestRequest: Codable {
     let text: String?
     let audio_path: String?
     let image_base64: String?
+    let patient_name: String?
 }
 
 struct IngestResponse: Codable {
@@ -54,7 +55,7 @@ final class BridgeClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil)
+        let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil, patient_name: nil)
         req.httpBody = try JSONEncoder().encode(body)
 
         let (data, resp) = try await session.data(for: req)
@@ -122,7 +123,7 @@ final class BridgeClient {
     }
 
     /// 이미지 + 분석 설명을 서버에 업로드 (JSON base64 — Tailscale multipart 502 우회)
-    func uploadImage(_ image: UIImage, description: String, source: String = "rayban-camera") async throws -> IngestResponse {
+    func uploadImage(_ image: UIImage, description: String, patientName: String? = nil, source: String = "rayban-camera") async throws -> IngestResponse {
         guard let url = URL(string: "/ingest", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         guard let imageData = image.jpegData(compressionQuality: 0.6) else { throw BridgeError.network("이미지 변환 실패") }
         let base64Str = imageData.base64EncodedString()
@@ -136,7 +137,8 @@ final class BridgeClient {
             event_type: "image",
             text: description,
             audio_path: nil,
-            image_base64: base64Str
+            image_base64: base64Str,
+            patient_name: patientName
         )
         req.httpBody = try JSONEncoder().encode(body)
 
@@ -155,7 +157,7 @@ final class BridgeClient {
     }
 
     /// MP4 영상 파일을 서버에 업로드 (multipart)
-    func uploadVideo(fileURL: URL, source: String = "rayban-camera") async throws -> UploadAccepted {
+    func uploadVideo(fileURL: URL, patientName: String? = nil, source: String = "rayban-camera") async throws -> UploadAccepted {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { throw BridgeError.fileNotFound }
         guard let url = URL(string: "/ingest-video", relativeTo: baseURL) else { throw BridgeError.invalidURL }
 
@@ -172,6 +174,13 @@ final class BridgeClient {
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"source\"\r\n\r\n")
         body.appendString("\(source)\r\n")
+
+        // 환자 이름
+        if let name = patientName {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"patient_name\"\r\n\r\n")
+            body.appendString("\(name)\r\n")
+        }
 
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"video\"; filename=\"\(filename)\"\r\n")

@@ -4,7 +4,10 @@ import MWDATCore
 struct StreamView: View {
     @State private var vm = StreamViewModel()
     @StateObject private var bridgeVm: AdapterViewModel
+    @State private var store = PatientStore()
 
+    @State private var currentPatient: Patient? = nil
+    @State private var showPatientPicker = false
     @State private var isAnalyzing = false
     @State private var showPhotoSheet = false
     @State private var showChartSheet = false
@@ -37,10 +40,30 @@ struct StreamView: View {
             // 하단 컨트롤바
             controlBar
         }
-        .navigationTitle("Ray-Ban 카메라")
+        .navigationTitle(currentPatient.map { $0.name } ?? "Ray-Ban 카메라")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showPatientPicker = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: currentPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
+                            .foregroundStyle(currentPatient == nil ? .orange : .green)
+                        if let p = currentPatient {
+                            Text(p.name)
+                                .font(.caption)
+                                .foregroundStyle(.white)
+                        }
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showPatientPicker) {
+            PatientPickerView(selectedPatient: $currentPatient, store: store) { _ in }
+        }
         .onAppear { vm.setup() }
         .onDisappear { Task { await vm.tearDown() } }
         // 촬영 리뷰 시트
@@ -178,7 +201,12 @@ struct StreamView: View {
                             try? await Task.sleep(nanoseconds: 120_000_000)
                             isCapturing = false
                         } else {
-                            await vm.startStreaming()
+                            // 환자 미선택 시 picker 먼저
+                            if currentPatient == nil {
+                                showPatientPicker = true
+                            } else {
+                                await vm.startStreaming()
+                            }
                         }
                     }
                 } label: {
@@ -236,13 +264,18 @@ struct StreamView: View {
         if let pose = result.pose { displayParts.append(pose.summary) }
         analysisText = displayParts.joined(separator: "\n")
 
-        var descParts = ["[Ray-Ban 카메라 캡처 분석]", result.summary]
+        let patientTag = currentPatient.map { "환자: \($0.name)" } ?? "환자: 미지정"
+        var descParts = ["[Ray-Ban 카메라 캡처 분석]", patientTag, result.summary]
         if let pose = result.pose { descParts.append(pose.summary) }
         descParts.append("위 이미지를 참고해 임상 메모를 작성해주세요.")
         let description = descParts.joined(separator: "\n")
 
         do {
-            let resp = try await bridgeVm.client.uploadImage(image, description: description)
+            let resp = try await bridgeVm.client.uploadImage(
+                image,
+                description: description,
+                patientName: currentPatient?.name
+            )
             lastEventId = resp.event_id
             analysisText += "\n✅ 차트 생성 완료"
             bridgeVm.markDone()
@@ -260,7 +293,10 @@ struct StreamView: View {
     private func uploadVideo(_ url: URL) async {
         isAnalyzing = true
         do {
-            let accepted = try await bridgeVm.uploadVideo(fileURL: url)
+            let accepted = try await bridgeVm.client.uploadVideo(
+                fileURL: url,
+                patientName: currentPatient?.name
+            )
             lastEventId = accepted.event_id
             analysisText = "✅ 영상 저장됨 (\(accepted.size_kb ?? 0)KB)"
             UINotificationFeedbackGenerator().notificationOccurred(.success)
