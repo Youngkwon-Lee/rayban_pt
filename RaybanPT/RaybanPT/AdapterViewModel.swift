@@ -73,7 +73,9 @@ final class AdapterViewModel: ObservableObject {
             if final.status == "done" {
                 state = .done
                 if let result = final.result {
-                    lastMessage = "done intent=\(result.intent ?? "-") ack=\(result.ack ?? "-") event=\(result.event_id)"
+                    let intent = result.event?.intent ?? result.intent ?? "-"
+                    let eventId = result.event?.id ?? result.event_id ?? "-"
+                    lastMessage = "done intent=\(intent) event=\(eventId)"
                 } else {
                     lastMessage = accepted.message
                 }

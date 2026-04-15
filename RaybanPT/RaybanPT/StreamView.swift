@@ -14,6 +14,7 @@ struct StreamView: View {
     @State private var lastEventId: String? = nil
     @State private var analysisText: String = ""
     @State private var isCapturing = false
+    @State private var toastMessage: String? = nil   // 시트 닫힌 후에도 보이는 토스트
 
     init(client: BridgeClient) {
         _bridgeVm = StateObject(wrappedValue: AdapterViewModel(client: client))
@@ -35,6 +36,20 @@ struct StreamView: View {
                     .padding(.top, 8)
                     .padding(.horizontal, 16)
                 Spacer()
+            }
+
+            // 토스트 (중앙 상단)
+            if let msg = toastMessage {
+                VStack {
+                    Spacer().frame(height: 60)
+                    Text(msg)
+                        .font(.subheadline).fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    Spacer()
+                }
             }
 
             // 하단 컨트롤바
@@ -280,11 +295,13 @@ struct StreamView: View {
             analysisText += "\n✅ 차트 생성 완료"
             bridgeVm.markDone()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast("✅ 차트 저장됨")
         } catch {
             let errMsg = bridgeErrorMessage(error)
             analysisText += "\n⚠️ 업로드 실패 → 텍스트 전송\n\(errMsg)"
             bridgeVm.sendText(description)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showToast("⚠️ 업로드 실패")
         }
 
         isAnalyzing = false
@@ -300,11 +317,20 @@ struct StreamView: View {
             lastEventId = accepted.event_id
             analysisText = "✅ 영상 저장됨 (\(accepted.size_kb ?? 0)KB)"
             UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast("✅ 영상 저장됨")
         } catch {
             analysisText = "⚠️ \(bridgeErrorMessage(error))"
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
         isAnalyzing = false
+    }
+
+    private func showToast(_ message: String) {
+        withAnimation(.spring(response: 0.3)) { toastMessage = message }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000) // 2.5초
+            withAnimation { toastMessage = nil }
+        }
     }
 
     private func bridgeErrorMessage(_ error: Error) -> String {
