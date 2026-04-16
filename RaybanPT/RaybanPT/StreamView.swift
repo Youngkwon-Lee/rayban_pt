@@ -303,6 +303,21 @@ struct StreamView: View {
                     .frame(width: 48, height: 48)
                     .background(.ultraThinMaterial, in: Circle())
             }
+        } else if lastEventId != nil {
+            // 차트 보기 버튼 (전송 완료 후)
+            Button {
+                showChartSheet = true
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color.indigo.opacity(0.85))
+                        .frame(width: 48, height: 48)
+                    Image(systemName: "doc.text.fill")
+                        .font(.system(size: 20))
+                        .foregroundStyle(.white)
+                }
+            }
         } else if let url = vm.recordedVideoURL {
             Button {
                 Task { await uploadVideo(url) }
@@ -353,7 +368,7 @@ struct StreamView: View {
             analysisText += "\n✅ 차트 생성 완료"
             bridgeVm.markDone()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
-            showToast("✅ 차트 저장됨")
+            showToast("✅ 차트 저장됨 — 오른쪽 📄 버튼으로 보기")
         } catch {
             let errMsg = bridgeErrorMessage(error)
             analysisText += "\n⚠️ 업로드 실패 → 텍스트 전송\n\(errMsg)"
