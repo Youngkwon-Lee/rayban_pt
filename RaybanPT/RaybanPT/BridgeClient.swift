@@ -33,14 +33,8 @@ struct UploadAccepted: Codable {
     let size_kb: Int?
 }
 
-// 서버 result 내부 event 필드
 struct EventResult: Codable {
     let event: EventDetail?
-    let soap: SoapDetail?
-    // 구형 응답 호환 (event_id, intent, ack 직접 포함)
-    let event_id: String?
-    let intent: String?
-    let ack: String?
 }
 
 struct EventDetail: Codable {
@@ -53,12 +47,6 @@ struct EventDetail: Codable {
     let created_at: String?
 }
 
-struct SoapDetail: Codable {
-    let s: String?
-    let o: String?
-    let a: String?
-    let p: String?
-}
 
 struct EventStatusResponse: Codable {
     let status: String
@@ -66,10 +54,7 @@ struct EventStatusResponse: Codable {
     let error: String?
     let result: EventResult?
 
-    // 하위 호환: event_id 추출
-    var eventId: String? {
-        result?.event?.id ?? result?.event_id
-    }
+    var eventId: String? { result?.event?.id }
 }
 
 final class BridgeClient {
@@ -190,7 +175,6 @@ final class BridgeClient {
 
     /// MP4 영상 파일을 서버에 업로드 (multipart)
     func uploadVideo(fileURL: URL, patientName: String? = nil, source: String = "rayban-camera") async throws -> UploadAccepted {
-        guard FileManager.default.fileExists(atPath: fileURL.path) else { throw BridgeError.fileNotFound }
         guard let url = URL(string: "/ingest-video", relativeTo: baseURL) else { throw BridgeError.invalidURL }
 
         let boundary = "Boundary-\(UUID().uuidString)"

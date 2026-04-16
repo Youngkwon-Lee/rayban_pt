@@ -3,7 +3,6 @@ import SwiftUI
 struct PatientPickerView: View {
     @Binding var selectedPatient: Patient?
     let store: PatientStore
-    let onSelect: (Patient) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -104,17 +103,14 @@ struct PatientPickerView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         store.touch(name: patient.name)
         selectedPatient = patient
-        onSelect(patient)
         dismiss()
     }
 
     private func confirmNew() {
         let trimmed = newName.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        let patient = store.touch(name: trimmed)
+        selectedPatient = store.touch(name: trimmed)
         UINotificationFeedbackGenerator().notificationOccurred(.success)
-        selectedPatient = patient
-        onSelect(patient)
         dismiss()
     }
 }
@@ -212,15 +208,20 @@ private struct PatientRow: View {
     }
 
     private func relativeDate(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.locale = Locale(identifier: "ko_KR")
-        formatter.unitsStyle = .abbreviated
-        return "마지막 방문: " + formatter.localizedString(for: date, relativeTo: .now)
+        "마지막 방문: " + Self.relativeDateFormatter.localizedString(for: date, relativeTo: .now)
     }
 
     private func avatarColor(for name: String) -> Color {
         let colors: [Color] = [.blue, .purple, .pink, .orange, .teal, .indigo, .green]
-        let hash = abs(name.hashValue)
-        return colors[hash % colors.count]
+        // hashValue는 앱 재시작마다 달라지므로 UTF-8 바이트 합산으로 안정적 해시 사용
+        let hash = name.utf8.reduce(0) { ($0 &* 31) &+ Int($1) }
+        return colors[abs(hash) % colors.count]
     }
+
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.locale = Locale(identifier: "ko_KR")
+        f.unitsStyle = .abbreviated
+        return f
+    }()
 }

@@ -41,7 +41,9 @@ final class AdapterViewModel: ObservableObject {
                 if final.status == "done" {
                     state = .done
                     if let res = final.result {
-                        lastMessage = "done intent=\(res.intent ?? "-") ack=\(res.ack ?? "-") event=\(res.event_id)"
+                        let intent = res.event?.intent ?? "-"
+                        let eventId = res.event?.id ?? "-"
+                        lastMessage = "done intent=\(intent) event=\(eventId)"
                     } else {
                         lastMessage = "done (no payload)"
                     }
@@ -73,8 +75,8 @@ final class AdapterViewModel: ObservableObject {
             if final.status == "done" {
                 state = .done
                 if let result = final.result {
-                    let intent = result.event?.intent ?? result.intent ?? "-"
-                    let eventId = result.event?.id ?? result.event_id ?? "-"
+                    let intent = result.event?.intent ?? "-"
+                    let eventId = result.event?.id ?? "-"
                     lastMessage = "done intent=\(intent) event=\(eventId)"
                 } else {
                     lastMessage = accepted.message

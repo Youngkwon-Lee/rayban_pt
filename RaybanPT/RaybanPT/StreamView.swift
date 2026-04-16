@@ -18,9 +18,9 @@ struct StreamView: View {
 
     // STT
     @State private var audioRecorder = AudioRecorder()
-    @State private var sttText: String = ""          // Whisper 변환 결과 (누적)
-    @State private var isTranscribing = false        // 업로드/폴링 중
-    @State private var sttError: String? = nil
+    @State private var sttText: String = ""       // Whisper 변환 결과 (누적)
+    @State private var isTranscribing = false
+    @State private var toastTask: Task<Void, Never>? = nil
 
     init(client: BridgeClient) {
         _bridgeVm = StateObject(wrappedValue: AdapterViewModel(client: client))
@@ -91,7 +91,11 @@ struct StreamView: View {
             }
         }
         .sheet(isPresented: $showPatientPicker) {
-            PatientPickerView(selectedPatient: $currentPatient, store: store) { _ in }
+            PatientPickerView(selectedPatient: $currentPatient, store: store)
+        }
+        .onChange(of: currentPatient?.id) { _, _ in
+            // 환자 변경 시 STT 텍스트 초기화
+            withAnimation { sttText = "" }
         }
         .onAppear { vm.setup() }
         .onDisappear { Task { await vm.tearDown() } }
@@ -405,31 +409,23 @@ struct StreamView: View {
         guard let fileURL = audioRecorder.recordedFileURL else { return }
 
         isTranscribing = true
-        sttError = nil
 
         do {
-            // 1) 업로드
             let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL)
-
-            // 2) 폴링 → Whisper raw_text 추출
             let final = try await bridgeVm.client.waitUntilDone(eventId: accepted.event_id)
             let transcript = final.result?.event?.raw_text ?? ""
 
             if transcript.isEmpty {
-                sttError = "변환 결과 없음"
+                showToast("🎙 변환 결과 없음")
             } else {
-                // 기존 메모에 누적 (세션 중 여러 번 말할 수 있음)
                 withAnimation {
-                    sttText = sttText.isEmpty
-                        ? transcript
-                        : sttText + "\n" + transcript
+                    sttText = sttText.isEmpty ? transcript : sttText + "\n" + transcript
                 }
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 showToast("🎙 변환 완료")
             }
         } catch {
-            sttError = bridgeErrorMessage(error)
-            showToast("⚠️ 변환 실패")
+            showToast("⚠️ 변환 실패: \(bridgeErrorMessage(error))")
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
 
@@ -437,9 +433,11 @@ struct StreamView: View {
     }
 
     private func showToast(_ message: String) {
+        toastTask?.cancel()
         withAnimation(.spring(response: 0.3)) { toastMessage = message }
-        Task {
-            try? await Task.sleep(nanoseconds: 2_500_000_000) // 2.5초
+        toastTask = Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
             withAnimation { toastMessage = nil }
         }
     }

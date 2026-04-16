@@ -13,8 +13,7 @@ struct Patient: Identifiable, Codable, Hashable {
         self.lastSeen = lastSeen
     }
 
-    /// 차트에 표시될 짧은 식별자 (UUID 앞 8자리)
-    var shortId: String { id.uuidString.prefix(8).lowercased() }
+
 }
 
 // MARK: - PatientStore
