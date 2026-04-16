@@ -387,17 +387,42 @@ struct StreamView: View {
     private func uploadVideo(_ url: URL) async {
         isAnalyzing = true
         do {
+            // 1) 업로드 → outer event_id 수신
             let accepted = try await bridgeVm.client.uploadVideo(
                 fileURL: url,
                 patientName: currentPatient?.name
             )
-            lastEventId = accepted.event_id
-            analysisText = "✅ 영상 저장됨 (\(accepted.size_kb ?? 0)KB)"
-            UINotificationFeedbackGenerator().notificationOccurred(.success)
-            showToast("✅ 영상 저장됨")
+            lastEventId = accepted.event_id          // 우선 outer id로 차트 버튼 활성화
+            analysisText = "⚙️ 처리 중... (\(accepted.size_kb ?? 0)KB)"
+            showToast("⚙️ 영상 분석 중...")
+
+            // 2) 백그라운드 폴링 — 완료 시 toast 업데이트 (최대 60초)
+            Task {
+                let final = try? await bridgeVm.client.waitUntilDone(
+                    eventId: accepted.event_id,
+                    maxTries: 60,
+                    intervalSec: 1.0
+                )
+                await MainActor.run {
+                    if final?.status == "done" {
+                        // inner event_id가 있으면 교체 (차트 파일이 거기에 있음)
+                        if let innerId = final?.result?.event?.id {
+                            lastEventId = innerId
+                        }
+                        analysisText = "📄 차트 생성됨"
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        showToast("📄 차트 생성 완료 — 버튼을 눌러 확인하세요")
+                    } else if final?.status == "error" {
+                        analysisText = "⚠️ \(final?.error ?? "처리 오류")"
+                        showToast("⚠️ 처리 실패")
+                    }
+                    // timeout이면 lastEventId(outer) 유지 — 서버 측 차트 복사로 조회 가능
+                }
+            }
         } catch {
             analysisText = "⚠️ \(bridgeErrorMessage(error))"
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+            showToast("⚠️ 업로드 실패")
         }
         isAnalyzing = false
     }

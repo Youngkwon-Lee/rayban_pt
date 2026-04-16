@@ -59,7 +59,10 @@ private final class ChartViewModel {
     var rawText: String = ""
 
     let eventId: String
-    private let baseURL = URL(string: "http://YOUR_SERVER_HOST:8791")!
+    private let baseURL: URL = {
+        let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+        return URL(string: stored) ?? URL(string: "http://localhost:8791")!
+    }()
 
     init(eventId: String) {
         self.eventId = eventId

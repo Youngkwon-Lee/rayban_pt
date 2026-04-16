@@ -9,7 +9,12 @@ struct M2_TestView: View {
 
     enum Tab { case audio, text, camera }
 
-    init(baseURL: URL = URL(string: "http://YOUR_SERVER_HOST:8791")!) {
+    static var defaultBridgeURL: URL {
+        let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+        return URL(string: stored) ?? URL(string: "http://localhost:8791")!
+    }
+
+    init(baseURL: URL = M2_TestView.defaultBridgeURL) {
         _vm = StateObject(wrappedValue: AdapterViewModel(client: BridgeClient(baseURL: baseURL)))
     }
 

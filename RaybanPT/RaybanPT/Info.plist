@@ -67,9 +67,9 @@
 		<key>AppLinkURLScheme</key>
 		<string>raybanpt://</string>
 		<key>MetaAppID</key>
-		<string>REDACTED_META_APP_ID</string>
+		<string>$(META_APP_ID)</string>
 		<key>ClientToken</key>
-		<string>REDACTED_META_CLIENT_TOKEN</string>
+		<string>$(META_CLIENT_TOKEN)</string>
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
 	</dict>
