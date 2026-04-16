@@ -14,7 +14,13 @@ struct StreamView: View {
     @State private var lastEventId: String? = nil
     @State private var analysisText: String = ""
     @State private var isCapturing = false
-    @State private var toastMessage: String? = nil   // 시트 닫힌 후에도 보이는 토스트
+    @State private var toastMessage: String? = nil
+
+    // STT
+    @State private var audioRecorder = AudioRecorder()
+    @State private var sttText: String = ""          // Whisper 변환 결과 (누적)
+    @State private var isTranscribing = false        // 업로드/폴링 중
+    @State private var sttError: String? = nil
 
     init(client: BridgeClient) {
         _bridgeVm = StateObject(wrappedValue: AdapterViewModel(client: client))
@@ -31,24 +37,32 @@ struct StreamView: View {
                 .ignoresSafeArea(edges: .top)
 
             // 상단 오버레이
-            VStack {
+            VStack(spacing: 8) {
                 statusPill
                     .padding(.top, 8)
                     .padding(.horizontal, 16)
+
+                // STT 결과 pill
+                if !sttText.isEmpty || isTranscribing {
+                    sttPill
+                        .padding(.horizontal, 16)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
                 Spacer()
             }
 
-            // 토스트 (중앙 상단)
+            // 토스트 (중앙)
             if let msg = toastMessage {
                 VStack {
-                    Spacer().frame(height: 60)
+                    Spacer()
                     Text(msg)
                         .font(.subheadline).fontWeight(.medium)
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16).padding(.vertical, 10)
                         .background(.ultraThinMaterial, in: Capsule())
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    Spacer()
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    Spacer().frame(height: 160)
                 }
             }
 
@@ -174,6 +188,42 @@ struct StreamView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // MARK: - STT Pill
+
+    private var sttPill: some View {
+        HStack(spacing: 8) {
+            if isTranscribing {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.7)
+                    .tint(.white)
+                Text("변환 중...")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.8))
+            } else {
+                Image(systemName: "text.bubble.fill")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+                Text(sttText)
+                    .font(.caption)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // 지우기
+                Button {
+                    withAnimation { sttText = "" }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.white.opacity(0.6))
+                        .font(.caption)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
     // MARK: - 하단 컨트롤바
 
     private var controlBar: some View {
@@ -188,21 +238,22 @@ struct StreamView: View {
             }
 
             HStack(spacing: 0) {
-                // 왼쪽: 녹화 버튼
+                // 왼쪽: 마이크(STT) 버튼
                 Button {
                     Task {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        if vm.recorder.isRecording {
-                            await vm.stopRecording()
+                        if audioRecorder.isRecording {
+                            await stopAndTranscribe()
                         } else {
-                            vm.startRecording()
+                            await audioRecorder.startRecording()
                         }
                     }
                 } label: {
-                    RecordButton(isRecording: vm.recorder.isRecording)
+                    MicButton(
+                        isRecording: audioRecorder.isRecording,
+                        isTranscribing: isTranscribing
+                    )
                 }
-                .disabled(!vm.isStreaming)
-                .opacity(!vm.isStreaming ? 0.35 : 1.0)
                 .frame(maxWidth: .infinity)
 
                 // 중앙: 촬영 / 스트리밍 토글
@@ -280,9 +331,16 @@ struct StreamView: View {
         analysisText = displayParts.joined(separator: "\n")
 
         let patientTag = currentPatient.map { "환자: \($0.name)" } ?? "환자: 미지정"
-        var descParts = ["[Ray-Ban 카메라 캡처 분석]", patientTag, result.summary]
+        var descParts = ["[Ray-Ban 카메라 캡처 분석]", patientTag]
+
+        // STT 음성 메모가 있으면 S> 섹션 힌트로 포함
+        if !sttText.isEmpty {
+            descParts.append("[치료사 음성 메모 — S> 섹션 참고]\n\(sttText)")
+        }
+
+        descParts.append(result.summary)
         if let pose = result.pose { descParts.append(pose.summary) }
-        descParts.append("위 이미지를 참고해 임상 메모를 작성해주세요.")
+        descParts.append("위 이미지와 음성 메모를 참고해 임상 차트를 작성해주세요.")
         let description = descParts.joined(separator: "\n")
 
         do {
@@ -325,6 +383,44 @@ struct StreamView: View {
         isAnalyzing = false
     }
 
+    // MARK: - STT
+
+    private func stopAndTranscribe() async {
+        audioRecorder.stopRecording()
+        guard let fileURL = audioRecorder.recordedFileURL else { return }
+
+        isTranscribing = true
+        sttError = nil
+
+        do {
+            // 1) 업로드
+            let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL)
+
+            // 2) 폴링 → Whisper raw_text 추출
+            let final = try await bridgeVm.client.waitUntilDone(eventId: accepted.event_id)
+            let transcript = final.result?.event?.raw_text ?? ""
+
+            if transcript.isEmpty {
+                sttError = "변환 결과 없음"
+            } else {
+                // 기존 메모에 누적 (세션 중 여러 번 말할 수 있음)
+                withAnimation {
+                    sttText = sttText.isEmpty
+                        ? transcript
+                        : sttText + "\n" + transcript
+                }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                showToast("🎙 변환 완료")
+            }
+        } catch {
+            sttError = bridgeErrorMessage(error)
+            showToast("⚠️ 변환 실패")
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+
+        isTranscribing = false
+    }
+
     private func showToast(_ message: String) {
         withAnimation(.spring(response: 0.3)) { toastMessage = message }
         Task {
@@ -343,6 +439,35 @@ struct StreamView: View {
             case .invalidURL: return "URL 오류"
             }
         } ?? error.localizedDescription
+    }
+}
+
+// MARK: - 마이크 버튼 컴포넌트
+
+private struct MicButton: View {
+    let isRecording: Bool
+    let isTranscribing: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(isRecording ? Color.red : Color.white.opacity(0.5), lineWidth: 2)
+                .frame(width: 48, height: 48)
+
+            if isTranscribing {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(0.8)
+            } else {
+                Image(systemName: isRecording ? "stop.fill" : "mic.fill")
+                    .font(.system(size: isRecording ? 18 : 20))
+                    .foregroundStyle(isRecording ? .red : .white)
+                    .scaleEffect(isRecording ? 1.1 : 1.0)
+                    .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true),
+                               value: isRecording)
+            }
+        }
     }
 }
 
