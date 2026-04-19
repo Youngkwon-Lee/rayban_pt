@@ -12,6 +12,7 @@ struct StreamView: View {
     @State private var isAnalyzing = false
     @State private var showPhotoSheet = false
     @State private var showChartSheet = false
+    @State private var showLabelSheet = false
     @State private var lastEventId: String? = nil
     @State private var analysisText: String = ""
     @State private var isCapturing = false
@@ -117,6 +118,12 @@ struct StreamView: View {
                 NavigationStack {
                     ChartDetailView(eventId: eventId, client: bridgeVm.client)
                 }
+            }
+        }
+        // 라벨링 시트
+        .sheet(isPresented: $showLabelSheet) {
+            if let eventId = lastEventId {
+                LabelingView(eventId: eventId, client: bridgeVm.client)
             }
         }
         .onChange(of: vm.capturedPhoto) { _, newPhoto in
@@ -348,18 +355,35 @@ struct StreamView: View {
                     .background(Color.red.opacity(0.88), in: Circle())
             }
         } else if lastEventId != nil {
-            // 차트 보기 버튼 (전송 완료 후)
-            Button {
-                showChartSheet = true
-                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            } label: {
-                ZStack {
-                    Circle()
-                        .fill(Color.indigo.opacity(0.9))
-                        .frame(width: 52, height: 52)
-                    Image(systemName: "doc.text.fill")
-                        .font(.system(size: 20))
-                        .foregroundStyle(.white)
+            // 완료 후 버튼 그룹
+            HStack(spacing: 16) {
+                // 라벨링 버튼
+                Button {
+                    showLabelSheet = true
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.orange.opacity(0.9))
+                            .frame(width: 52, height: 52)
+                        Image(systemName: "tag.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.white)
+                    }
+                }
+                // 차트 보기 버튼
+                Button {
+                    showChartSheet = true
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    ZStack {
+                        Circle()
+                            .fill(Color.indigo.opacity(0.9))
+                            .frame(width: 52, height: 52)
+                        Image(systemName: "doc.text.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(.white)
+                    }
                 }
             }
         } else if let url = vm.recordedVideoURL {

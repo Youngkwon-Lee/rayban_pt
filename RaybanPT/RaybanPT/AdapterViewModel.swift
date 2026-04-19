@@ -5,6 +5,7 @@ internal import Combine
 final class AdapterViewModel: ObservableObject {
     @Published var state: AdapterState = .idle
     @Published var lastMessage: String = ""
+    @Published var lastEventId: String? = nil   // 완료된 가장 최근 event_id
 
     let client: BridgeClient
 
@@ -17,6 +18,7 @@ final class AdapterViewModel: ObservableObject {
             do {
                 state = .connecting
                 let r = try await client.sendText(text, patientName: patientName)
+                lastEventId = r.event_id
                 state = .done
                 lastMessage = "ack=\(r.ack ?? "-") intent=\(r.intent ?? "-") event=\(r.event_id)"
             } catch {
@@ -39,6 +41,9 @@ final class AdapterViewModel: ObservableObject {
 
                 let final = try await client.waitUntilDone(eventId: accepted.event_id)
                 if final.status == "done" {
+                    if let eventId = final.result?.event?.id {
+                        lastEventId = eventId
+                    }
                     state = .done
                     if let res = final.result {
                         let intent = res.event?.intent ?? "-"

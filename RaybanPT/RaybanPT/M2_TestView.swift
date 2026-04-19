@@ -8,6 +8,14 @@ struct M2_TestView: View {
     @State private var selectedTab: Tab = .camera
     @State private var showServerSetup = false
 
+    // 업로드 완료 액션
+    @State private var showPostUploadDialog = false
+    @State private var showPostLabelSheet = false
+    @State private var showPostChartSheet = false
+
+    // 미라벨 뱃지
+    @State private var unlabeledBadge = 0
+
     enum Tab { case audio, text, camera, charts }
 
     static var defaultBridgeURL: URL {
@@ -56,6 +64,7 @@ struct M2_TestView: View {
             ChartListView(client: vm.client)
             .tabItem { Label("차트", systemImage: "doc.text.fill") }
             .tag(Tab.charts)
+            .badge(unlabeledBadge > 0 ? unlabeledBadge : 0)
         }
         .overlay(alignment: .top) {
             if selectedTab == .camera {
@@ -79,6 +88,40 @@ struct M2_TestView: View {
             .padding(.trailing, 16)
         }
         .animation(.spring(response: 0.3), value: selectedTab)
+        // MARK: 업로드 완료 다이얼로그
+        .confirmationDialog("차트가 생성됐어요 ✓", isPresented: $showPostUploadDialog, titleVisibility: .visible) {
+            Button("🏷 지금 라벨링하기") {
+                showPostLabelSheet = true
+            }
+            Button("📄 차트 보기") {
+                showPostChartSheet = true
+            }
+            Button("나중에", role: .cancel) { }
+        }
+        .sheet(isPresented: $showPostLabelSheet) {
+            if let id = vm.lastEventId {
+                LabelingView(eventId: id, client: vm.client)
+                    .onDisappear { Task { await refreshBadge() } }
+            }
+        }
+        .sheet(isPresented: $showPostChartSheet) {
+            if let id = vm.lastEventId {
+                NavigationStack {
+                    ChartDetailView(eventId: id, client: vm.client)
+                }
+            }
+        }
+        // 업로드 완료 감지
+        .onChange(of: vm.state) { _, newState in
+            if case .done = newState, vm.lastEventId != nil {
+                showPostUploadDialog = true
+                Task { await refreshBadge() }
+            }
+        }
+        // 차트 탭 진입 시 뱃지 갱신
+        .onChange(of: selectedTab) { _, tab in
+            if tab == .charts { Task { await refreshBadge() } }
+        }
         .sheet(isPresented: $showServerSetup) {
             ServerSetupSheet { newURL, newAPIKey in
                 UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
@@ -87,9 +130,16 @@ struct M2_TestView: View {
                 vm.client.updateAPIKey(newAPIKey)
             }
         }
+        .task { await refreshBadge() }
         .onAppear {
             if needsServerSetup { showServerSetup = true }
         }
+    }
+
+    // MARK: - 미라벨 뱃지 갱신
+    private func refreshBadge() async {
+        guard let events = try? await vm.client.recentEvents(limit: 50) else { return }
+        unlabeledBadge = events.filter { !$0.has_label }.count
     }
 }
 
