@@ -293,6 +293,67 @@ final class BridgeClient {
         let chart: String
     }
 
+    // MARK: - 라벨링
+
+    struct RehabLabel: Codable {
+        let event_id: String
+        let session_type: String
+        let core_task: String
+        let assist_level: String
+        let performance: String
+        let flags: [String]
+        let notes: String
+        let updated_at: String?
+    }
+
+    struct LabelResponse: Codable {
+        let event_id: String
+        let label: RehabLabel?
+    }
+
+    struct SaveLabelResponse: Codable {
+        let ok: Bool
+        let label: RehabLabel?
+    }
+
+    func fetchLabel(eventId: String) async throws -> RehabLabel? {
+        guard let url = URL(string: "/labels/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        if http.statusCode == 404 { return nil }
+        guard (200..<300).contains(http.statusCode) else {
+            throw BridgeError.badStatus(http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return (try JSONDecoder().decode(LabelResponse.self, from: data)).label
+    }
+
+    func saveLabel(eventId: String, sessionType: String, coreTask: String,
+                   assistLevel: String, performance: String,
+                   flags: [String], notes: String) async throws -> RehabLabel? {
+        guard let url = URL(string: "/labels/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+        let body: [String: Any] = [
+            "session_type": sessionType,
+            "core_task": coreTask,
+            "assist_level": assistLevel,
+            "performance": performance,
+            "flags": flags,
+            "notes": notes
+        ]
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                        body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return (try JSONDecoder().decode(SaveLabelResponse.self, from: data)).label
+    }
+
     func recentEvents(limit: Int = 20) async throws -> [RecentEvent] {
         guard let url = URL(string: "/recent-events?limit=\(limit)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)

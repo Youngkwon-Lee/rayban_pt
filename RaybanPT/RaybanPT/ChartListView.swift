@@ -298,6 +298,12 @@ private struct ChartRowView: View {
                                     in: Capsule())
                         .foregroundStyle(event.status == "processed" ? .green : .orange)
 
+                    if event.has_label {
+                        Label("라벨됨", systemImage: "tag.fill")
+                            .font(.caption2).foregroundStyle(.orange)
+                            .labelStyle(.iconOnly)
+                    }
+
                     if let intent = event.intent {
                         Text(intent)
                             .font(.caption2).foregroundStyle(.secondary)

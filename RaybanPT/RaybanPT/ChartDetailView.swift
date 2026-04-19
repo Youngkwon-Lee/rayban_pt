@@ -110,6 +110,8 @@ struct ChartDetailView: View {
     let client: BridgeClient
     @State private var vm: ChartDetailViewModel
     @State private var showShareSheet = false
+    @State private var showLabelSheet = false
+    @State private var hasLabel = false
 
     init(eventId: String, client: BridgeClient) {
         self.eventId = eventId
@@ -131,18 +133,45 @@ struct ChartDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showShareSheet = true
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
+                HStack(spacing: 12) {
+                    // 라벨링 버튼
+                    Button {
+                        showLabelSheet = true
+                    } label: {
+                        Image(systemName: hasLabel ? "tag.fill" : "tag")
+                            .foregroundStyle(hasLabel ? .orange : .primary)
+                    }
+                    // 공유 버튼
+                    Button {
+                        showShareSheet = true
+                    } label: {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                    .disabled(vm.rawText.isEmpty)
                 }
-                .disabled(vm.rawText.isEmpty)
             }
         }
         .sheet(isPresented: $showShareSheet) {
             ShareSheet(text: vm.rawText)
         }
-        .task { await vm.load() }
+        .sheet(isPresented: $showLabelSheet) {
+            LabelingView(eventId: eventId, client: client)
+                .onDisappear {
+                    // 라벨 저장 후 뱃지 업데이트
+                    Task {
+                        if let label = try? await client.fetchLabel(eventId: eventId) {
+                            hasLabel = label != nil
+                        }
+                    }
+                }
+        }
+        .task {
+            await vm.load()
+            // 라벨 존재 여부 체크
+            if let label = try? await client.fetchLabel(eventId: eventId) {
+                hasLabel = label != nil
+            }
+        }
     }
 
     // MARK: 로딩
