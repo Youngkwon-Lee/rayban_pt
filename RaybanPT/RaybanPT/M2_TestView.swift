@@ -6,6 +6,7 @@ struct M2_TestView: View {
     @StateObject private var vm: AdapterViewModel
     @Environment(DeviceSessionManager.self) private var deviceManager
     @State private var selectedTab: Tab = .camera
+    @State private var showServerSetup = false
 
     enum Tab { case audio, text, camera }
 
@@ -18,43 +19,114 @@ struct M2_TestView: View {
         _vm = StateObject(wrappedValue: AdapterViewModel(client: BridgeClient(baseURL: baseURL)))
     }
 
+    /// 서버 URL 미설정 시 첫 실행에 setup sheet 자동 표시
+    var needsServerSetup: Bool {
+        let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+        return stored.isEmpty
+    }
+
     var body: some View {
         TabView(selection: $selectedTab) {
             // 카메라 탭
             NavigationStack {
                 StreamView(client: vm.client)
             }
-            .tabItem {
-                Label("카메라", systemImage: "video.fill")
-            }
+            .tabItem { Label("카메라", systemImage: "video.fill") }
             .tag(Tab.camera)
 
             // 음성 탭
             NavigationStack {
                 AudioTab(vm: vm)
             }
-            .tabItem {
-                Label("음성", systemImage: "mic.fill")
-            }
+            .tabItem { Label("음성", systemImage: "mic.fill") }
             .tag(Tab.audio)
 
             // 텍스트 탭
             NavigationStack {
                 TextTab(vm: vm)
             }
-            .tabItem {
-                Label("텍스트", systemImage: "text.bubble.fill")
-            }
+            .tabItem { Label("텍스트", systemImage: "text.bubble.fill") }
             .tag(Tab.text)
         }
         .overlay(alignment: .top) {
-            // 기기 연결 상태 배너 (카메라 탭에서만)
             if selectedTab == .camera {
                 DeviceStatusBanner(deviceManager: deviceManager)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .overlay(alignment: .bottomTrailing) {
+            // 서버 설정 버튼 (항상 접근 가능)
+            Button {
+                showServerSetup = true
+            } label: {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(needsServerSetup ? .orange : .white.opacity(0.5))
+                    .padding(10)
+                    .background(needsServerSetup ? Color.orange.opacity(0.2) : DS.ColorToken.surface,
+                                in: Circle())
+            }
+            .padding(.bottom, 68)
+            .padding(.trailing, 16)
+        }
         .animation(.spring(response: 0.3), value: selectedTab)
+        .sheet(isPresented: $showServerSetup) {
+            ServerSetupSheet { newURL in
+                UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
+                vm.client.updateBaseURL(URL(string: newURL)!)
+            }
+        }
+        .onAppear {
+            if needsServerSetup { showServerSetup = true }
+        }
+    }
+}
+
+// MARK: - 서버 설정 Sheet
+
+private struct ServerSetupSheet: View {
+    let onSave: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var urlText: String = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+
+    var isValid: Bool {
+        URL(string: urlText)?.scheme?.hasPrefix("http") == true
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("http://서버주소:8791", text: $urlText)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    Text("서버 URL")
+                } footer: {
+                    Text("Tailscale 연결 시 예시:\nhttp://desktop-xxxxx.tailde3b80.ts.net:8791")
+                        .font(.caption)
+                }
+
+                Section {
+                    Button("저장") {
+                        let trimmed = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onSave(trimmed)
+                        dismiss()
+                    }
+                    .disabled(!isValid)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .foregroundStyle(isValid ? .blue : .gray)
+                }
+            }
+            .navigationTitle("서버 설정")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("닫기") { dismiss() }
+                }
+            }
+        }
     }
 }
 

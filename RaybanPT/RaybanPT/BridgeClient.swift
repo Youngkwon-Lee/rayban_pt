@@ -58,12 +58,17 @@ struct EventStatusResponse: Codable {
 }
 
 final class BridgeClient {
-    private let baseURL: URL
+    private(set) var baseURL: URL
     private let session: URLSession
 
     init(baseURL: URL, session: URLSession = .shared) {
         self.baseURL = baseURL
         self.session = session
+    }
+
+    /// 런타임에 서버 URL 변경 (UserDefaults 설정 후 적용)
+    func updateBaseURL(_ url: URL) {
+        self.baseURL = url
     }
 
     func sendText(_ text: String, source: String = "iphone-rayban") async throws -> IngestResponse {
