@@ -39,9 +39,13 @@ struct StreamView: View {
 
             // 상단 오버레이
             VStack(spacing: 8) {
-                statusPill
-                    .padding(.top, 8)
-                    .padding(.horizontal, 16)
+                // 스트리밍 중일 때만 상태 pill 표시 (비스트리밍 시 DeviceStatusBanner가 대신함)
+                if vm.isStreaming || vm.recorder.isRecording {
+                    statusPill
+                        .padding(.top, 8)
+                        .padding(.horizontal, 16)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
 
                 // STT 결과 pill
                 if !sttText.isEmpty || isTranscribing {
@@ -52,6 +56,7 @@ struct StreamView: View {
 
                 Spacer()
             }
+            .animation(.spring(response: 0.3), value: vm.isStreaming)
 
             // 토스트 (중앙)
             if let msg = toastMessage {
