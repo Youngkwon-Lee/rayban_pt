@@ -1,0 +1,16 @@
+[Unit]
+Description=RayBan Local Bridge Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/yk/.openclaw/workspace/rayban-local-bridge
+ExecStart=/home/yk/.local/bin/uv run uvicorn app:app --host 0.0.0.0 --port 8791
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
