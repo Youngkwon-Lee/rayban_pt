@@ -15,8 +15,12 @@ struct M2_TestView: View {
         return URL(string: stored) ?? URL(string: "http://localhost:8791")!
     }
 
-    init(baseURL: URL = M2_TestView.defaultBridgeURL) {
-        _vm = StateObject(wrappedValue: AdapterViewModel(client: BridgeClient(baseURL: baseURL)))
+    static var defaultAPIKey: String {
+        UserDefaults.standard.string(forKey: "bridge_api_key") ?? ""
+    }
+
+    init(baseURL: URL = M2_TestView.defaultBridgeURL, apiKey: String = M2_TestView.defaultAPIKey) {
+        _vm = StateObject(wrappedValue: AdapterViewModel(client: BridgeClient(baseURL: baseURL, apiKey: apiKey)))
     }
 
     /// 서버 URL 미설정 시 첫 실행에 setup sheet 자동 표시
@@ -71,9 +75,11 @@ struct M2_TestView: View {
         }
         .animation(.spring(response: 0.3), value: selectedTab)
         .sheet(isPresented: $showServerSetup) {
-            ServerSetupSheet { newURL in
+            ServerSetupSheet { newURL, newAPIKey in
                 UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
+                UserDefaults.standard.set(newAPIKey, forKey: "bridge_api_key")
                 vm.client.updateBaseURL(URL(string: newURL)!)
+                vm.client.updateAPIKey(newAPIKey)
             }
         }
         .onAppear {
@@ -85,9 +91,10 @@ struct M2_TestView: View {
 // MARK: - 서버 설정 Sheet
 
 private struct ServerSetupSheet: View {
-    let onSave: (String) -> Void
+    let onSave: (String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var urlText: String = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+    @State private var apiKeyText: String = UserDefaults.standard.string(forKey: "bridge_api_key") ?? ""
 
     var isValid: Bool {
         URL(string: urlText)?.scheme?.hasPrefix("http") == true
@@ -109,9 +116,21 @@ private struct ServerSetupSheet: View {
                 }
 
                 Section {
+                    TextField("API 키 (선택)", text: $apiKeyText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    Text("API 키")
+                } footer: {
+                    Text("서버에 BRIDGE_API_KEY 설정된 경우 입력하세요.")
+                        .font(.caption)
+                }
+
+                Section {
                     Button("저장") {
-                        let trimmed = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onSave(trimmed)
+                        let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let trimmedKey = apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        onSave(trimmedURL, trimmedKey)
                         dismiss()
                     }
                     .disabled(!isValid)

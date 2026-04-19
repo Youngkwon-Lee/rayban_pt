@@ -59,16 +59,29 @@ struct EventStatusResponse: Codable {
 
 final class BridgeClient {
     private(set) var baseURL: URL
+    private(set) var apiKey: String
     private let session: URLSession
 
-    init(baseURL: URL, session: URLSession = .shared) {
+    init(baseURL: URL, apiKey: String = "", session: URLSession = .shared) {
         self.baseURL = baseURL
+        self.apiKey = apiKey
         self.session = session
     }
 
     /// 런타임에 서버 URL 변경 (UserDefaults 설정 후 적용)
     func updateBaseURL(_ url: URL) {
         self.baseURL = url
+    }
+
+    func updateAPIKey(_ key: String) {
+        self.apiKey = key
+    }
+
+    /// API 키 헤더를 URLRequest에 추가
+    private func addAuth(_ req: inout URLRequest) {
+        if !apiKey.isEmpty {
+            req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
     }
 
     func sendText(_ text: String, source: String = "iphone-rayban") async throws -> IngestResponse {
@@ -79,6 +92,7 @@ final class BridgeClient {
 
         let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil, patient_name: nil)
         req.httpBody = try JSONEncoder().encode(body)
+        addAuth(&req)
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -129,6 +143,7 @@ final class BridgeClient {
 
         body.appendString("--\(boundary)--\r\n")
         req.httpBody = body
+        addAuth(&req)
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -163,6 +178,7 @@ final class BridgeClient {
             patient_name: patientName
         )
         req.httpBody = try JSONEncoder().encode(body)
+        addAuth(&req)
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -210,6 +226,7 @@ final class BridgeClient {
         body.appendString("\r\n")
         body.appendString("--\(boundary)--\r\n")
         req.httpBody = body
+        addAuth(&req)
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -226,7 +243,9 @@ final class BridgeClient {
 
     func getEvent(_ eventId: String) async throws -> EventStatusResponse {
         guard let url = URL(string: "/events/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
-        let (data, resp) = try await session.data(from: url)
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
         guard (200..<300).contains(http.statusCode) else {
             let body = String(data: data, encoding: .utf8) ?? "(empty)"
