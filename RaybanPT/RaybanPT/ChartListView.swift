@@ -28,7 +28,9 @@ final class ChartListViewModel {
         return Array(Set(names)).sorted()
     }
 
-    func load() async {
+    func load(force: Bool = false) async {
+        // 이미 데이터 있고 강제 새로고침 아니면 스킵
+        guard force || allEvents.isEmpty else { return }
         isLoading = true
         errorMessage = nil
         do {
@@ -70,7 +72,7 @@ struct ChartListView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
-                        Task { await vm.load() }
+                        Task { await vm.load(force: true) }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
@@ -83,7 +85,7 @@ struct ChartListView: View {
                 }
             }
             .task { await vm.load() }
-            .refreshable { await vm.load() }
+            .refreshable { await vm.load(force: true) }
         }
     }
 
@@ -140,7 +142,7 @@ struct ChartListView: View {
                 .font(.system(size: 44)).foregroundStyle(.orange)
             Text("차트를 불러올 수 없어요").font(.headline)
             Text(msg).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-            Button("다시 시도") { Task { await vm.load() } }
+            Button("다시 시도") { Task { await vm.load(force: true) } }
                 .buttonStyle(.borderedProminent)
         }
         .padding(32).frame(maxWidth: .infinity, maxHeight: .infinity)

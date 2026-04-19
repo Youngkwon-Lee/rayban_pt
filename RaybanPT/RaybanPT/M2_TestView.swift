@@ -87,7 +87,6 @@ struct M2_TestView: View {
             .padding(.bottom, 68)
             .padding(.trailing, 16)
         }
-        .animation(.spring(response: 0.3), value: selectedTab)
         // MARK: 업로드 완료 다이얼로그
         .confirmationDialog("차트가 생성됐어요 ✓", isPresented: $showPostUploadDialog, titleVisibility: .visible) {
             Button("🏷 지금 라벨링하기") {
@@ -101,7 +100,6 @@ struct M2_TestView: View {
         .sheet(isPresented: $showPostLabelSheet) {
             if let id = vm.lastEventId {
                 LabelingView(eventId: id, client: vm.client)
-                    .onDisappear { Task { await refreshBadge() } }
             }
         }
         .sheet(isPresented: $showPostChartSheet) {
@@ -115,12 +113,11 @@ struct M2_TestView: View {
         .onChange(of: vm.state) { _, newState in
             if case .done = newState, vm.lastEventId != nil {
                 showPostUploadDialog = true
-                Task { await refreshBadge() }
             }
         }
-        // 차트 탭 진입 시 뱃지 갱신
-        .onChange(of: selectedTab) { _, tab in
-            if tab == .charts { Task { await refreshBadge() } }
+        // 차트 탭에서 다른 탭으로 나올 때만 뱃지 갱신 (진입 시 X)
+        .onChange(of: selectedTab) { oldTab, _ in
+            if oldTab == .charts { Task { await refreshBadge() } }
         }
         .sheet(isPresented: $showServerSetup) {
             ServerSetupSheet { newURL, newAPIKey in
