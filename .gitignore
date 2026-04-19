@@ -35,3 +35,8 @@ Thumbs.db
 
 # Claude internal
 .claude/
+
+# Server
+server/storage/
+server/__pycache__/
+server/*.db
