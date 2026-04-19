@@ -193,10 +193,41 @@ private struct AudioTab: View {
     @State private var audioRecorder = AudioRecorder()
     @State private var selectedAudioURL: URL?
     @State private var showImporter = false
+    @State private var selectedPatient: Patient? = nil
+    @State private var showPatientPicker = false
+    @State private var store = PatientStore()
 
     var body: some View {
         ScrollView {
             VStack(spacing: 24) {
+                // 환자 선택 버튼
+                Button {
+                    showPatientPicker = true
+                } label: {
+                    HStack {
+                        Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
+                            .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
+                        Text(selectedPatient?.name ?? "환자 선택 (선택사항)")
+                            .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
+                        Spacer()
+                        if selectedPatient != nil {
+                            Button {
+                                selectedPatient = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showPatientPicker) {
+                    PatientPickerView(selectedPatient: $selectedPatient, store: store)
+                }
+
                 // 녹음 버튼
                 Button {
                     Task {
@@ -204,7 +235,7 @@ private struct AudioTab: View {
                         if audioRecorder.isRecording {
                             audioRecorder.stopRecording()
                             if let url = audioRecorder.recordedFileURL {
-                                vm.uploadAudio(fileURL: url)
+                                vm.uploadAudio(fileURL: url, patientName: selectedPatient?.name)
                             }
                         } else {
                             await audioRecorder.startRecording()
@@ -253,7 +284,7 @@ private struct AudioTab: View {
                     .buttonStyle(.bordered)
 
                     Button {
-                        if let u = selectedAudioURL { vm.uploadAudio(fileURL: u) }
+                        if let u = selectedAudioURL { vm.uploadAudio(fileURL: u, patientName: selectedPatient?.name) }
                     } label: {
                         Label("업로드", systemImage: "arrow.up.circle")
                             .frame(maxWidth: .infinity)

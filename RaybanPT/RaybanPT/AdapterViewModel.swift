@@ -30,11 +30,11 @@ final class AdapterViewModel: ObservableObject {
         state = .done
     }
 
-    func uploadAudio(fileURL: URL) {
+    func uploadAudio(fileURL: URL, patientName: String? = nil) {
         Task {
             do {
                 state = .uploading
-                let accepted = try await client.uploadAudio(fileURL: fileURL)
+                let accepted = try await client.uploadAudio(fileURL: fileURL, patientName: patientName)
                 state = .processing(eventId: accepted.event_id)
 
                 let final = try await client.waitUntilDone(eventId: accepted.event_id)

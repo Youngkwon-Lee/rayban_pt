@@ -802,7 +802,7 @@ def ingest(payload: IngestPayload):
     )
 
 
-def _process_upload_job(event_id: str, source: str, saved_path: Path):
+def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_name: str = ""):
     attempts = 2
     last_error = None
     for i in range(attempts):
@@ -814,6 +814,7 @@ def _process_upload_job(event_id: str, source: str, saved_path: Path):
                 source=source,
                 event_type="audio",
                 audio_path=str(saved_path),
+                patient_name=patient_name,
             )
             _touch_async_result(event_id, {"status": "done", "result": result})
             took_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
@@ -838,6 +839,7 @@ async def ingest_upload(
     background_tasks: BackgroundTasks,
     source: str = Form("iphone"),
     event_type: str = Form("audio"),
+    patient_name: str = Form(""),
     audio: UploadFile = File(...),
 ):
     if event_type != "audio":
@@ -862,7 +864,7 @@ async def ingest_upload(
 
     event_id = str(uuid.uuid4())
     _touch_async_result(event_id, {"status": "accepted", "message": "uploaded"})
-    background_tasks.add_task(_process_upload_job, event_id, source, saved_path)
+    background_tasks.add_task(_process_upload_job, event_id, source, saved_path, patient_name)
 
     return {
         "event_id": event_id,

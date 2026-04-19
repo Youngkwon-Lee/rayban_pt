@@ -109,7 +109,7 @@ final class BridgeClient {
     }
 
     /// 오디오 파일 업로드 (비동기 accepted 반환)
-    func uploadAudio(fileURL: URL, source: String = "iphone-rayban") async throws -> UploadAccepted {
+    func uploadAudio(fileURL: URL, patientName: String? = nil, source: String = "iphone-rayban") async throws -> UploadAccepted {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { throw BridgeError.fileNotFound }
         guard let url = URL(string: "/ingest-upload", relativeTo: baseURL) else { throw BridgeError.invalidURL }
 
@@ -133,6 +133,13 @@ final class BridgeClient {
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"event_type\"\r\n\r\n")
         body.appendString("audio\r\n")
+
+        // patient_name (optional)
+        if let name = patientName, !name.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"patient_name\"\r\n\r\n")
+            body.appendString("\(name)\r\n")
+        }
 
         // audio file
         body.appendString("--\(boundary)\r\n")

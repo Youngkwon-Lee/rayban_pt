@@ -14,7 +14,9 @@ struct ChartSection: Identifiable {
         "F/U>":           .blue,
         "Dx.>":           .purple,
         "S>":             .orange,
+        "O>":             .cyan,
         "P/E>":           .green,
+        "A>":             .red,
         "rehab device>":  .teal,
         "PTx.>":          .indigo,
         "Comment>":       .gray,
@@ -23,7 +25,9 @@ struct ChartSection: Identifiable {
         "F/U>":           "calendar.badge.clock",
         "Dx.>":           "stethoscope",
         "S>":             "mic.fill",
+        "O>":             "chart.bar.xaxis",
         "P/E>":           "figure.arms.open",
+        "A>":             "brain.head.profile",
         "rehab device>":  "medical.thermometer",
         "PTx.>":          "figure.walk",
         "Comment>":       "text.bubble.fill",
@@ -32,7 +36,9 @@ struct ChartSection: Identifiable {
         "F/U>":           "F/U (경과)",
         "Dx.>":           "진단",
         "S>":             "주관적 소견",
+        "O>":             "객관적 측정값",
         "P/E>":           "신체 검사",
+        "A>":             "임상 해석",
         "rehab device>":  "재활 기기",
         "PTx.>":          "치료 계획",
         "Comment>":       "코멘트",
@@ -79,7 +85,7 @@ final class ChartDetailViewModel {
     }
 
     private func parse(_ text: String) -> [ChartSection] {
-        let keys = ["F/U>", "Dx.>", "S>", "P/E>", "rehab device>", "PTx.>", "Comment>"]
+        let keys = ["F/U>", "Dx.>", "S>", "O>", "P/E>", "A>", "rehab device>", "PTx.>", "Comment>"]
         var result: [ChartSection] = []
         var current: (key: String, lines: [String])? = nil
 
