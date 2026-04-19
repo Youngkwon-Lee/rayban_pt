@@ -232,37 +232,113 @@ def classify_intent(text: str, event_type: str) -> str:
 
 
 def _extract_measurements(text: str) -> str:
-    numeric_tokens = re.findall(r"\b\d+(?:\.\d+)?\s*(?:점|회|분|초|m|cm|kg|%)\b", text)
-    return " / ".join(numeric_tokens) if numeric_tokens else "관찰/측정 수치 미입력"
+    """O 섹션: ROM / VAS / MMT / 기타 수치 추출"""
+    results = []
+
+    # ROM: 숫자 + 도 (예: 90도, 120도, -5도)
+    rom_hits = re.findall(r"(?:ROM|관절범위|굴곡|신전|외전|내전|외회전|내회전|거상)\s*[:\-]?\s*(-?\d+)\s*도", text)
+    if rom_hits:
+        results.append("ROM " + " / ".join(h + "°" for h in rom_hits))
+
+    # 도 단독 (앞에 방향/부위 있는 경우)
+    stand_alone_deg = re.findall(r"(?<![가-힣])(-?\d+)\s*도(?!\s*[가-힣])", text)
+    if stand_alone_deg and not rom_hits:
+        results.append("측정값 " + " / ".join(d + "°" for d in stand_alone_deg[:4]))
+
+    # VAS: VAS 숫자/10 or 통증 숫자점
+    vas_hits = re.findall(r"VAS\s*(\d+)(?:\s*/\s*10)?", text, re.IGNORECASE)
+    if not vas_hits:
+        vas_hits = re.findall(r"통증\s*(\d+)\s*(?:점|/10)", text)
+    if vas_hits:
+        results.append("VAS " + vas_hits[0] + "/10")
+
+    # MMT / 근력 등급: 4/5, 4등급, grade 4
+    mmt_hits = re.findall(r"(?:근력|MMT|grade)\s*[:\-]?\s*(\d+)\s*(?:/5|등급|단계)?", text, re.IGNORECASE)
+    if mmt_hits:
+        results.append("MMT " + mmt_hits[0] + "/5")
+
+    # 일반 수치 (회, 분, 초, m, cm, kg, %)
+    misc = re.findall(r"\b\d+(?:\.\d+)?\s*(?:회|분|초|m|cm|kg|%)\b", text)
+    if misc:
+        results.extend(misc[:4])
+
+    return " · ".join(results) if results else "관찰/측정 수치 미입력"
 
 
 def _extract_risk_flags(text: str) -> str:
-    flags = []
+    """A 섹션: 위험징후 + 임상 해석 (개선/악화/안정)"""
+    parts = []
 
-    def has_negated(term: str) -> bool:
-        neg_patterns = [
-            f"{term} 없음",
-            f"{term} 없",
-            f"{term} 부인",
-            f"{term} 아님",
-            f"{term} 해당없음",
-        ]
-        return any(p in text for p in neg_patterns)
+    def negated(term):
+        return any(f"{term}{s}" in text for s in [" 없음", " 없", " 부인", " 아님", " 해당없음"])
 
-    rules = [
+    # 위험징후
+    risk_rules = [
         ("낙상", "낙상 위험"),
-        ("통증", "통증 호소"),
-        ("호흡", "호흡 이슈"),
-        ("피로", "피로 누적"),
+        ("통증 악화", "통증 악화 추세"),
+        ("호흡 곤란", "호흡 이슈"),
+        ("피로 누적", "피로 누적"),
         ("순응도 낮", "홈프로그램 순응도 저하"),
         ("불안정", "균형/보행 불안정"),
+        ("부종", "부종 관찰"),
     ]
+    flags = [label for term, label in risk_rules if term in text and not negated(term)]
+    if flags:
+        parts.append("⚠ " + ", ".join(flags))
 
-    for term, label in rules:
-        if term in text and not has_negated(term):
-            flags.append(label)
+    # 개선 신호
+    improve_kw = ["호전", "개선", "감소", "향상", "증가", "좋아", "완화", "회복"]
+    if any(k in text for k in improve_kw):
+        parts.append("기능 호전 소견")
 
-    return ", ".join(flags) if flags else "특이 위험징후 미확인"
+    # 안정
+    stable_kw = ["유지", "안정", "변화 없음", "동일"]
+    if any(k in text for k in stable_kw) and not any(k in text for k in improve_kw):
+        parts.append("현 상태 안정적 유지")
+
+    # 통증 호소 (위험은 아니지만 기록)
+    if "통증" in text and not negated("통증") and "통증 악화" not in text:
+        vas = re.search(r"VAS\s*(\d+)", text, re.IGNORECASE)
+        pain_note = f"통증 호소 (VAS {vas.group(1)}/10)" if vas else "통증 호소"
+        parts.append(pain_note)
+
+    return ", ".join(parts) if parts else "특이 위험징후 미확인, 전반적 안정"
+
+
+def _build_plan(text: str) -> str:
+    """P 섹션: 텍스트 내용 기반 맞춤 치료 계획"""
+    plans = []
+
+    # ROM 제한 → 관절가동술
+    if any(k in text for k in ["ROM", "관절범위", "굴곡", "신전", "외전", "제한"]):
+        plans.append("관절가동범위 회복 운동 (PROM → AROM 진행)")
+
+    # 통증 → 통증 관리
+    if "통증" in text and not any(f"통증{s}" in text for s in [" 없음", " 해결"]):
+        plans.append("통증 관리: 물리치료 병행 (열/냉 치료, TENS)")
+
+    # 근력 저하 → 근강화
+    if any(k in text for k in ["근력", "MMT", "약화", "weakness"]):
+        plans.append("점진적 근력 강화 운동 (저항 운동 단계 조정)")
+
+    # 보행/균형
+    if any(k in text for k in ["보행", "걷기", "균형", "낙상"]):
+        plans.append("보행 훈련 및 균형 운동 강화")
+
+    # 부종
+    if "부종" in text:
+        plans.append("부종 관리 (압박/거상/냉찜질)")
+
+    # ADL
+    if any(k in text for k in ["ADL", "일상", "자립"]):
+        plans.append("ADL 자립 향상 훈련")
+
+    # 기본 공통
+    plans.append("가정운동 프로그램 재교육 및 순응도 확인")
+    plans.append("다음 방문 시 기능 재평가")
+
+    return chr(10).join(f"· {p}" for p in plans[:5])
+
 
 
 def build_soap(text: str, event_id: str = "", event_type: str = "text",
@@ -279,12 +355,20 @@ def build_soap(text: str, event_id: str = "", event_type: str = "text",
         transcript = text
         img_note = ""
 
+    # O/A/P 먼저 추출
+    o_val = _extract_measurements(text)
+    a_val = _extract_risk_flags(text)
+    p_val = _build_plan(text)
+
     chart_content = generate_chart(
         template_name="11",
         uuid=event_id or "unknown",
         date=date_str,
         transcript_text=transcript,
         image_notes=img_note,
+        objective=o_val,
+        assessment=a_val,
+        plan=p_val,
     )
 
     # 파일 저장
@@ -293,10 +377,7 @@ def build_soap(text: str, event_id: str = "", event_type: str = "text",
         save_chart(chart_path, chart_content)
 
     # S/O/A/P dict (iOS 앱 호환)
-    o = _extract_measurements(text)
-    a = f"임상 해석: {_extract_risk_flags(text)}"
-    p = "계획: 다음 방문 기능평가 보강, 가정운동 교육 재강화, 보호자 피드백 재확인"
-    return text, o, a, p
+    return text, o_val, f"임상 해석: {a_val}", p_val
 
 
 @lru_cache(maxsize=1)
