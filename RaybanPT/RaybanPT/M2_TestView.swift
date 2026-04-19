@@ -292,10 +292,42 @@ private struct AudioTab: View {
 private struct TextTab: View {
     @ObservedObject var vm: AdapterViewModel
     @State private var textInput = ""
+    @State private var selectedPatient: Patient? = nil
+    @State private var showPatientPicker = false
+    @State private var store = PatientStore()
 
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
+                // 환자 선택 버튼
+                Button {
+                    showPatientPicker = true
+                } label: {
+                    HStack {
+                        Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
+                            .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
+                        Text(selectedPatient?.name ?? "환자 선택 (선택사항)")
+                            .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
+                        Spacer()
+                        if selectedPatient != nil {
+                            Button {
+                                selectedPatient = nil
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .sheet(isPresented: $showPatientPicker) {
+                    PatientPickerView(selectedPatient: $selectedPatient, store: store)
+                }
+
+                // 텍스트 입력
                 VStack(alignment: .leading, spacing: 8) {
                     Label("임상 메모", systemImage: "square.and.pencil")
                         .font(.headline)
@@ -306,7 +338,7 @@ private struct TextTab: View {
 
                 Button {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    vm.sendText(textInput)
+                    vm.sendText(textInput, patientName: selectedPatient?.name)
                 } label: {
                     Label("전송", systemImage: "paperplane.fill")
                         .frame(maxWidth: .infinity)

@@ -73,6 +73,7 @@ class IngestPayload(BaseModel):
     text: Optional[str] = None
     audio_path: Optional[str] = None
     image_base64: Optional[str] = None  # base64 encoded JPEG/PNG
+    patient_name: Optional[str] = None
 
 
 class RehabLabelPayload(BaseModel):
@@ -320,7 +321,7 @@ def stt_whisper_local(audio_path: Optional[str]) -> str:
         return f"[STT_STUB] {audio_path}"
 
 
-def _process_event(source: str, event_type: str, text: Optional[str] = None, audio_path: Optional[str] = None, image_base64: Optional[str] = None, image_notes: str = ""):
+def _process_event(source: str, event_type: str, text: Optional[str] = None, audio_path: Optional[str] = None, image_base64: Optional[str] = None, image_notes: str = "", patient_name: str = ""):
     audio_store = os.getenv("AUDIO_STORE", "false").lower() == "true"
     phi_redact = os.getenv("PHI_REDACT", "true").lower() == "true"
     soap_enabled = os.getenv("SOAP_ENABLED", "true").lower() == "true"
@@ -376,8 +377,8 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status) VALUES (?, ?, ?, ?, ?, ?)",
-            (event_id, source, event_type, parsed_text, intent, "processed"),
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (event_id, source, event_type, parsed_text, intent, "processed", patient_name or None),
         )
         if soap_id and soap:
             conn.execute(
@@ -716,6 +717,7 @@ def ingest(payload: IngestPayload):
         text=payload.text,
         audio_path=payload.audio_path,
         image_base64=payload.image_base64,
+        patient_name=payload.patient_name or "",
     )
 
 
@@ -1082,7 +1084,7 @@ def recent_events(limit: int = 10):
     n = max(1, min(limit, 50))
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, source, event_type, intent, status, created_at FROM events ORDER BY created_at DESC LIMIT ?",
+            "SELECT id, source, event_type, intent, status, created_at, patient_name FROM events ORDER BY created_at DESC LIMIT ?",
             (n,),
         ).fetchall()
     items = []
@@ -1098,6 +1100,7 @@ def recent_events(limit: int = 10):
                     "status": r[4],
                     "created_at": r[5],
                     "has_label": label is not None,
+                    "patient_name": r[6] or None,
                 }
             )
     return {"items": items}

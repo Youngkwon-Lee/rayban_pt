@@ -12,11 +12,11 @@ final class AdapterViewModel: ObservableObject {
         self.client = client
     }
 
-    func sendText(_ text: String) {
+    func sendText(_ text: String, patientName: String? = nil) {
         Task {
             do {
                 state = .connecting
-                let r = try await client.sendText(text)
+                let r = try await client.sendText(text, patientName: patientName)
                 state = .done
                 lastMessage = "ack=\(r.ack ?? "-") intent=\(r.intent ?? "-") event=\(r.event_id)"
             } catch {

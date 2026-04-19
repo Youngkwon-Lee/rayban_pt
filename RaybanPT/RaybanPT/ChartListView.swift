@@ -5,9 +5,10 @@ import SwiftUI
 @MainActor
 @Observable
 final class ChartListViewModel {
-    var events: [BridgeClient.RecentEvent] = []
+    var allEvents: [BridgeClient.RecentEvent] = []
     var isLoading = false
     var errorMessage: String? = nil
+    var selectedPatient: String? = nil   // nil = 전체
 
     let client: BridgeClient
 
@@ -15,11 +16,23 @@ final class ChartListViewModel {
         self.client = client
     }
 
+    /// 현재 필터 적용된 목록
+    var filteredEvents: [BridgeClient.RecentEvent] {
+        guard let name = selectedPatient else { return allEvents }
+        return allEvents.filter { $0.patient_name == name }
+    }
+
+    /// 서버에 있는 환자 이름 목록 (중복 제거, 정렬)
+    var patientNames: [String] {
+        let names = allEvents.compactMap { $0.patient_name }.filter { !$0.isEmpty }
+        return Array(Set(names)).sorted()
+    }
+
     func load() async {
         isLoading = true
         errorMessage = nil
         do {
-            events = try await client.recentEvents(limit: 30)
+            allEvents = try await client.recentEvents(limit: 50)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -31,6 +44,7 @@ final class ChartListViewModel {
 
 struct ChartListView: View {
     @State private var vm: ChartListViewModel
+    @State private var store = PatientStore()
     let client: BridgeClient
 
     init(client: BridgeClient) {
@@ -41,17 +55,17 @@ struct ChartListView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if vm.isLoading && vm.events.isEmpty {
+                if vm.isLoading && vm.allEvents.isEmpty {
                     loadingView
-                } else if let err = vm.errorMessage, vm.events.isEmpty {
+                } else if let err = vm.errorMessage, vm.allEvents.isEmpty {
                     errorView(err)
-                } else if vm.events.isEmpty {
+                } else if vm.filteredEvents.isEmpty {
                     emptyView
                 } else {
                     listView
                 }
             }
-            .navigationTitle("차트 목록")
+            .navigationTitle("차트")
             .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -59,14 +73,53 @@ struct ChartListView: View {
                         Task { await vm.load() }
                     } label: {
                         Image(systemName: "arrow.clockwise")
-                            .rotationEffect(.degrees(vm.isLoading ? 360 : 0))
-                            .animation(vm.isLoading ? .linear(duration: 1).repeatForever(autoreverses: false) : .default,
-                                       value: vm.isLoading)
                     }
+                    .disabled(vm.isLoading)
+                }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !vm.patientNames.isEmpty {
+                    patientFilterBar
                 }
             }
             .task { await vm.load() }
             .refreshable { await vm.load() }
+        }
+    }
+
+    // MARK: - 환자 필터 바
+
+    private var patientFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                // 전체 칩
+                FilterChip(
+                    label: "전체",
+                    icon: "person.3",
+                    isSelected: vm.selectedPatient == nil
+                ) {
+                    withAnimation(.spring(response: 0.3)) { vm.selectedPatient = nil }
+                }
+
+                // 환자별 칩
+                ForEach(vm.patientNames, id: \.self) { name in
+                    FilterChip(
+                        label: name,
+                        icon: "person.fill",
+                        isSelected: vm.selectedPatient == name
+                    ) {
+                        withAnimation(.spring(response: 0.3)) {
+                            vm.selectedPatient = vm.selectedPatient == name ? nil : name
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Divider()
         }
     }
 
@@ -96,11 +149,21 @@ struct ChartListView: View {
     // MARK: 빈 목록
     private var emptyView: some View {
         VStack(spacing: 16) {
-            Image(systemName: "doc.text.magnifyingglass")
+            Image(systemName: vm.selectedPatient != nil ? "person.slash" : "doc.text.magnifyingglass")
                 .font(.system(size: 52)).foregroundStyle(.tertiary)
-            Text("차트가 없어요").font(.headline)
-            Text("텍스트, 음성, 영상을 전송하면\n자동으로 차트가 생성됩니다.")
-                .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            if let name = vm.selectedPatient {
+                Text("\(name) 환자 차트 없음").font(.headline)
+                Text("이 환자로 텍스트·음성·영상을 전송하면\n차트가 자동 생성됩니다.")
+                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                Button("전체 보기") {
+                    withAnimation { vm.selectedPatient = nil }
+                }
+                .buttonStyle(.bordered)
+            } else {
+                Text("차트가 없어요").font(.headline)
+                Text("텍스트, 음성, 영상을 전송하면\n자동으로 차트가 생성됩니다.")
+                    .font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -108,7 +171,20 @@ struct ChartListView: View {
     // MARK: 목록
     private var listView: some View {
         List {
-            ForEach(vm.events) { event in
+            // 현재 필터 헤더
+            if let name = vm.selectedPatient {
+                Section {
+                    HStack {
+                        Label(name, systemImage: "person.fill")
+                            .font(.subheadline).fontWeight(.medium)
+                        Spacer()
+                        Text("\(vm.filteredEvents.count)건")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            ForEach(vm.filteredEvents) { event in
                 NavigationLink {
                     ChartDetailView(eventId: event.id, client: client)
                 } label: {
@@ -121,6 +197,34 @@ struct ChartListView: View {
     }
 }
 
+// MARK: - 필터 칩
+
+private struct FilterChip: View {
+    let label: String
+    let icon: String
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .medium))
+                Text(label)
+                    .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(
+                isSelected ? Color.accentColor : Color(.secondarySystemBackground),
+                in: Capsule()
+            )
+            .foregroundStyle(isSelected ? .white : .primary)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - 행 뷰
 
 private struct ChartRowView: View {
@@ -130,7 +234,7 @@ private struct ChartRowView: View {
         switch event.event_type {
         case "audio": return "mic.fill"
         case "video": return "video.fill"
-        default: return "text.alignleft"
+        default:      return "text.alignleft"
         }
     }
 
@@ -138,24 +242,29 @@ private struct ChartRowView: View {
         switch event.event_type {
         case "audio": return .purple
         case "video": return .blue
-        default: return .orange
+        default:      return .orange
         }
     }
 
     var formattedDate: String {
-        // "2026-04-19 07:07:05" → "4/19 07:07"
         let parts = event.created_at.components(separatedBy: " ")
         guard parts.count == 2 else { return event.created_at }
         let dateParts = parts[0].components(separatedBy: "-")
         guard dateParts.count == 3 else { return event.created_at }
-        let timeParts = parts[1].components(separatedBy: ":")
-        let time = timeParts.prefix(2).joined(separator: ":")
+        let time = parts[1].components(separatedBy: ":").prefix(2).joined(separator: ":")
         return "\(dateParts[1])/\(dateParts[2]) \(time)"
+    }
+
+    var typeLabel: String {
+        switch event.event_type {
+        case "audio": return "음성 기록"
+        case "video": return "영상 분석"
+        default:      return "텍스트 메모"
+        }
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            // 타입 아이콘
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(typeColor.opacity(0.12))
@@ -167,16 +276,21 @@ private struct ChartRowView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(event.event_type == "audio" ? "음성 기록" :
-                         event.event_type == "video" ? "영상 분석" : "텍스트 메모")
-                        .font(.subheadline).fontWeight(.semibold)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(typeLabel)
+                            .font(.subheadline).fontWeight(.semibold)
+                        if let name = event.patient_name, !name.isEmpty {
+                            Label(name, systemImage: "person.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
                     Text(formattedDate)
                         .font(.caption2).foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 6) {
-                    // 상태 배지
                     Text(event.status == "processed" ? "완료" : event.status)
                         .font(.caption2).fontWeight(.medium)
                         .padding(.horizontal, 6).padding(.vertical, 2)

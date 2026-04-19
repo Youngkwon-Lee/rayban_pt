@@ -84,13 +84,13 @@ final class BridgeClient {
         }
     }
 
-    func sendText(_ text: String, source: String = "iphone-rayban") async throws -> IngestResponse {
+    func sendText(_ text: String, patientName: String? = nil, source: String = "iphone-rayban") async throws -> IngestResponse {
         guard let url = URL(string: "/ingest", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil, patient_name: nil)
+        let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil, patient_name: patientName)
         req.httpBody = try JSONEncoder().encode(body)
         addAuth(&req)
 
@@ -281,6 +281,7 @@ final class BridgeClient {
         let status: String
         let created_at: String
         let has_label: Bool
+        let patient_name: String?
     }
 
     struct RecentEventsResponse: Codable {
