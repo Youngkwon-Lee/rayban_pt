@@ -476,7 +476,7 @@ struct StreamView: View {
         isTranscribing = true
 
         do {
-            let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL)
+            let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL, patientName: currentPatient?.name)
             let final = try await bridgeVm.client.waitUntilDone(eventId: accepted.event_id)
             let transcript = final.result?.event?.raw_text ?? ""
 
