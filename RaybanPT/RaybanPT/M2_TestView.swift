@@ -66,19 +66,27 @@ private struct DeviceStatusBanner: View {
     var isConnected: Bool { deviceManager.linkState == .connected }
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(isConnected ? Color.green : Color.orange)
-                .frame(width: 7, height: 7)
-                .shadow(color: isConnected ? .green : .orange, radius: 3)
-            Text(deviceManager.statusMessage)
-                .font(.caption2)
-                .foregroundStyle(.white)
+        // 연결 끊겼을 때만 표시
+        if !isConnected {
+            HStack(spacing: DS.Spacing.xs) {
+                Image(systemName: "antenna.radiowaves.left.and.right.slash")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(DS.ColorToken.warning)
+                Text(deviceManager.statusMessage)
+                    .font(.system(size: DS.FontSize.caption, weight: .medium))
+                    .foregroundStyle(.white)
+                Button("재연결") {
+                    deviceManager.retryConnection()
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DS.ColorToken.warning)
+            }
+            .padding(.horizontal, DS.Spacing.sm)
+            .padding(.vertical, 6)
+            .background(DS.ColorToken.surface, in: Capsule())
+            .padding(.top, 56) // 내비바 아래
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule())
-        .padding(.top, 8)
     }
 }
 

@@ -41,7 +41,7 @@ final class StreamViewModel {
         deviceTask = Task {
             for await device in selector.activeDeviceStream() {
                 self.hasActiveDevice = device != nil
-                self.statusMessage = device != nil ? "기기 준비됨" : "기기 없음"
+                self.statusMessage = device != nil ? "기기 준비됨" : "대기 중"
             }
         }
 

@@ -43,9 +43,6 @@ struct StreamView: View {
                     .padding(.top, 8)
                     .padding(.horizontal, 16)
 
-                linkStatusPill
-                    .padding(.horizontal, 16)
-
                 // STT 결과 pill
                 if !sttText.isEmpty || isTranscribing {
                     sttPill
