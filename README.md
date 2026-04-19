@@ -1,5 +1,13 @@
 # rayban_pt
 
+## Where to develop (important)
+
+- **Main iOS app code**: `RaybanPT/RaybanPT/`
+  - Example: `RaybanPT/RaybanPT/DeviceSessionManager.swift`
+- **Xcode project**: `RaybanPT/RaybanPT.xcodeproj`
+- **Bridge server (local test)**: `server/`
+- Top-level `*.swift` files are lightweight adapter/test files kept for compatibility.
+
 A general-purpose Ray-Ban/iPhone capture-to-note adapter for a local bridge pipeline.
 
 `rayban_pt` focuses on reliable client-side ingestion (text/audio/image/video) and async result polling,

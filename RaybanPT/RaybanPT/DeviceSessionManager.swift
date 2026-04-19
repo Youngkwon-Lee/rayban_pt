@@ -131,4 +131,13 @@ final class DeviceSessionManager {
         activeDeviceId = nil
         cancelLinkListener()
     }
+
+    func retryConnection() {
+        stop()
+        linkState = .disconnected
+        registrationState = .unavailable
+        activeDeviceId = nil
+        statusMessage = "재연결 시도 중..."
+        start()
+    }
 }

@@ -3,6 +3,7 @@ import MWDATCore
 
 struct StreamView: View {
     @State private var vm = StreamViewModel()
+    @State private var deviceSession = DeviceSessionManager.shared
     @StateObject private var bridgeVm: AdapterViewModel
     @State private var store = PatientStore()
 
@@ -40,6 +41,9 @@ struct StreamView: View {
             VStack(spacing: 8) {
                 statusPill
                     .padding(.top, 8)
+                    .padding(.horizontal, 16)
+
+                linkStatusPill
                     .padding(.horizontal, 16)
 
                 // STT 결과 pill
@@ -98,6 +102,7 @@ struct StreamView: View {
             withAnimation { sttText = "" }
         }
         .onAppear { vm.setup() }
+        .onAppear { deviceSession.start() }
         .onDisappear { Task { await vm.tearDown() } }
         // 촬영 리뷰 시트
         .sheet(isPresented: $showPhotoSheet) {
@@ -145,7 +150,7 @@ struct StreamView: View {
                         Image(systemName: "video.slash.fill")
                             .font(.system(size: 40, weight: .light))
                             .foregroundStyle(.white.opacity(0.4))
-                        Text(vm.isStreaming ? "프레임 수신 중..." : "스트리밍을 시작하세요")
+                Text(vm.isStreaming ? "프레임 수신 중..." : "스트리밍 시작 버튼을 눌러주세요")
                             .font(.subheadline)
                             .foregroundStyle(.white.opacity(0.4))
                     }
@@ -163,19 +168,19 @@ struct StreamView: View {
         }
     }
 
-    // MARK: - 상태 필
+    // MARK: - 상태 Pill
 
     private var statusPill: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: DS.Spacing.xs) {
             Circle()
-                .fill(vm.isStreaming ? Color.green : Color.orange)
-                .frame(width: 7, height: 7)
-                .shadow(color: vm.isStreaming ? .green : .orange, radius: 4)
+                .fill(vm.isStreaming ? DS.ColorToken.success : DS.ColorToken.warning)
+                .frame(width: 8, height: 8)
+                .shadow(color: vm.isStreaming ? DS.ColorToken.success : DS.ColorToken.warning, radius: 4)
 
             Text(vm.isStreaming
                  ? (vm.recorder.isRecording ? "녹화 중 · \(vm.recorder.frameCount)f" : "스트리밍 중")
                  : vm.statusMessage)
-                .font(.caption)
+                .font(.system(size: DS.FontSize.caption, weight: .semibold))
                 .fontWeight(.medium)
                 .foregroundStyle(.white)
 
@@ -186,30 +191,55 @@ struct StreamView: View {
                     .font(.caption)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .frame(minHeight: 32)
+        .background(DS.ColorToken.surface, in: Capsule())
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var linkStatusPill: some View {
+        HStack(spacing: DS.Spacing.xs) {
+            Circle()
+                .fill(deviceSession.linkState == .connected ? DS.ColorToken.success : DS.ColorToken.warning)
+                .frame(width: 8, height: 8)
+            Text(deviceSession.statusMessage)
+                .font(.system(size: DS.FontSize.caption, weight: .medium))
+                .foregroundStyle(.white)
+            Spacer()
+            if deviceSession.linkState != .connected {
+                Button("재연결") {
+                    deviceSession.retryConnection()
+                }
+                .font(.caption2)
+                .buttonStyle(.bordered)
+                .tint(DS.ColorToken.warning)
+            }
+        }
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .frame(minHeight: 32)
+        .background(DS.ColorToken.surfaceSoft, in: Capsule())
     }
 
     // MARK: - STT Pill
 
     private var sttPill: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: DS.Spacing.xs) {
             if isTranscribing {
                 ProgressView()
                     .progressViewStyle(.circular)
                     .scaleEffect(0.7)
                     .tint(.white)
                 Text("변환 중...")
-                    .font(.caption)
+                    .font(.system(size: DS.FontSize.caption, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
             } else {
                 Image(systemName: "text.bubble.fill")
                     .font(.caption)
                     .foregroundStyle(.yellow)
                 Text(sttText)
-                    .font(.caption)
+                    .font(.system(size: DS.FontSize.caption, weight: .regular))
                     .foregroundStyle(.white)
                     .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -223,9 +253,9 @@ struct StreamView: View {
                 }
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
     }
 
     // MARK: - 하단 컨트롤바
@@ -290,9 +320,9 @@ struct StreamView: View {
                     .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 20)
+            .padding(.vertical, 16)
         }
-        .background(.ultraThinMaterial)
+        .background(.regularMaterial)
     }
 
     @ViewBuilder
@@ -302,10 +332,10 @@ struct StreamView: View {
                 Task { await vm.stopStreaming() }
             } label: {
                 Image(systemName: "stop.fill")
-                    .font(.system(size: 22))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 48, height: 48)
-                    .background(.ultraThinMaterial, in: Circle())
+                    .frame(width: 52, height: 52)
+                    .background(Color.red.opacity(0.88), in: Circle())
             }
         } else if lastEventId != nil {
             // 차트 보기 버튼 (전송 완료 후)
@@ -315,8 +345,8 @@ struct StreamView: View {
             } label: {
                 ZStack {
                     Circle()
-                        .fill(Color.indigo.opacity(0.85))
-                        .frame(width: 48, height: 48)
+                        .fill(Color.indigo.opacity(0.9))
+                        .frame(width: 52, height: 52)
                     Image(systemName: "doc.text.fill")
                         .font(.system(size: 20))
                         .foregroundStyle(.white)
@@ -327,14 +357,14 @@ struct StreamView: View {
                 Task { await uploadVideo(url) }
             } label: {
                 Image(systemName: isAnalyzing ? "ellipsis" : "arrow.up.circle.fill")
-                    .font(.system(size: 26))
+                    .font(.system(size: 24, weight: .semibold))
                     .foregroundStyle(isAnalyzing ? Color.secondary : Color.white)
-                    .frame(width: 48, height: 48)
-                    .background(Color.indigo.opacity(0.8), in: Circle())
+                    .frame(width: 52, height: 52)
+                    .background(Color.indigo.opacity(0.9), in: Circle())
             }
             .disabled(isAnalyzing)
         } else {
-            Color.clear.frame(width: 48, height: 48)
+            Color.clear.frame(width: 52, height: 52)
         }
     }
 
@@ -489,8 +519,12 @@ private struct MicButton: View {
     var body: some View {
         ZStack {
             Circle()
-                .stroke(isRecording ? Color.red : Color.white.opacity(0.5), lineWidth: 2)
-                .frame(width: 48, height: 48)
+                .fill(Color.black.opacity(0.42))
+                .frame(width: 52, height: 52)
+
+            Circle()
+                .stroke(isRecording ? Color.red : Color.white.opacity(0.45), lineWidth: 2)
+                .frame(width: 52, height: 52)
 
             if isTranscribing {
                 ProgressView()
@@ -521,18 +555,25 @@ private struct CaptureButton: View {
                 // 촬영 버튼 (흰 원)
                 Circle()
                     .stroke(.white, lineWidth: 3)
-                    .frame(width: 70, height: 70)
+                    .frame(width: 74, height: 74)
                 Circle()
                     .fill(.white)
-                    .frame(width: 58, height: 58)
+                    .frame(width: 60, height: 60)
                     .scaleEffect(isCapturing ? 0.85 : 1.0)
                     .animation(.easeOut(duration: 0.1), value: isCapturing)
             } else {
                 // 스트리밍 시작
                 ZStack {
                     Circle()
-                        .fill(Color.blue)
-                        .frame(width: 70, height: 70)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.blue, Color.indigo],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 74, height: 74)
+                        .shadow(color: Color.blue.opacity(0.35), radius: 10, y: 4)
                     Image(systemName: "play.fill")
                         .font(.system(size: 26))
                         .foregroundStyle(.white)
@@ -663,4 +704,3 @@ private struct PhotoReviewSheet: View {
         }
     }
 }
-
