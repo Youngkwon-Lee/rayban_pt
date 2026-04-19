@@ -271,6 +271,55 @@ final class BridgeClient {
         return EventStatusResponse(status: "timeout", message: "poll timeout", error: nil, result: nil)
     }
 
+    // MARK: - 차트 목록 / 조회
+
+    struct RecentEvent: Codable, Identifiable {
+        let id: String
+        let source: String
+        let event_type: String
+        let intent: String?
+        let status: String
+        let created_at: String
+        let has_label: Bool
+    }
+
+    struct RecentEventsResponse: Codable {
+        let items: [RecentEvent]
+    }
+
+    struct ChartResponse: Codable {
+        let event_id: String
+        let chart: String
+    }
+
+    func recentEvents(limit: Int = 20) async throws -> [RecentEvent] {
+        guard let url = URL(string: "/recent-events?limit=\(limit)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        return (try JSONDecoder().decode(RecentEventsResponse.self, from: data)).items
+    }
+
+    func fetchChart(eventId: String) async throws -> ChartResponse {
+        guard let url = URL(string: "/charts/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(ChartResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
     private func mimeType(for fileURL: URL) -> String {
         switch fileURL.pathExtension.lowercased() {
         case "mp3": return "audio/mpeg"

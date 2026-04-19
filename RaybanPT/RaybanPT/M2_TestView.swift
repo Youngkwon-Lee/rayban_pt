@@ -8,7 +8,7 @@ struct M2_TestView: View {
     @State private var selectedTab: Tab = .camera
     @State private var showServerSetup = false
 
-    enum Tab { case audio, text, camera }
+    enum Tab { case audio, text, camera, charts }
 
     static var defaultBridgeURL: URL {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
@@ -51,6 +51,11 @@ struct M2_TestView: View {
             }
             .tabItem { Label("텍스트", systemImage: "text.bubble.fill") }
             .tag(Tab.text)
+
+            // 차트 탭
+            ChartListView(client: vm.client)
+            .tabItem { Label("차트", systemImage: "doc.text.fill") }
+            .tag(Tab.charts)
         }
         .overlay(alignment: .top) {
             if selectedTab == .camera {

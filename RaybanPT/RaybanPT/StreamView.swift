@@ -84,15 +84,7 @@ struct StreamView: View {
                 Button {
                     showPatientPicker = true
                 } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: currentPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
-                            .foregroundStyle(currentPatient == nil ? .orange : .green)
-                        if let p = currentPatient {
-                            Text(p.name)
-                                .font(.caption)
-                                .foregroundStyle(.white)
-                        }
-                    }
+                    patientToolbarLabel
                 }
             }
         }
@@ -122,7 +114,9 @@ struct StreamView: View {
         // 차트 시트
         .sheet(isPresented: $showChartSheet) {
             if let eventId = lastEventId {
-                ChartDetailView(eventId: eventId)
+                NavigationStack {
+                    ChartDetailView(eventId: eventId, client: bridgeVm.client)
+                }
             }
         }
         .onChange(of: vm.capturedPhoto) { _, newPhoto in
@@ -166,6 +160,20 @@ struct StreamView: View {
                         .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
                                    value: vm.recorder.isRecording)
                 }
+            }
+        }
+    }
+
+    // MARK: - 툴바 라벨 (타입 추론 분리)
+
+    @ViewBuilder
+    private var patientToolbarLabel: some View {
+        let iconName = currentPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill"
+        let iconColor: Color = currentPatient == nil ? .orange : .green
+        HStack(spacing: 5) {
+            Image(systemName: iconName).foregroundStyle(iconColor)
+            if let p = currentPatient {
+                Text(p.name).font(.caption).foregroundStyle(.white)
             }
         }
     }
