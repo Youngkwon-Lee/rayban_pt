@@ -1,11 +1,43 @@
 import SwiftUI
 import MWDATCore
+import UIKit
 
 struct StreamView: View {
+    enum SaveStatus: Equatable {
+        case idle
+        case saving(String)
+        case saved(String)
+        case failed(String)
+
+        var message: String? {
+            switch self {
+            case .idle:
+                return nil
+            case .saving(let message), .saved(let message), .failed(let message):
+                return message
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .idle:
+                return .clear
+            case .saving:
+                return DS.ColorToken.warning
+            case .saved:
+                return DS.ColorToken.success
+            case .failed:
+                return DS.ColorToken.danger
+            }
+        }
+    }
+
+    @AppStorage("rayban_pt.auto_save_captures") private var autoSaveCaptures = false
     @State private var vm = StreamViewModel()
     @State private var deviceSession = DeviceSessionManager.shared
     @StateObject private var bridgeVm: AdapterViewModel
     @State private var store = PatientStore()
+    @State private var captureStore = CaptureStore.shared
 
     @State private var currentPatient: Patient? = nil
     @State private var showPatientPicker = false
@@ -17,6 +49,10 @@ struct StreamView: View {
     @State private var analysisText: String = ""
     @State private var isCapturing = false
     @State private var toastMessage: String? = nil
+    @State private var saveStatus: SaveStatus = .idle
+    @State private var showCaptureHistory = false
+    @State private var showPhotoPermissionAlert = false
+    @State private var photoPermissionMessage = "사진 보관함 접근 권한이 필요합니다."
 
     // STT
     @State private var audioRecorder = AudioRecorder()
@@ -55,6 +91,12 @@ struct StreamView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
+                if let message = saveStatus.message {
+                    saveStatusPill(message: message, tint: saveStatus.tint)
+                        .padding(.horizontal, 16)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
                 Spacer()
             }
             .animation(.spring(response: 0.3), value: vm.isStreaming)
@@ -88,6 +130,9 @@ struct StreamView: View {
                     patientToolbarLabel
                 }
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                captureOptionsMenu
+            }
         }
         .sheet(isPresented: $showPatientPicker) {
             PatientPickerView(selectedPatient: $currentPatient, store: store)
@@ -106,7 +151,8 @@ struct StreamView: View {
                     photo: photo,
                     isAnalyzing: $isAnalyzing,
                     analysisText: $analysisText,
-                    onSave: { vm.savePhoto() },
+                    saveStatus: saveStatus,
+                    onSave: { await saveCurrentPhoto() },
                     onSend: { await analyzeAndSend(photo) },
                     onViewChart: { showPhotoSheet = false; showChartSheet = true }
                 )
@@ -130,8 +176,25 @@ struct StreamView: View {
             if newPhoto != nil {
                 analysisText = ""
                 lastEventId = nil
+                saveStatus = .idle
                 showPhotoSheet = true
+                if autoSaveCaptures {
+                    Task { await saveCurrentPhoto(triggeredAutomatically: true) }
+                }
             }
+        }
+        .sheet(isPresented: $showCaptureHistory) {
+            NavigationStack {
+                CaptureHistoryView()
+            }
+        }
+        .alert("사진 접근 필요", isPresented: $showPhotoPermissionAlert) {
+            Button("설정 열기") {
+                openAppSettings()
+            }
+            Button("닫기", role: .cancel) { }
+        } message: {
+            Text(photoPermissionMessage)
         }
     }
 
@@ -213,6 +276,22 @@ struct StreamView: View {
         .frame(minHeight: 32)
         .background(DS.ColorToken.surface, in: Capsule())
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func saveStatusPill(message: String, tint: Color) -> some View {
+        HStack(spacing: DS.Spacing.xs) {
+            Circle()
+                .fill(tint)
+                .frame(width: 8, height: 8)
+            Text(message)
+                .font(.system(size: DS.FontSize.caption, weight: .medium))
+                .foregroundStyle(.white)
+            Spacer()
+        }
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .frame(minHeight: 32)
+        .background(DS.ColorToken.surface, in: Capsule())
     }
 
     private var linkStatusPill: some View {
@@ -345,14 +424,23 @@ struct StreamView: View {
     @ViewBuilder
     private var rightActionButton: some View {
         if vm.isStreaming {
-            Button {
-                Task { await vm.stopStreaming() }
-            } label: {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 52, height: 52)
-                    .background(Color.red.opacity(0.88), in: Circle())
+            HStack(spacing: 16) {
+                Button {
+                    Task { await toggleRecording() }
+                } label: {
+                    RecordButton(isRecording: vm.recorder.isRecording)
+                }
+                .disabled(isSavingInProgress)
+
+                Button {
+                    Task { await stopStreamingFlow() }
+                } label: {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 52, height: 52)
+                        .background(Color.red.opacity(0.88), in: Circle())
+                }
             }
         } else if lastEventId != nil {
             // 완료 후 버튼 그룹
@@ -387,22 +475,49 @@ struct StreamView: View {
                 }
             }
         } else if let url = vm.recordedVideoURL {
-            Button {
-                Task { await uploadVideo(url) }
-            } label: {
-                Image(systemName: isAnalyzing ? "ellipsis" : "arrow.up.circle.fill")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(isAnalyzing ? Color.secondary : Color.white)
-                    .frame(width: 52, height: 52)
-                    .background(Color.indigo.opacity(0.9), in: Circle())
+            HStack(spacing: 16) {
+                Button {
+                    Task { await saveCurrentVideo() }
+                } label: {
+                    Image(systemName: vm.lastSavedVideo == nil ? "square.and.arrow.down.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundStyle(isSavingInProgress ? Color.secondary : Color.white)
+                        .frame(width: 52, height: 52)
+                        .background(Color.green.opacity(0.9), in: Circle())
+                }
+                .disabled(isSavingInProgress)
+
+                Button {
+                    Task { await uploadVideo(url) }
+                } label: {
+                    Image(systemName: uploadButtonSymbol)
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle((isAnalyzing || isSavingInProgress) ? Color.secondary : Color.white)
+                        .frame(width: 52, height: 52)
+                        .background(Color.indigo.opacity(0.9), in: Circle())
+                }
+                .disabled(isAnalyzing || isSavingInProgress)
             }
-            .disabled(isAnalyzing)
         } else {
             Color.clear.frame(width: 52, height: 52)
         }
     }
 
     // MARK: - Actions
+
+    private var isSavingInProgress: Bool {
+        if case .saving = saveStatus {
+            return true
+        }
+        return false
+    }
+
+    private var uploadButtonSymbol: String {
+        if isSavingInProgress {
+            return "hourglass"
+        }
+        return isAnalyzing ? "ellipsis" : "arrow.up.circle.fill"
+    }
 
     private func analyzeAndSend(_ image: UIImage) async {
         isAnalyzing = true
@@ -446,6 +561,64 @@ struct StreamView: View {
         }
 
         isAnalyzing = false
+    }
+
+    private func saveCurrentPhoto(triggeredAutomatically: Bool = false) async {
+        saveStatus = .saving(triggeredAutomatically ? "사진 자동 저장 중..." : "사진 저장 중...")
+        do {
+            let capture = try await vm.saveCapturedPhoto(patientName: currentPatient?.name)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            let pathText = capture.relativePath
+            saveStatus = .saved("사진 저장 완료")
+            showToast("✅ 사진 앱 저장 완료 · \(pathText)")
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            saveStatus = .failed("사진 저장 실패")
+            showToast("⚠️ 사진 저장 실패")
+            handleSaveError(error)
+        }
+    }
+
+    private func saveCurrentVideo(triggeredAutomatically: Bool = false) async {
+        saveStatus = .saving(triggeredAutomatically ? "영상 자동 저장 중..." : "영상 저장 중...")
+        do {
+            let capture = try await vm.saveRecordedVideo(patientName: currentPatient?.name)
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            saveStatus = .saved("영상 저장 완료")
+            showToast("✅ 영상 저장 완료 · \(capture.relativePath)")
+        } catch {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            saveStatus = .failed("영상 저장 실패")
+            showToast("⚠️ 영상 저장 실패")
+            handleSaveError(error)
+        }
+    }
+
+    private func toggleRecording() async {
+        if vm.recorder.isRecording {
+            await vm.stopRecording()
+            if autoSaveCaptures {
+                await saveCurrentVideo(triggeredAutomatically: true)
+            } else {
+                saveStatus = .saved("영상 저장 준비 완료")
+                showToast("📼 영상 캡처 완료 — 업로드 또는 저장 가능")
+            }
+        } else {
+            saveStatus = .idle
+            vm.startRecording()
+            showToast("🔴 영상 녹화 시작")
+        }
+    }
+
+    private func stopStreamingFlow() async {
+        let wasRecording = vm.recorder.isRecording
+        await vm.stopStreaming()
+        if wasRecording, autoSaveCaptures, vm.recordedVideoURL != nil {
+            await saveCurrentVideo(triggeredAutomatically: true)
+        } else if wasRecording, vm.recordedVideoURL != nil {
+            saveStatus = .saved("영상 저장 준비 완료")
+            showToast("📼 영상 캡처 완료 — 업로드 또는 저장 가능")
+        }
     }
 
     private func uploadVideo(_ url: URL) async {
@@ -541,6 +714,38 @@ struct StreamView: View {
             case .invalidURL: return "URL 오류"
             }
         } ?? error.localizedDescription
+    }
+
+    private func handleSaveError(_ error: Error) {
+        if let mediaError = error as? MediaSaveError, mediaError == .libraryAccessDenied {
+            photoPermissionMessage = mediaError.localizedDescription
+            showPhotoPermissionAlert = true
+        }
+    }
+
+    private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private var captureOptionsMenu: some View {
+        Menu {
+            Toggle("촬영 즉시 저장", isOn: $autoSaveCaptures)
+            Button("저장 기록 보기") {
+                showCaptureHistory = true
+            }
+            if let latest = captureStore.captures.first {
+                Section("최근 저장") {
+                    Text(latest.fileName)
+                    if let patient = latest.patientName {
+                        Text(patient)
+                    }
+                }
+            }
+        } label: {
+            Image(systemName: autoSaveCaptures ? "externaldrive.badge.checkmark" : "externaldrive.badge.plus")
+                .foregroundStyle(.white)
+        }
     }
 }
 
@@ -642,7 +847,8 @@ private struct PhotoReviewSheet: View {
     let photo: UIImage
     @Binding var isAnalyzing: Bool
     @Binding var analysisText: String
-    let onSave: () -> Void
+    let saveStatus: StreamView.SaveStatus
+    let onSave: () async -> Void
     let onSend: () async -> Void
     let onViewChart: () -> Void
 
@@ -694,16 +900,31 @@ private struct PhotoReviewSheet: View {
                     }
 
                     // 액션 버튼
+                    if let message = saveStatus.message {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(saveStatus.tint)
+                                .frame(width: 8, height: 8)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+
                     HStack(spacing: 12) {
                         Button {
-                            onSave()
-                            UINotificationFeedbackGenerator().notificationOccurred(.success)
+                            Task { await onSave() }
                         } label: {
                             Label("앨범 저장", systemImage: "square.and.arrow.down")
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
                         .tint(.green)
+                        .disabled({
+                            if case .saving = saveStatus { return true }
+                            return false
+                        }())
 
                         Button {
                             Task { await onSend() }

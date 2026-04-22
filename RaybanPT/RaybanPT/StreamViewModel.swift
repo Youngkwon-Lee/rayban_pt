@@ -16,6 +16,8 @@ final class StreamViewModel {
     var errorMessage: String? = nil
     var recorder = VideoRecorder()
     var recordedVideoURL: URL? = nil
+    var lastSavedPhoto: SavedCapture? = nil
+    var lastSavedVideo: SavedCapture? = nil
 
     private var streamSession: StreamSession?
     private var stateToken: (any AnyListenerToken)?
@@ -38,38 +40,40 @@ final class StreamViewModel {
         let session = StreamSession(streamSessionConfig: config, deviceSelector: selector)
         self.streamSession = session
 
-        deviceTask = Task {
+        deviceTask = Task { [weak self] in
             for await device in selector.activeDeviceStream() {
+                guard let self else { return }
                 self.hasActiveDevice = device != nil
                 self.statusMessage = device != nil ? "기기 준비됨" : "대기 중"
             }
         }
 
         stateToken = session.statePublisher.listen { [weak self] state in
-            Task { @MainActor in
-                self?.updateState(state)
+            Task { [weak self, state] in
+                guard let self else { return }
+                await self.handleStateUpdate(state)
             }
         }
 
         frameToken = session.videoFramePublisher.listen { [weak self] frame in
-            Task { @MainActor in
+            Task { [weak self, frame] in
+                guard let self else { return }
                 let img = frame.makeUIImage()
-                self?.currentFrame = img
-                // 녹화 중이면 프레임 추가
-                if let img { self?.recorder.addFrame(img) }
+                await self.handleIncomingFrame(img)
             }
         }
 
         errorToken = session.errorPublisher.listen { [weak self] error in
-            Task { @MainActor in
-                self?.errorMessage = error.localizedDescription
-                self?.statusMessage = "오류: \(error.localizedDescription)"
+            Task { [weak self, error] in
+                guard let self else { return }
+                await self.handleStreamError(error)
             }
         }
 
         photoToken = session.photoDataPublisher.listen { [weak self] photoData in
-            Task { @MainActor in
-                self?.capturedPhoto = UIImage(data: photoData.data)
+            Task { [weak self, photoData] in
+                guard let self else { return }
+                await self.handleCapturedPhotoData(photoData.data)
             }
         }
 
@@ -123,6 +127,7 @@ final class StreamViewModel {
 
     func startRecording() {
         recordedVideoURL = nil
+        lastSavedVideo = nil
         recorder.start()
     }
 
@@ -131,13 +136,40 @@ final class StreamViewModel {
     }
 
     func capturePhoto() {
+        lastSavedPhoto = nil
         streamSession?.capturePhoto(format: .jpeg)
     }
 
-    func savePhoto() {
-        guard let photo = capturedPhoto else { return }
-        UIImageWriteToSavedPhotosAlbum(photo, nil, nil, nil)
+    func saveCapturedPhoto(patientName: String?, eventId: String? = nil) async throws -> SavedCapture {
+        if let lastSavedPhoto {
+            return lastSavedPhoto
+        }
+
+        guard let photo = capturedPhoto else {
+            throw MediaSaveError.missingPhoto
+        }
+
+        let capture = try await CapturePersistence.persistPhoto(photo, patientName: patientName, eventId: eventId)
+        CaptureStore.shared.record(capture)
+        lastSavedPhoto = capture
         statusMessage = "사진 저장됨"
+        return capture
+    }
+
+    func saveRecordedVideo(patientName: String?, eventId: String? = nil) async throws -> SavedCapture {
+        if let lastSavedVideo {
+            return lastSavedVideo
+        }
+
+        guard let recordedVideoURL else {
+            throw MediaSaveError.missingVideo
+        }
+
+        let capture = try await CapturePersistence.persistVideo(recordedVideoURL, patientName: patientName, eventId: eventId)
+        CaptureStore.shared.record(capture)
+        lastSavedVideo = capture
+        statusMessage = "영상 저장됨"
+        return capture
     }
 
     private func updateState(_ state: StreamSessionState) {
@@ -160,6 +192,26 @@ final class StreamViewModel {
         @unknown default:
             break
         }
+    }
+
+    private func handleStateUpdate(_ state: StreamSessionState) {
+        updateState(state)
+    }
+
+    private func handleIncomingFrame(_ image: UIImage?) {
+        currentFrame = image
+        if let image {
+            recorder.addFrame(image)
+        }
+    }
+
+    private func handleStreamError(_ error: Error) {
+        errorMessage = error.localizedDescription
+        statusMessage = "오류: \(error.localizedDescription)"
+    }
+
+    private func handleCapturedPhotoData(_ data: Data) {
+        capturedPhoto = UIImage(data: data)
     }
 
     private func releaseResources() {

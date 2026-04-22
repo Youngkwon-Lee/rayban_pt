@@ -18,6 +18,8 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Ray-Ban으로 촬영한 사진을 저장합니다.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Ray-Ban으로 촬영한 사진을 사진 앱에 저장하고 확인합니다.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Ray-Ban 안경 마이크로 환자 음성을 녹음합니다.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
