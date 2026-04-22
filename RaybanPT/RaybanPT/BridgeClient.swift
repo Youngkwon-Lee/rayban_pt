@@ -64,8 +64,9 @@ final class BridgeClient {
 
     init(baseURL: URL, apiKey: String = "", session: URLSession = .shared) {
         self.baseURL = baseURL
-        self.apiKey = apiKey
         self.session = session
+        let stored = UserDefaults.standard.string(forKey: "bridge_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.apiKey = !apiKey.isEmpty ? apiKey : (stored ?? "")
     }
 
     /// 런타임에 서버 URL 변경 (UserDefaults 설정 후 적용)
@@ -251,6 +252,7 @@ final class BridgeClient {
     func getEvent(_ eventId: String) async throws -> EventStatusResponse {
         guard let url = URL(string: "/events/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)
+        req.httpMethod = "GET"
         addAuth(&req)
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
