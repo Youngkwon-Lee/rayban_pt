@@ -37,6 +37,11 @@ Thumbs.db
 .claude/
 
 # Server
+server/.venv/
 server/storage/
 server/__pycache__/
+server/**/__pycache__/
+server/**/*.pyc
 server/*.db
+server/*.sqlite
+server/.bridge_api_key

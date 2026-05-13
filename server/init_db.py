@@ -3,7 +3,7 @@ import sqlite3
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "storage" / "bridge.db"
-SCHEMA_PATH = ROOT / "storage" / "schema.sql"
+SCHEMA_PATH = ROOT / "schema.sql"
 
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 

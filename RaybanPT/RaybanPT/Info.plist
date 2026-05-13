@@ -26,6 +26,8 @@
 	<string>Ray-Ban Meta 안경 연결에 블루투스가 필요합니다.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>Ray-Ban Meta 안경 연결에 블루투스가 필요합니다.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Ray-Ban 기기가 없을 때 iPhone 카메라로 환자 사진을 촬영합니다.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Ray-Ban Meta 안경 통신에 로컬 네트워크 접근이 필요합니다.</string>
 	<key>UIBackgroundModes</key>

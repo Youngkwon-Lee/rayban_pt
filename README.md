@@ -58,6 +58,31 @@ so backend processors (STT, redaction, summarization, SOAP or other formats) can
 - [ ] polling returns `done` or `error`
 - [ ] event is present in backend storage
 
+## Device E2E checklist
+
+Use the iOS app `점검` tab before a field test:
+
+- [ ] `/health` succeeds and DB is ok
+- [ ] API key is entered in the app
+- [ ] patient consent is required by the bridge
+- [ ] original file downloads are disabled
+- [ ] unmasked image storage is blocked
+- [ ] select a patient and record consent
+- [ ] send one text note and confirm chart creation
+- [ ] send one camera image or video and confirm result
+- [ ] confirm face-not-detected or masking-failed errors are understandable
+- [ ] review chart list, label, delete, and audit log flows
+
+## Bridge safety smoke test
+
+Run the local API safety checks without touching the real bridge database:
+
+```bash
+server/.venv/bin/python server/smoke_test.py
+```
+
+This verifies API key enforcement, patient consent gating, PHI redaction, chart access/update, chart review queue mark/clear, label round-trip, fail-closed image masking, disabled file downloads, audit validation, consent revocation, and event deletion.
+
 ## License
 
 MIT

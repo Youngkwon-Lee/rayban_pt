@@ -12,6 +12,7 @@ Ray-Ban Meta -> Local Bridge iOS adapter prototype.
 1. Add files to your iOS target in Xcode.
 2. Render `M2_TestView()` from app entry.
 3. Set base URL in `M2_TestView` init if needed.
+4. Open the `점검` tab and run the bridge/device E2E checklist before field testing.
 
 ## Server URL 설정
 앱 최초 실행 후 Settings에서 Bridge URL을 입력하거나, `UserDefaults`의 `bridge_base_url` 키에 직접 설정.

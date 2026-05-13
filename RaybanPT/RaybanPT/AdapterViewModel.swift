@@ -39,22 +39,23 @@ final class AdapterViewModel: ObservableObject {
                 let accepted = try await client.uploadAudio(fileURL: fileURL, patientName: patientName)
                 state = .processing(eventId: accepted.event_id)
 
-                let final = try await client.waitUntilDone(eventId: accepted.event_id)
+                let final = try await client.waitUntilDone(
+                    eventId: accepted.event_id,
+                    maxTries: 180,
+                    intervalSec: 1.0
+                )
                 if final.status == "done" {
-                    if let eventId = final.result?.event?.id {
+                    if let eventId = final.eventId {
                         lastEventId = eventId
                     }
                     state = .done
-                    if let res = final.result {
-                        let intent = res.event?.intent ?? "-"
-                        let eventId = res.event?.id ?? "-"
-                        lastMessage = "done intent=\(intent) event=\(eventId)"
-                    } else {
-                        lastMessage = "done (no payload)"
-                    }
+                    let intent = final.intent ?? "-"
+                    let eventId = final.eventId ?? "-"
+                    lastMessage = "done intent=\(intent) event=\(eventId)"
                 } else if final.status == "error" {
-                    state = .failed(message: final.error ?? "processing error")
-                    lastMessage = final.error ?? "processing error"
+                    let message = UserFacingError.message(code: final.error_code, fallback: final.error)
+                    state = .failed(message: message)
+                    lastMessage = message
                 } else {
                     state = .failed(message: final.message ?? "timeout")
                     lastMessage = final.message ?? "timeout"
@@ -79,19 +80,15 @@ final class AdapterViewModel: ObservableObject {
             let final = try await client.waitUntilDone(eventId: accepted.event_id)
             if final.status == "done" {
                 state = .done
-                if let result = final.result {
-                    let intent = result.event?.intent ?? "-"
-                    let eventId = result.event?.id ?? "-"
-                    lastMessage = "done intent=\(intent) event=\(eventId)"
-                } else {
-                    lastMessage = accepted.message
-                }
+                let intent = final.intent ?? "-"
+                let eventId = final.eventId ?? "-"
+                lastMessage = "done intent=\(intent) event=\(eventId)"
                 return accepted
             }
 
             let message: String
             if final.status == "error" {
-                message = final.error ?? "processing error"
+                message = UserFacingError.message(code: final.error_code, fallback: final.error)
             } else {
                 message = final.message ?? "timeout"
             }

@@ -21,38 +21,22 @@ def generate_chart(
     p_section = plan or "· all major joint GPROM ex.\n· shorten muscle stretching ex.\n· trunk mobilization"
 
     body = f"""F/U>
-# Auto-generated draft ({today})
-# UUID: {uuid}
-
-Dx.>
-# (기존 진단 유지/검토 필요)
+{today}
 
 S>
-# 음성기록 기반 요약
 {_to_bullets(transcript_text)}
 
 O>
-# 객관적 측정값
 {_to_bullets(o_section)}
 
 P/E>
-# 이미지/관찰 기반 요약
 {_to_bullets(pe_section)}
 
 A>
-# 임상 해석
 {_to_bullets(a_section)}
-
-rehab device>
-# (수동 입력 필요)
 
 PTx.>
 {_to_bullets(p_section)}
-
-Comment>
-# prior summary
-{_to_bullets(prior_summary or "(이전기록 요약 없음)")}
-# 주의: 본 문서는 자동 생성 초안이며, 최종 서명 전 임상 검수가 필요함.
 """
     return body
 
@@ -60,8 +44,8 @@ Comment>
 def _to_bullets(text: str) -> str:
     lines = [x.strip() for x in text.splitlines() if x.strip()]
     if not lines:
-        return "# (내용 없음)"
-    return "\n".join([f"# {line}" for line in lines[:20]])
+        return "(내용 없음)"
+    return "\n".join(lines[:20])
 
 
 def save_chart(path: Path, content: str):

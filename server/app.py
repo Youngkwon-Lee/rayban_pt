@@ -1,4 +1,5 @@
 import os
+import ipaddress
 import re
 import sqlite3
 import uuid
@@ -30,8 +31,26 @@ MASKED_DIR = ROOT / "storage" / "masked"
 MASKED_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="rayban-local-bridge", version="0.4.0")
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY", "").strip()
-PUBLIC_PATHS = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
+REQUIRE_API_KEY = _env_bool("REQUIRE_API_KEY", True)
+ALLOW_INSECURE_LAN = _env_bool("ALLOW_INSECURE_LAN", False)
+ALLOW_DOCS_WITHOUT_AUTH = _env_bool("ALLOW_DOCS_WITHOUT_AUTH", False)
+ENABLE_FILE_DOWNLOADS = _env_bool("ENABLE_FILE_DOWNLOADS", False)
+ALLOW_UNMASKED_IMAGE = _env_bool("ALLOW_UNMASKED_IMAGE", False)
+REQUIRE_PATIENT_CONSENT = _env_bool("REQUIRE_PATIENT_CONSENT", False)
+VIDEO_STORE = _env_bool("VIDEO_STORE", False)
+
+PUBLIC_PATHS = {"/", "/health"}
+DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 ASYNC_RESULTS: dict[str, dict] = {}
 ASYNC_RESULT_TTL_MINUTES = int(os.getenv("ASYNC_RESULT_TTL_MINUTES", "60"))
@@ -46,26 +65,55 @@ if not logger.handlers:
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
 
+def _client_host(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return request.client.host if request.client else ""
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
-    if not BRIDGE_API_KEY:
-        return await call_next(request)
+    path = request.url.path
 
-    if request.url.path in PUBLIC_PATHS or request.url.path.startswith("/files/"):
+    if path in PUBLIC_PATHS or (ALLOW_DOCS_WITHOUT_AUTH and path in DOC_PATHS):
         return await call_next(request)
 
     incoming_key = request.headers.get("x-api-key", "") or request.query_params.get("api_key", "")
-    if incoming_key != BRIDGE_API_KEY:
-        return JSONResponse(
-            status_code=401,
-            content={
-                "code": "UNAUTHORIZED",
-                "message": "유효한 x-api-key 헤더가 필요합니다.",
-            },
-        )
+    if BRIDGE_API_KEY:
+        if incoming_key != BRIDGE_API_KEY:
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "code": "UNAUTHORIZED",
+                    "message": "유효한 x-api-key 헤더가 필요합니다.",
+                },
+            )
+        return await call_next(request)
 
-    return await call_next(request)
+    if not REQUIRE_API_KEY or ALLOW_INSECURE_LAN or _is_loopback_host(_client_host(request)):
+        return await call_next(request)
 
+    if path in DOC_PATHS:
+        message = "LAN에서 API 문서를 보려면 BRIDGE_API_KEY를 설정하거나 ALLOW_DOCS_WITHOUT_AUTH=true를 명시하세요."
+    else:
+        message = "LAN 요청에는 BRIDGE_API_KEY 설정이 필요합니다. server/run_lan_bridge.sh를 다시 실행해 생성된 키를 앱에 입력하세요."
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "BRIDGE_API_KEY_REQUIRED",
+            "message": message,
+        },
+    )
 
 class IngestPayload(BaseModel):
     source: str
@@ -83,6 +131,28 @@ class RehabLabelPayload(BaseModel):
     performance: str
     flags: list[str] = []
     notes: str = ""
+
+
+class ConsentPayload(BaseModel):
+    patient_name: str
+    scope: str = "capture_analysis_storage"
+    consent_text: Optional[str] = None
+    granted_by: Optional[str] = None
+
+
+class MergeEventsPayload(BaseModel):
+    image_event_id: str
+    audio_event_id: str
+    patient_name: Optional[str] = None
+
+
+class ChartUpdatePayload(BaseModel):
+    chart: str
+
+
+class ChartReviewPayload(BaseModel):
+    reviewer: Optional[str] = "therapist"
+    notes: Optional[str] = ""
 
 
 def _error(status_code: int, code: str, detail: str):
@@ -115,7 +185,7 @@ def _normalize_error(exc: Exception):
     return "PROCESSING_ERROR", str(exc), True
 
 
-def _audit_log(event_id: str, level: str, message: str):
+def _audit_log(event_id: Optional[str], level: str, message: str):
     try:
         with _conn() as conn:
             conn.execute(
@@ -166,10 +236,64 @@ def _prune_async_results():
             ASYNC_RESULTS.pop(k, None)
 
 
+def _ensure_runtime_schema(conn: sqlite3.Connection):
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS chart_reviews (
+            event_id TEXT PRIMARY KEY,
+            reviewer TEXT NOT NULL DEFAULT 'therapist',
+            notes TEXT NOT NULL DEFAULT '',
+            quality_score INTEGER NOT NULL DEFAULT 0,
+            quality_level TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_chart_reviews_reviewed_at ON chart_reviews(reviewed_at);
+        """
+    )
+
+
 def _conn():
     if not DB_PATH.exists():
         raise HTTPException(status_code=500, detail="DB not initialized. Run: python init_db.py")
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    _ensure_runtime_schema(conn)
+    return conn
+
+
+DEFAULT_CONSENT_TEXT = (
+    "환자 또는 보호자가 치료 기록을 위해 사진/영상/음성/텍스트를 캡처하고, "
+    "로컬 서버에서 분석 및 차트 생성을 수행하며, 필요한 기간 동안 저장하는 것에 동의했습니다."
+)
+
+
+def _latest_patient_consent(conn: sqlite3.Connection, patient_name: str, scope: str = "capture_analysis_storage"):
+    return conn.execute(
+        """
+        SELECT id, patient_name, scope, consent_text, granted_by, created_at
+        FROM patient_consents
+        WHERE patient_name = ? AND scope = ? AND revoked_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (patient_name.strip(), scope.strip() or "capture_analysis_storage"),
+    ).fetchone()
+
+
+def _require_patient_consent(event_type: str, patient_name: str) -> Optional[str]:
+    if not REQUIRE_PATIENT_CONSENT or event_type not in {"audio", "image", "video", "text"}:
+        return None
+
+    name = (patient_name or "").strip()
+    if not name:
+        _error(428, "PATIENT_CONSENT_REQUIRED", "환자 동의 확인을 위해 patient_name이 필요합니다.")
+
+    with _conn() as conn:
+        row = _latest_patient_consent(conn, name)
+    if not row:
+        _error(428, "PATIENT_CONSENT_REQUIRED", f"{name} 환자의 활성 동의 기록이 필요합니다.")
+    return row[0]
 
 
 def _get_label_by_event_id(conn: sqlite3.Connection, event_id: str):
@@ -195,6 +319,27 @@ def _get_label_by_event_id(conn: sqlite3.Connection, event_id: str):
         "flags": flags,
         "notes": row[6] or "",
         "updated_at": row[7],
+    }
+
+
+def _get_chart_review_by_event_id(conn: sqlite3.Connection, event_id: str):
+    row = conn.execute(
+        """
+        SELECT event_id, reviewer, notes, quality_score, quality_level, reviewed_at
+        FROM chart_reviews
+        WHERE event_id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "event_id": row[0],
+        "reviewer": row[1],
+        "notes": row[2] or "",
+        "quality_score": int(row[3] or 0),
+        "quality_level": row[4] or "",
+        "reviewed_at": row[5],
     }
 
 
@@ -246,7 +391,7 @@ def _extract_measurements(text: str) -> str:
         results.append("측정값 " + " / ".join(d + "°" for d in stand_alone_deg[:4]))
 
     # VAS: VAS 숫자/10 or 통증 숫자점
-    vas_hits = re.findall(r"VAS\s*(\d+)(?:\s*/\s*10)?", text, re.IGNORECASE)
+    vas_hits = re.findall(r"(?:VAS|바스)\s*(\d+)(?:\s*/\s*10)?", text, re.IGNORECASE)
     if not vas_hits:
         vas_hits = re.findall(r"통증\s*(\d+)\s*(?:점|/10)", text)
     if vas_hits:
@@ -298,7 +443,7 @@ def _extract_risk_flags(text: str) -> str:
 
     # 통증 호소 (위험은 아니지만 기록)
     if "통증" in text and not negated("통증") and "통증 악화" not in text:
-        vas = re.search(r"VAS\s*(\d+)", text, re.IGNORECASE)
+        vas = re.search(r"(?:VAS|바스)\s*(\d+)", text, re.IGNORECASE)
         pain_note = f"통증 호소 (VAS {vas.group(1)}/10)" if vas else "통증 호소"
         parts.append(pain_note)
 
@@ -340,25 +485,233 @@ def _build_plan(text: str) -> str:
     return chr(10).join(f"· {p}" for p in plans[:5])
 
 
+def _normalize_clinical_terms(text: str) -> str:
+    """Clean common Korean STT variants before drafting SOAP."""
+    normalized = text or ""
+    normalized = re.sub(r"\b바스\s*(\d+)", r"VAS \1", normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"외전\s*시통증", "외전 시 통증", normalized)
+    normalized = re.sub(r"(호문독|호문동|홈문동)\s*교육[관함]?", "홈운동 교육함", normalized)
+    normalized = re.sub(r"홈\s*운동", "홈운동", normalized)
+    return normalized
+
+
+def _is_operational_image_note(line: str) -> bool:
+    stripped = (line or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(("[마스킹", "[face_", "[Ray-Ban 영상]", "[영상 분석")):
+        return True
+    if re.match(r"^t\+\d+(?:\.\d+)?s:", stripped):
+        return True
+    return any(token in stripped for token in ("detector=", "segmenter=", "파일=", "masked.jpg"))
+
+
+def _strip_operational_image_notes(text: str) -> str:
+    cleaned: list[str] = []
+    for line in (text or "").splitlines():
+        if _is_operational_image_note(line):
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+CHART_SECTION_KEYS = ["F/U>", "Dx.>", "S>", "O>", "P/E>", "A>", "rehab device>", "PTx.>", "Comment>"]
+
+
+def _parse_chart_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current_key = ""
+    for line in (text or "").splitlines():
+        trimmed = line.strip()
+        if trimmed in CHART_SECTION_KEYS:
+            current_key = trimmed
+            sections.setdefault(current_key, [])
+        elif current_key:
+            sections.setdefault(current_key, []).append(line)
+    return {
+        key: "\n".join(lines).strip()
+        for key, lines in sections.items()
+        if "\n".join(lines).strip()
+    }
+
+
+def _chart_quality(chart_text: str) -> dict:
+    sections = _parse_chart_sections(chart_text)
+    issues: list[dict[str, str]] = []
+
+    def add(code: str, section: str, message: str, severity: str = "review"):
+        issues.append({"code": code, "section": section, "message": message, "severity": severity})
+
+    required = {
+        "S>": "주관적 소견",
+        "O>": "객관적 측정값",
+        "P/E>": "신체 검사",
+        "A>": "임상 해석",
+        "PTx.>": "치료 계획",
+    }
+    for key, label in required.items():
+        if not sections.get(key):
+            add("missing_section", key, f"{label} 섹션이 비어 있습니다.", "needs_edit")
+
+    placeholders = [
+        "수동 입력 필요",
+        "내용 없음",
+        "환자 주관적 호소 미입력",
+        "이미지 기반 임상 소견 미입력",
+        "관찰/측정 수치 미입력",
+        "임상 검수 필요",
+    ]
+    for key, body in sections.items():
+        if any(token in body for token in placeholders):
+            add("placeholder", key, "자동 기본값이 남아 있어 실제 검수가 필요합니다.")
+
+    stt_noise = [
+        "구독",
+        "좋아요",
+        "알림 설정",
+        "시청해 주셔서",
+        "자막",
+        "영상에서",
+        "채널",
+    ]
+    if any(token in chart_text for token in stt_noise):
+        add("stt_noise", "S>", "비임상 음성 인식 문구가 섞였을 가능성이 있습니다.", "needs_edit")
+
+    operational_tokens = ["masking completed", "detector=", "segmenter=", "consent_id=", "_masked.jpg", "[마스킹 완료]"]
+    if any(token in chart_text for token in operational_tokens):
+        add("operational_text", "chart", "마스킹/운영 로그 문구가 차트 본문에 남아 있습니다.", "needs_edit")
+
+    s_text = sections.get("S>", "")
+    if s_text and len(re.sub(r"\s+", "", s_text)) < 8:
+        add("short_subjective", "S>", "주관적 소견이 너무 짧습니다.")
+
+    deduction = sum(25 if issue["severity"] == "needs_edit" else 12 for issue in issues)
+    score = max(0, 100 - deduction)
+    level = "good" if score >= 85 and not issues else "review" if score >= 60 else "needs_edit"
+    return {"score": score, "level": level, "issues": issues[:8]}
+
+
+def _clip_chart_text(text: str, max_chars: int = 700) -> str:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
+def _extract_marker_value(text: str, marker: str) -> str:
+    for line in (text or "").splitlines():
+        if marker in line:
+            return line.split(marker, 1)[1].strip()
+    return ""
+
+
+def _extract_pose_summary(text: str) -> str:
+    lines = (text or "").splitlines()
+    pose_lines: list[str] = []
+    collecting = False
+    for line in lines:
+        stripped = line.strip()
+        if "🦴 자세 분석" in stripped:
+            collecting = True
+            continue
+        if collecting:
+            if stripped.startswith(("위 이미지", "[마스킹", "[face_", "환자:", "📝", "🏷")):
+                break
+            if stripped:
+                pose_lines.append(stripped)
+        elif "관절 각도 측정" in stripped or stripped.startswith("•"):
+            pose_lines.append(stripped)
+
+    return "\n".join(pose_lines[:12]).strip()
+
+
+def _extract_voice_memo(text: str) -> str:
+    marker = "[치료사 음성 메모"
+    if marker not in (text or ""):
+        return ""
+
+    tail = text.split(marker, 1)[1]
+    if "\n" in tail:
+        tail = tail.split("\n", 1)[1]
+    stop_markers = ["📝 인식된 텍스트:", "🏷 장면:", "🦴 자세 분석:", "위 이미지"]
+    for stop in stop_markers:
+        if stop in tail:
+            tail = tail.split(stop, 1)[0]
+    return _clip_chart_text(tail, 500)
+
+
+def _looks_nonclinical_image(text: str, scene: str) -> bool:
+    haystack = f"{scene}\n{text}".lower()
+    return any(
+        token in haystack
+        for token in [
+            "screenshot",
+            "screen shot",
+            "document",
+            "keyboard",
+            "computer",
+            "xcode",
+            "127.0.0.1",
+            "localhost",
+            "rayban local bridge",
+            "codex",
+            "파일 변경",
+        ]
+    )
+
+
+def _image_chart_inputs(text: str, image_notes: str) -> tuple[str, str, bool]:
+    clean_text = _strip_operational_image_notes(text)
+    clean_image_notes = _strip_operational_image_notes(image_notes)
+    scene = _extract_marker_value(clean_text, "🏷 장면:")
+    voice_memo = _extract_voice_memo(clean_text)
+    pose_summary = _extract_pose_summary(clean_text)
+    nonclinical = _looks_nonclinical_image(clean_text, scene)
+
+    subjective = voice_memo or "환자 주관적 호소 미입력"
+    observations: list[str] = []
+
+    if nonclinical:
+        observations.append("비임상 스크린/문서 캡처로 판단되어 임상 관찰 제한")
+        observations.append("OCR 텍스트는 원본 기록에만 보관하고 SOAP 본문에는 반영하지 않음")
+
+    if scene:
+        observations.append(f"장면 분류: {scene}")
+    if pose_summary:
+        observations.append(pose_summary)
+    if clean_image_notes:
+        observations.append(clean_image_notes)
+    if not observations:
+        observations.append("이미지 기반 임상 소견 미입력")
+
+    return subjective, "\n".join(observations), nonclinical
+
+
 
 def build_soap(text: str, event_id: str = "", event_type: str = "text",
                image_notes: str = ""):
     """auto-chart generate_chart()로 11.txt 생성 + S/O/A/P dict 반환."""
     import datetime as _dt
     date_str = _dt.date.today().isoformat()
+    chart_text = _strip_operational_image_notes(_normalize_clinical_terms(text))
 
     # 11.txt 차트 생성
     if event_type == "image":
-        transcript = text.split("\n[")[0].strip()   # Vision 분석 앞부분
-        img_note = image_notes or text
+        transcript, img_note, nonclinical_image = _image_chart_inputs(chart_text, image_notes)
+        extraction_basis = f"{transcript}\n{img_note}"
     else:
-        transcript = text
+        transcript = chart_text
         img_note = ""
+        extraction_basis = chart_text
+        nonclinical_image = False
 
     # O/A/P 먼저 추출
-    o_val = _extract_measurements(text)
-    a_val = _extract_risk_flags(text)
-    p_val = _build_plan(text)
+    o_val = _extract_measurements(extraction_basis)
+    a_val = _extract_risk_flags(extraction_basis)
+    if nonclinical_image:
+        p_val = "· 임상 사진/음성 기록 재수집 후 SOAP 보완\n· 치료사 검수 후 최종 차트 확정"
+    else:
+        p_val = _build_plan(extraction_basis)
 
     chart_content = generate_chart(
         template_name="11",
@@ -377,7 +730,124 @@ def build_soap(text: str, event_id: str = "", event_type: str = "text",
         save_chart(chart_path, chart_content)
 
     # S/O/A/P dict (iOS 앱 호환)
-    return text, o_val, f"임상 해석: {a_val}", p_val
+    return transcript, o_val, f"임상 해석: {a_val}", p_val
+
+
+def _extract_image_note_line(text: str) -> str:
+    markers = ("[마스킹", "[face_", "[영상 분석", "[Ray-Ban 영상]")
+    lines = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(markers) and not _is_operational_image_note(stripped):
+            lines.append(stripped)
+    return "\n".join(lines)
+
+
+def _extract_patient_from_text(text: str) -> str:
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        for marker in ("환자:", "[환자]"):
+            if stripped.startswith(marker):
+                return stripped.split(marker, 1)[1].strip()
+    return ""
+
+
+def _get_event_for_merge(conn: sqlite3.Connection, event_id: str) -> dict:
+    row = conn.execute(
+        "SELECT id, source, event_type, raw_text, patient_name, created_at "
+        "FROM events WHERE id = ?",
+        (event_id,),
+    ).fetchone()
+    if not row:
+        _error(404, "EVENT_NOT_FOUND", f"event not found: {event_id}")
+    return {
+        "id": row[0],
+        "source": row[1],
+        "event_type": row[2],
+        "raw_text": row[3] or "",
+        "patient_name": row[4] or "",
+        "created_at": row[5],
+    }
+
+
+def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str = "") -> dict:
+    if image_event["event_type"] not in {"image", "video"}:
+        _error(400, "INVALID_IMAGE_EVENT", "image_event_id는 image 또는 video 이벤트여야 합니다.")
+    if audio_event["event_type"] not in {"audio", "text"}:
+        _error(400, "INVALID_AUDIO_EVENT", "audio_event_id는 audio 또는 text 이벤트여야 합니다.")
+
+    event_id = str(uuid.uuid4())
+    image_text = image_event["raw_text"]
+    audio_text = _normalize_clinical_terms(audio_event["raw_text"])
+    image_notes = _extract_image_note_line(image_text)
+    _, pe_note, nonclinical_image = _image_chart_inputs(image_text, image_notes)
+
+    patient = (
+        (patient_name or "").strip()
+        or image_event.get("patient_name")
+        or audio_event.get("patient_name")
+        or _extract_patient_from_text(image_text)
+        or None
+    )
+    consent_id = _require_patient_consent("text", patient or "")
+
+    subjective = audio_text.strip() or "환자 주관적 호소 미입력"
+    extraction_basis = "\n".join([subjective, pe_note])
+    o_val = _extract_measurements(extraction_basis)
+    a_val = _extract_risk_flags(extraction_basis)
+    if nonclinical_image and not audio_text.strip():
+        p_val = "· 임상 사진/음성 기록 재수집 후 SOAP 보완\n· 치료사 검수 후 최종 차트 확정"
+    else:
+        p_val = _build_plan(extraction_basis)
+
+    chart_content = generate_chart(
+        template_name="11",
+        uuid=event_id,
+        date=datetime.utcnow().date().isoformat(),
+        transcript_text=subjective,
+        image_notes=pe_note,
+        objective=o_val,
+        assessment=a_val,
+        plan=p_val,
+    )
+    save_chart(CHART_DIR / f"{event_id}_11.txt", chart_content)
+
+    raw_text = "\n\n".join(
+        [
+            "[통합 차트]",
+            f"환자: {patient or '미지정'}",
+            f"이미지 이벤트: {image_event['id']}",
+            f"음성 이벤트: {audio_event['id']}",
+            "[S: 음성/텍스트]",
+            subjective,
+            "[P/E: 이미지]",
+            pe_note,
+        ]
+    )
+    soap = {
+        "s": subjective,
+        "o": o_val,
+        "a": f"임상 해석: {a_val}",
+        "p": p_val,
+    }
+
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (event_id, "merged", "combined", raw_text, "note", "processed", patient),
+        )
+        conn.execute(
+            "INSERT INTO soap_notes (id, event_id, s, o, a, p) VALUES (?, ?, ?, ?, ?, ?)",
+            (str(uuid.uuid4()), event_id, soap["s"], soap["o"], soap["a"], soap["p"]),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), event_id, "info", f"merged image={image_event['id']} audio={audio_event['id']} consent_id={consent_id or '-'}"),
+        )
+        conn.commit()
+
+    return {"event_id": event_id, "soap": soap, "patient_name": patient}
 
 
 @lru_cache(maxsize=1)
@@ -404,13 +874,17 @@ def stt_whisper_local(audio_path: Optional[str]) -> str:
 
 def _process_event(source: str, event_type: str, text: Optional[str] = None, audio_path: Optional[str] = None, image_base64: Optional[str] = None, image_notes: str = "", patient_name: str = ""):
     audio_store = os.getenv("AUDIO_STORE", "false").lower() == "true"
+    image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     phi_redact = os.getenv("PHI_REDACT", "true").lower() == "true"
     soap_enabled = os.getenv("SOAP_ENABLED", "true").lower() == "true"
+    masking_meta = None
+    masking_audit = ""
 
     if event_type not in {"audio", "text", "command", "image", "video"}:
         raise HTTPException(status_code=400, detail="event_type must be audio/text/command/image/video")
 
     event_id = str(uuid.uuid4())
+    consent_id = _require_patient_consent(event_type, patient_name)
 
     if event_type == "audio":
         parsed_text = stt_whisper_local(audio_path)
@@ -419,25 +893,80 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
         img_bytes = base64.b64decode(image_base64)
         raw_path = UPLOAD_DIR / f"{uuid.uuid4()}.jpg"
         raw_path.write_bytes(img_bytes)
+        clinical_image_notes = _strip_operational_image_notes(image_notes)
 
-        # ── 2단계: 얼굴 마스킹 (MediaPipe → Haar fallback) ──
+        # ── 2단계: 얼굴 마스킹 (YuNet → MediaPipe → Haar fallback) ──
         masked_path = MASKED_DIR / f"{event_id}_masked.jpg"
         try:
-            mask_result = _mask_faces(raw_path, masked_path, method="blur", blur_kernel=61)
+            mask_result = _mask_faces(
+                raw_path,
+                masked_path,
+                method=os.getenv("FACE_MASK_METHOD", "solid"),
+                blur_kernel=91,
+            )
             face_count = mask_result.get("face_count", 0)
             detector = mask_result.get("detector", "unknown")
+            mask_shape = mask_result.get("shape", "box")
+            segment_sources = mask_result.get("segment_sources") or []
+            segment_note = f", shape={mask_shape}"
+            if segment_sources:
+                segment_note += f", segmenter={'+'.join(segment_sources)}"
             if face_count == 0:
-                # 얼굴 미검출 → 원본 그대로 저장, 차트 생성은 계속
+                masked_path.unlink(missing_ok=True)
+                if not ALLOW_UNMASKED_IMAGE:
+                    raw_path.unlink(missing_ok=True)
+                    _error(
+                        422,
+                        "FACE_NOT_DETECTED",
+                        f"얼굴을 감지하지 못해 이미지 처리를 중단했습니다. detector={detector}{segment_note}",
+                    )
                 import shutil
                 shutil.copy(raw_path, masked_path)
-                image_notes = f"[face_not_detected] 원본 저장. detector={detector}"
+                masking_meta = {
+                    "status": "face_not_detected",
+                    "face_count": 0,
+                    "detector": detector,
+                    "shape": mask_shape,
+                    "segmenters": segment_sources,
+                    "masked_file": masked_path.name,
+                    "unmasked_allowed": True,
+                }
+                masking_audit = f"masking face_not_detected detector={detector}{segment_note} file={masked_path.name} allow_unmasked=1"
             else:
-                image_notes = f"[마스킹 완료] {face_count}명 감지, detector={detector}, 파일={masked_path.name}"
+                masking_meta = {
+                    "status": "completed",
+                    "face_count": face_count,
+                    "detector": detector,
+                    "shape": mask_shape,
+                    "segmenters": segment_sources,
+                    "masked_file": masked_path.name,
+                }
+                masking_audit = f"masking completed face_count={face_count} detector={detector}{segment_note} file={masked_path.name}"
+        except HTTPException:
+            raw_path.unlink(missing_ok=True)
+            masked_path.unlink(missing_ok=True)
+            raise
         except Exception as e:
-            image_notes = f"[마스킹 오류] {e}"
+            masked_path.unlink(missing_ok=True)
+            if not ALLOW_UNMASKED_IMAGE:
+                raw_path.unlink(missing_ok=True)
+                _error(422, "MASKING_FAILED", f"얼굴 마스킹 실패로 이미지 처리를 중단했습니다: {e}")
+            masking_meta = {
+                "status": "failed_unmasked_allowed",
+                "error": str(e),
+                "unmasked_allowed": True,
+            }
+            masking_audit = f"masking failed allow_unmasked=1 error={e}"
 
-        parsed_text = (text or "") + "\n" + image_notes
-        parsed_text = parsed_text.strip()
+        if not image_store:
+            raw_path.unlink(missing_ok=True)
+
+        parsed_text = "\n".join(
+            part.strip()
+            for part in [text or "", clinical_image_notes]
+            if part and part.strip()
+        )
+        image_notes = clinical_image_notes
     else:
         parsed_text = text or ""
 
@@ -468,8 +997,13 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
             )
         conn.execute(
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), event_id, "info", "ingest processed"),
+            (str(uuid.uuid4()), event_id, "info", f"ingest processed consent_id={consent_id or '-'}"),
         )
+        if masking_audit:
+            conn.execute(
+                "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+                (str(uuid.uuid4()), event_id, "info", masking_audit),
+            )
         conn.commit()
 
     ack = {"note": "기록 완료", "question": "질문 접수 완료", "command": "명령 접수 완료"}[intent]
@@ -489,14 +1023,53 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
         "soap": soap,
         "policy": {
             "audio_store": audio_store,
+            "image_store": image_store,
             "phi_redact": phi_redact,
             "soap_enabled": soap_enabled,
+            "allow_unmasked_image": ALLOW_UNMASKED_IMAGE,
+            "patient_consent_required": REQUIRE_PATIENT_CONSENT,
+            "consent_id": consent_id,
         },
+        "media": {
+            "masking": masking_meta,
+        } if masking_meta else {},
     }
+
+
+def _event_status_result(processed: dict) -> dict:
+    """Normalize _process_event output to the /events/{id} response shape used by iOS."""
+    event_id = processed.get("event_id", "")
+    event_obj = None
+    if event_id:
+        with _conn() as conn:
+            row = conn.execute(
+                "SELECT id, source, event_type, raw_text, intent, status, created_at "
+                "FROM events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        if row:
+            event_obj = {
+                "id": row[0],
+                "source": row[1],
+                "event_type": row[2],
+                "raw_text": row[3],
+                "intent": row[4],
+                "status": row[5],
+                "created_at": row[6],
+            }
+    result = {"event": event_obj, "soap": processed.get("soap")}
+    if processed.get("media"):
+        result["media"] = processed["media"]
+    return result
 
 
 @app.get("/", response_class=HTMLResponse)
 def index():
+    return (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+
+
+@app.get("/legacy", response_class=HTMLResponse)
+def legacy_index():
     return """
 <!doctype html>
 <html lang='ko'>
@@ -786,8 +1359,102 @@ def health():
             "max_items": ASYNC_RESULT_MAX_ITEMS,
         },
         "processing": {"timeout_seconds": PROCESS_TIMEOUT_SECONDS},
+        "security": {
+            "api_key_configured": bool(BRIDGE_API_KEY),
+            "require_api_key": REQUIRE_API_KEY,
+            "allow_insecure_lan": ALLOW_INSECURE_LAN,
+            "docs_public_without_auth": ALLOW_DOCS_WITHOUT_AUTH,
+            "file_downloads_enabled": ENABLE_FILE_DOWNLOADS,
+            "allow_unmasked_image": ALLOW_UNMASKED_IMAGE,
+            "patient_consent_required": REQUIRE_PATIENT_CONSENT,
+            "video_store": VIDEO_STORE,
+        },
         "recent_error_logs_60m": recent_error_logs,
     }
+
+
+@app.post("/consents")
+def record_consent(payload: ConsentPayload):
+    patient_name = payload.patient_name.strip()
+    scope = payload.scope.strip() or "capture_analysis_storage"
+    if not patient_name:
+        _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+
+    consent_id = str(uuid.uuid4())
+    consent_text = (payload.consent_text or DEFAULT_CONSENT_TEXT).strip()
+    granted_by = (payload.granted_by or "").strip() or None
+
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO patient_consents (id, patient_name, scope, consent_text, granted_by)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (consent_id, patient_name, scope, consent_text, granted_by),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), None, "info", f"consent recorded patient={patient_name} scope={scope}"),
+        )
+        conn.commit()
+
+    return {
+        "ok": True,
+        "consent": {
+            "id": consent_id,
+            "patient_name": patient_name,
+            "scope": scope,
+            "granted_by": granted_by,
+        },
+    }
+
+
+@app.get("/consents/{patient_name}")
+def get_patient_consent(patient_name: str, scope: str = "capture_analysis_storage"):
+    name = patient_name.strip()
+    if not name:
+        _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+    with _conn() as conn:
+        row = _latest_patient_consent(conn, name, scope)
+    if not row:
+        return {"patient_name": name, "scope": scope, "active": False, "consent": None}
+    return {
+        "patient_name": name,
+        "scope": scope,
+        "active": True,
+        "consent": {
+            "id": row[0],
+            "patient_name": row[1],
+            "scope": row[2],
+            "consent_text": row[3],
+            "granted_by": row[4],
+            "created_at": row[5],
+        },
+    }
+
+
+@app.delete("/consents/{patient_name}")
+def revoke_patient_consent(patient_name: str, scope: str = "capture_analysis_storage"):
+    name = patient_name.strip()
+    if not name:
+        _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+
+    with _conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE patient_consents
+            SET revoked_at = CURRENT_TIMESTAMP
+            WHERE patient_name = ? AND scope = ? AND revoked_at IS NULL
+            """,
+            (name, scope.strip() or "capture_analysis_storage"),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), None, "info", f"consent revoked patient={name} scope={scope} count={cur.rowcount}"),
+        )
+        conn.commit()
+
+    return {"ok": True, "patient_name": name, "scope": scope, "revoked": cur.rowcount}
 
 
 @app.post("/ingest")
@@ -802,11 +1469,35 @@ def ingest(payload: IngestPayload):
     )
 
 
+@app.post("/events/merge")
+def merge_events(payload: MergeEventsPayload):
+    with _conn() as conn:
+        image_event = _get_event_for_merge(conn, payload.image_event_id)
+        audio_event = _get_event_for_merge(conn, payload.audio_event_id)
+
+    result = _create_merged_event(
+        image_event=image_event,
+        audio_event=audio_event,
+        patient_name=payload.patient_name or "",
+    )
+    return {
+        "event_id": result["event_id"],
+        "status": "processed",
+        "message": "통합 차트 생성 완료",
+        "patient_name": result["patient_name"],
+        "soap": result["soap"],
+    }
+
+
 def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_name: str = ""):
     attempts = 2
     last_error = None
     for i in range(attempts):
         try:
+            _touch_async_result(event_id, {
+                "status": "processing",
+                "message": f"audio processing attempt={i+1}",
+            })
             started = datetime.utcnow()
             result = _run_with_timeout(
                 _process_event,
@@ -816,7 +1507,15 @@ def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_na
                 audio_path=str(saved_path),
                 patient_name=patient_name,
             )
-            _touch_async_result(event_id, {"status": "done", "result": result})
+            inner_id = result.get("event_id", "")
+            if inner_id and inner_id != event_id:
+                import shutil as _shutil
+                inner_chart = CHART_DIR / f"{inner_id}_11.txt"
+                outer_chart = CHART_DIR / f"{event_id}_11.txt"
+                if inner_chart.exists() and not outer_chart.exists():
+                    _shutil.copy(inner_chart, outer_chart)
+
+            _touch_async_result(event_id, {"status": "done", "result": _event_status_result(result)})
             took_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
             _audit_log(event_id, "info", f"upload processed attempt={i+1} took_ms={took_ms}")
             return
@@ -907,14 +1606,79 @@ def get_event(event_id: str):
     if soap:
         soap_obj = {"s": soap[0], "o": soap[1], "a": soap[2], "p": soap[3], "created_at": soap[4]}
 
+    _audit_log(event_id, "info", "event viewed")
     return {"status": "done", "result": {"event": event_obj, "soap": soap_obj, "label": label}}
 
 
+def _delete_event_artifacts(event_id: str) -> list[str]:
+    deleted: list[str] = []
+    candidates = [CHART_DIR / f"{event_id}_11.txt"]
+    candidates.extend(MASKED_DIR.glob(f"{event_id}*"))
+    for path in candidates:
+        try:
+            if path.exists() and path.is_file():
+                path.unlink()
+                deleted.append(path.name)
+        except Exception as e:
+            logger.warning("artifact delete failed event_id=%s path=%s err=%s", event_id, path, e)
+    return deleted
 
 
-def _process_image_job(event_id: str, source: str, saved_path, description: str):
+@app.delete("/events/{event_id}")
+def delete_event(event_id: str):
+    deleted_files = _delete_event_artifacts(event_id)
+    with _conn() as conn:
+        ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not ev and not deleted_files:
+            raise HTTPException(status_code=404, detail="event not found")
+        if ev:
+            conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), None, "info", f"event deleted id={event_id} files={len(deleted_files)}"),
+        )
+        conn.commit()
+    ASYNC_RESULTS.pop(event_id, None)
+    return {"ok": True, "event_id": event_id, "deleted_files": deleted_files}
+
+
+@app.delete("/retention/events")
+def purge_old_events(days: int = 30):
+    if days < 1:
+        _error(400, "INVALID_RETENTION_DAYS", "days는 1 이상이어야 합니다.")
+
+    deleted_files: list[str] = []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id FROM events WHERE created_at < datetime('now', ?)",
+            (f"-{days} days",),
+        ).fetchall()
+        event_ids = [r[0] for r in rows]
+        for event_id in event_ids:
+            deleted_files.extend(_delete_event_artifacts(event_id))
+        if event_ids:
+            conn.executemany("DELETE FROM events WHERE id = ?", [(event_id,) for event_id in event_ids])
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), None, "info", f"retention purge days={days} events={len(event_ids)} files={len(deleted_files)}"),
+        )
+        conn.commit()
+
+    for event_id in event_ids:
+        ASYNC_RESULTS.pop(event_id, None)
+
+    return {"ok": True, "days": days, "purged_events": len(event_ids), "deleted_files": deleted_files}
+
+
+
+
+def _process_image_job(event_id: str, source: str, saved_path, description: str, patient_name: str = ""):
+    image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     try:
+        _touch_async_result(event_id, {"status": "processing", "message": "image processing"})
         text = description if description else f"[이미지 캡처] 파일: {saved_path.name}"
+        import base64
+        image_base64 = base64.b64encode(Path(saved_path).read_bytes()).decode("ascii")
         started = datetime.utcnow()
         result = _run_with_timeout(
             _process_event,
@@ -922,9 +1686,20 @@ def _process_image_job(event_id: str, source: str, saved_path, description: str)
             source=source,
             event_type="image",
             text=text,
+            image_base64=image_base64,
+            patient_name=patient_name,
         )
-        result["image_path"] = str(saved_path)
-        _touch_async_result(event_id, {"status": "done", "result": result})
+        inner_id = result.get("event_id", "")
+        if inner_id and inner_id != event_id:
+            import shutil as _shutil
+            inner_chart = CHART_DIR / f"{inner_id}_11.txt"
+            outer_chart = CHART_DIR / f"{event_id}_11.txt"
+            if inner_chart.exists() and not outer_chart.exists():
+                _shutil.copy(inner_chart, outer_chart)
+
+        if image_store:
+            result["image_path"] = str(saved_path)
+        _touch_async_result(event_id, {"status": "done", "result": _event_status_result(result)})
         took_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
         _audit_log(event_id, "info", f"image processed took_ms={took_ms}")
     except Exception as e:
@@ -937,6 +1712,9 @@ def _process_image_job(event_id: str, source: str, saved_path, description: str)
             "error_code": code,
             "retryable": retryable,
         })
+    finally:
+        if not image_store:
+            Path(saved_path).unlink(missing_ok=True)
 
 
 @app.post("/ingest-image")
@@ -944,6 +1722,7 @@ async def ingest_image(
     background_tasks: BackgroundTasks,
     source: str = Form("rayban"),
     description: str = Form(""),
+    patient_name: str = Form(""),
     image: UploadFile = File(...),
 ):
     ext = (Path(image.filename or "").suffix or "").lower()
@@ -965,7 +1744,7 @@ async def ingest_image(
 
     event_id = str(__import__('uuid').uuid4())
     _touch_async_result(event_id, {"status": "accepted", "message": "image uploaded"})
-    background_tasks.add_task(_process_image_job, event_id, source, saved_path, description)
+    background_tasks.add_task(_process_image_job, event_id, source, saved_path, description, patient_name)
 
     return {
         "event_id": event_id,
@@ -983,6 +1762,7 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="video_"))
     try:
+        _touch_async_result(event_id, {"status": "processing", "message": "video processing"})
         # ── 1. 오디오 추출 ──────────────────────────────────────────
         audio_path = tmp_dir / "audio.m4a"
         audio_ok = False
@@ -1019,10 +1799,18 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
         for i, frame_path in enumerate(frames):
             try:
                 masked_path = MASKED_DIR / f"{event_id}_f{i:04d}.jpg"
-                res = _mask_faces(frame_path, masked_path, method="blur", blur_kernel=61)
+                res = _mask_faces(
+                    frame_path,
+                    masked_path,
+                    method=os.getenv("FACE_MASK_METHOD", "solid"),
+                    blur_kernel=91,
+                )
                 face_count = res.get("face_count", 0)
                 detector = res.get("detector", "?")
-                frame_notes.append(f"t+{i}s: {face_count}명 감지 ({detector})")
+                shape = res.get("shape", "box")
+                sources = res.get("segment_sources") or []
+                source_note = f", {'+'.join(sources)}" if sources else ""
+                frame_notes.append(f"t+{i}s: {face_count}명 감지 ({detector}, {shape}{source_note})")
             except Exception:
                 frame_notes.append(f"t+{i}s: 분석 오류")
 
@@ -1047,7 +1835,7 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
         combined = (chr(10) + chr(10)).join(parts)
 
         # ── 6. SOAP 차트 생성 ────────────────────────────────────────
-        result = _process_event(source=source, event_type="video", text=combined)
+        result = _process_event(source=source, event_type="video", text=combined, patient_name=patient_name)
         inner_id = result.get("event_id", "")
 
         # outer_event_id 로도 차트 조회 가능하도록 복사
@@ -1093,6 +1881,8 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
         })
     finally:
         _shutil.rmtree(tmp_dir, ignore_errors=True)
+        if not VIDEO_STORE:
+            saved_path.unlink(missing_ok=True)
 
 
 @app.post("/ingest-video")
@@ -1139,11 +1929,190 @@ def get_chart(event_id: str):
     chart_path = CHART_DIR / f"{event_id}_11.txt"
     if not chart_path.exists():
         raise HTTPException(status_code=404, detail="차트 없음")
-    return {"event_id": event_id, "chart": chart_path.read_text(encoding="utf-8")}
+    _audit_log(event_id, "info", "chart viewed")
+    chart = chart_path.read_text(encoding="utf-8")
+    with _conn() as conn:
+        review = _get_chart_review_by_event_id(conn, event_id)
+    return {"event_id": event_id, "chart": chart, "quality": _chart_quality(chart), "review": review}
+
+
+@app.put("/charts/{event_id}")
+def update_chart(event_id: str, payload: ChartUpdatePayload):
+    """치료사가 검수한 차트 본문을 저장하고 SOAP 요약을 동기화."""
+    chart = (payload.chart or "").strip()
+    if len(chart) < 20:
+        _error(400, "CHART_TOO_SHORT", "저장할 차트 본문이 너무 짧습니다.")
+    if len(chart) > 20000:
+        _error(413, "CHART_TOO_LARGE", "저장할 차트 본문이 너무 깁니다.")
+
+    sections = _parse_chart_sections(chart)
+    s_val = sections.get("S>", "")
+    o_val = sections.get("O>", "")
+    a_val = sections.get("A>", "")
+    p_val = sections.get("PTx.>", "")
+    chart_path = CHART_DIR / f"{event_id}_11.txt"
+
+    with _conn() as conn:
+        ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not ev:
+            raise HTTPException(status_code=404, detail="event not found")
+
+        save_chart(chart_path, chart + "\n")
+        conn.execute("DELETE FROM chart_reviews WHERE event_id = ?", (event_id,))
+
+        row = conn.execute(
+            "SELECT id FROM soap_notes WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE soap_notes SET s = ?, o = ?, a = ?, p = ? WHERE id = ?",
+                (s_val, o_val, a_val, p_val, row[0]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO soap_notes (id, event_id, s, o, a, p) VALUES (?, ?, ?, ?, ?, ?)",
+                (str(uuid.uuid4()), event_id, s_val, o_val, a_val, p_val),
+            )
+
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), event_id, "info", "chart updated manually"),
+        )
+        conn.commit()
+
+    saved = chart_path.read_text(encoding="utf-8")
+    return {"ok": True, "event_id": event_id, "chart": saved, "quality": _chart_quality(saved), "review": None}
+
+
+@app.post("/charts/{event_id}/review")
+def mark_chart_reviewed(event_id: str, payload: ChartReviewPayload):
+    """치료사가 차트 초안을 검수 완료로 표시."""
+    chart_path = CHART_DIR / f"{event_id}_11.txt"
+    if not chart_path.exists():
+        raise HTTPException(status_code=404, detail="차트 없음")
+
+    chart = chart_path.read_text(encoding="utf-8")
+    quality = _chart_quality(chart)
+    reviewer = (payload.reviewer or "therapist").strip() or "therapist"
+    notes = (payload.notes or "").strip()
+
+    with _conn() as conn:
+        ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not ev:
+            raise HTTPException(status_code=404, detail="event not found")
+
+        conn.execute(
+            """
+            INSERT INTO chart_reviews (event_id, reviewer, notes, quality_score, quality_level, reviewed_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(event_id) DO UPDATE SET
+              reviewer=excluded.reviewer,
+              notes=excluded.notes,
+              quality_score=excluded.quality_score,
+              quality_level=excluded.quality_level,
+              reviewed_at=CURRENT_TIMESTAMP
+            """,
+            (event_id, reviewer, notes, int(quality.get("score") or 0), str(quality.get("level") or "")),
+        )
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), event_id, "info", f"chart reviewed reviewer={reviewer} quality={quality.get('level')} score={quality.get('score')}"),
+        )
+        conn.commit()
+        review = _get_chart_review_by_event_id(conn, event_id)
+
+    return {"ok": True, "event_id": event_id, "quality": quality, "review": review}
+
+
+@app.delete("/charts/{event_id}/review")
+def clear_chart_review(event_id: str):
+    """차트 검수 완료 표시를 해제."""
+    with _conn() as conn:
+        ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
+        if not ev:
+            raise HTTPException(status_code=404, detail="event not found")
+
+        deleted = conn.execute("DELETE FROM chart_reviews WHERE event_id = ?", (event_id,)).rowcount
+        conn.execute(
+            "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), event_id, "info", f"chart review cleared deleted={deleted}"),
+        )
+        conn.commit()
+
+    quality = None
+    chart_path = CHART_DIR / f"{event_id}_11.txt"
+    if chart_path.exists():
+        quality = _chart_quality(chart_path.read_text(encoding="utf-8"))
+    return {"ok": True, "event_id": event_id, "quality": quality, "review": None}
+
+
+@app.get("/chart-review")
+def chart_review(limit: int = 50, include_good: bool = False, event_type: str = "combined"):
+    """차트 품질 검수가 필요한 최근 기록 목록."""
+    n = max(1, min(limit, 100))
+    clean_event_type = event_type.strip().lower()
+    if clean_event_type not in {"combined", "all"}:
+        _error(400, "INVALID_EVENT_TYPE_FILTER", "event_type은 combined 또는 all이어야 합니다.")
+
+    where_sql = "" if clean_event_type == "all" else "WHERE event_type = ?"
+    params: list[str | int] = []
+    if clean_event_type != "all":
+        params.append(clean_event_type)
+    params.append(n)
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, source, event_type, intent, status, created_at, patient_name
+            FROM events
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+        items = []
+        for r in rows:
+            chart_path = CHART_DIR / f"{r[0]}_11.txt"
+            if not chart_path.exists():
+                continue
+
+            chart = chart_path.read_text(encoding="utf-8")
+            quality = _chart_quality(chart)
+            review = _get_chart_review_by_event_id(conn, r[0])
+            if review and not include_good:
+                continue
+            if not include_good and quality.get("level") == "good":
+                continue
+
+            label = _get_label_by_event_id(conn, r[0])
+            first_issue = (quality.get("issues") or [{}])[0]
+            items.append(
+                {
+                    "event_id": r[0],
+                    "source": r[1],
+                    "event_type": r[2],
+                    "intent": r[3],
+                    "status": r[4],
+                    "created_at": r[5],
+                    "patient_name": r[6] or None,
+                    "has_label": label is not None,
+                    "quality": quality,
+                    "review": review,
+                    "primary_issue": first_issue.get("message") or "",
+                }
+            )
+
+    return {"items": items}
 
 
 @app.get("/files/{filename}")
 def get_uploaded_file(filename: str):
+    if not ENABLE_FILE_DOWNLOADS:
+        _error(404, "FILE_DOWNLOAD_DISABLED", "원본 업로드 파일 다운로드는 기본 비활성화되어 있습니다.")
+
     safe_name = Path(filename).name
     file_path = UPLOAD_DIR / safe_name
     if not file_path.exists() or not file_path.is_file():
@@ -1251,6 +2220,53 @@ def recent_failures(limit: int = 20):
                 "level": r[1],
                 "message": r[2],
                 "created_at": r[3],
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/audit-logs")
+def audit_logs(limit: int = 50, level: str = "", event_id: str = ""):
+    n = max(1, min(limit, 200))
+    filters = []
+    params: list[str | int] = []
+
+    clean_level = level.strip().lower()
+    if clean_level:
+        if clean_level not in {"info", "warning", "error"}:
+            _error(400, "INVALID_AUDIT_LEVEL", "level은 info/warning/error 중 하나여야 합니다.")
+        filters.append("level = ?")
+        params.append(clean_level)
+
+    clean_event_id = event_id.strip()
+    if clean_event_id:
+        filters.append("event_id = ?")
+        params.append(clean_event_id)
+
+    where_sql = "WHERE " + " AND ".join(filters) if filters else ""
+    params.append(n)
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, event_id, level, message, created_at
+            FROM audit_logs
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
+    return {
+        "items": [
+            {
+                "id": r[0],
+                "event_id": r[1],
+                "level": r[2],
+                "message": r[3],
+                "created_at": r[4],
             }
             for r in rows
         ]

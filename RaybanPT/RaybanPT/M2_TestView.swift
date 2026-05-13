@@ -1,6 +1,30 @@
 import SwiftUI
+import Foundation
 import UniformTypeIdentifiers
 import MWDATCore
+
+private func dismissKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+private struct KeyboardDoneToolbar: ViewModifier {
+    func body(content: Content) -> some View {
+        content.toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("완료") {
+                    dismissKeyboard()
+                }
+            }
+        }
+    }
+}
+
+private extension View {
+    func keyboardDoneToolbar() -> some View {
+        modifier(KeyboardDoneToolbar())
+    }
+}
 
 struct M2_TestView: View {
     @StateObject private var vm: AdapterViewModel
@@ -16,7 +40,7 @@ struct M2_TestView: View {
     // 미라벨 뱃지
     @State private var unlabeledBadge = 0
 
-    enum Tab { case audio, text, camera, charts }
+    enum Tab { case audio, text, camera, checkup, charts }
 
     static var defaultBridgeURL: URL {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
@@ -60,6 +84,13 @@ struct M2_TestView: View {
             .tabItem { Label("텍스트", systemImage: "text.bubble.fill") }
             .tag(Tab.text)
 
+            // 점검 탭
+            NavigationStack {
+                CheckupTab(client: vm.client)
+            }
+            .tabItem { Label("점검", systemImage: "checklist.checked") }
+            .tag(Tab.checkup)
+
             // 차트 탭
             ChartListView(client: vm.client)
             .tabItem { Label("차트", systemImage: "doc.text.fill") }
@@ -84,6 +115,7 @@ struct M2_TestView: View {
                     .background(needsServerSetup ? Color.orange.opacity(0.2) : DS.ColorToken.surface,
                                 in: Circle())
             }
+            .accessibilityIdentifier("serverSettingsButton")
             .padding(.bottom, 68)
             .padding(.trailing, 16)
         }
@@ -120,11 +152,13 @@ struct M2_TestView: View {
             if oldTab == .charts { Task { await refreshBadge() } }
         }
         .sheet(isPresented: $showServerSetup) {
-            ServerSetupSheet { newURL, newAPIKey in
+            ServerSetupSheet(client: vm.client) { newURL, newAPIKey in
                 UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
                 UserDefaults.standard.set(newAPIKey, forKey: "bridge_api_key")
                 vm.client.updateBaseURL(URL(string: newURL)!)
                 vm.client.updateAPIKey(newAPIKey)
+                NotificationCenter.default.post(name: Notification.Name("bridgeSettingsDidChange"), object: nil)
+                Task { await refreshBadge() }
             }
         }
         .task { await refreshBadge() }
@@ -140,13 +174,456 @@ struct M2_TestView: View {
     }
 }
 
+// MARK: - 기기 E2E 점검
+
+private struct CheckupTab: View {
+    let client: BridgeClient
+    @Environment(DeviceSessionManager.self) private var deviceManager
+    @AppStorage("raybanpt_e2e_checklist_ids") private var storedCompletedIDs = ""
+    @State private var completedIDs: Set<String> = []
+    @State private var checkMessages: [String: String] = [:]
+    @State private var health: BridgeHealthResponse?
+    @State private var healthMessage = "아직 확인 전"
+    @State private var isCheckingHealth = false
+    @State private var isRunningFullCheck = false
+    @State private var lastCheckedAt = ""
+
+    private let items: [CheckupItem] = [
+        .init(id: "bridge", icon: "network", title: "브리지 연결", detail: "서버 응답과 DB 상태 확인"),
+        .init(id: "security", icon: "lock.shield", title: "보안 설정", detail: "API 키, 동의, 다운로드 차단 확인"),
+        .init(id: "patient", icon: "person.crop.circle.badge.checkmark", title: "환자 연결", detail: "음성/카메라 기록의 환자 이름 일치"),
+        .init(id: "audio", icon: "mic.fill", title: "음성 처리", detail: "최신 음성 기록 processed 확인"),
+        .init(id: "camera", icon: "camera.viewfinder", title: "카메라 처리", detail: "최신 사진 또는 영상 processed 확인"),
+        .init(id: "masking", icon: "face.dashed", title: "마스킹 성공", detail: "얼굴 마스킹 성공 기록 확인"),
+        .init(id: "merge", icon: "link.circle.fill", title: "통합 차트", detail: "최신 combined 이벤트 확인"),
+        .init(id: "chart", icon: "doc.text.magnifyingglass", title: "차트 품질", detail: "기술문구/STT 노이즈/자동 기본값 확인"),
+        .init(id: "label", icon: "tag.fill", title: "라벨링", detail: "통합 차트 라벨 저장 확인"),
+        .init(id: "audit", icon: "list.bullet.clipboard", title: "감사 로그", detail: "최근 60분 오류 없음 확인"),
+    ]
+
+    private var completedCount: Int {
+        items.filter { completedIDs.contains($0.id) }.count
+    }
+
+    private var bridgeStatusText: String {
+        if isCheckingHealth || isRunningFullCheck { return "확인 중" }
+        guard let health else { return "대기" }
+        return health.ok && health.db.ok ? "정상" : "확인 필요"
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Label("브리지", systemImage: "server.rack")
+                            .font(.headline)
+                        Spacer()
+                        StatusPill(text: bridgeStatusText, ok: health?.ok == true && health?.db.ok == true)
+                    }
+
+                    Text(client.baseURL.absoluteString)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+
+                    Button {
+                        Task { await runHealthCheck() }
+                    } label: {
+                        Label(isCheckingHealth ? "확인 중" : "연결 확인", systemImage: "arrow.clockwise")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isCheckingHealth || isRunningFullCheck)
+
+                    Text(healthMessage)
+                        .font(.caption)
+                        .foregroundStyle(health?.ok == true ? Color.secondary : Color.orange)
+
+                    if let health {
+                        VStack(spacing: 8) {
+                            HealthLine(title: "DB", detail: health.db.ok ? "정상" : (health.db.error ?? "오류"), ok: health.db.ok)
+                            HealthLine(title: "API 키", detail: client.apiKey.isEmpty ? "앱 키 없음" : "앱 키 입력됨", ok: health.security.api_key_configured && !client.apiKey.isEmpty)
+                            HealthLine(title: "환자 동의", detail: health.security.patient_consent_required ? "필수" : "꺼짐", ok: health.security.patient_consent_required)
+                            HealthLine(title: "원본 다운로드", detail: health.security.file_downloads_enabled ? "켜짐" : "차단", ok: !health.security.file_downloads_enabled)
+                            HealthLine(title: "비마스킹 저장", detail: health.security.allow_unmasked_image ? "허용" : "차단", ok: !health.security.allow_unmasked_image)
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("서버")
+            }
+
+            Section {
+                HStack {
+                    Label("진행률", systemImage: "chart.bar.fill")
+                    Spacer()
+                    Text("\(completedCount)/\(items.count)")
+                        .fontWeight(.semibold)
+                }
+                ProgressView(value: Double(completedCount), total: Double(items.count))
+
+                Button {
+                    Task { await runFullCheck() }
+                } label: {
+                    HStack {
+                        Spacer()
+                        if isRunningFullCheck {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "checklist.checked")
+                        }
+                        Text(isRunningFullCheck ? "전체 점검 중..." : "전체 점검 실행")
+                        Spacer()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isCheckingHealth || isRunningFullCheck)
+
+                if !lastCheckedAt.isEmpty {
+                    Label("마지막 점검 \(lastCheckedAt)", systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section {
+                ForEach(items) { item in
+                    CheckupRow(
+                        item: item,
+                        detail: checkMessages[item.id] ?? item.detail,
+                        isOn: Binding(
+                            get: { completedIDs.contains(item.id) },
+                            set: { setCompleted(item.id, to: $0) }
+                        )
+                    )
+                }
+            } header: {
+                Text("기기 E2E")
+            }
+
+            Section {
+                HStack {
+                    Label(deviceManager.statusMessage, systemImage: deviceManager.linkState == .connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                        .foregroundStyle(deviceManager.linkState == .connected ? .green : .orange)
+                    Spacer()
+                    Button("재연결") {
+                        deviceManager.retryConnection()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } header: {
+                Text("Ray-Ban 상태")
+            }
+
+            Section {
+                Button("체크 초기화", role: .destructive) {
+                    completedIDs.removeAll()
+                    persistCompletedIDs()
+                }
+            }
+        }
+        .navigationTitle("기기 점검")
+        .navigationBarTitleDisplayMode(.large)
+        .onAppear {
+            loadCompletedIDs()
+        }
+    }
+
+    private func runHealthCheck() async {
+        isCheckingHealth = true
+        defer { isCheckingHealth = false }
+
+        do {
+            let response = try await client.health()
+            health = response
+            let serverOK = response.ok && response.db.ok
+            var protectedAPIOK = !response.security.api_key_configured
+            if response.security.api_key_configured && !client.apiKey.isEmpty {
+                do {
+                    _ = try await client.recentEvents(limit: 1)
+                    protectedAPIOK = true
+                } catch {
+                    protectedAPIOK = false
+                    healthMessage = UserFacingError.message(for: error)
+                }
+            }
+
+            let securityOK = response.security.api_key_configured
+                && !client.apiKey.isEmpty
+                && protectedAPIOK
+                && response.security.require_api_key
+                && response.security.patient_consent_required
+                && !response.security.file_downloads_enabled
+                && !response.security.allow_unmasked_image
+
+            setCompleted("bridge", to: serverOK)
+            setCompleted("security", to: securityOK)
+
+            if serverOK && securityOK {
+                healthMessage = "서버와 보안 설정이 준비됐습니다."
+            } else if response.security.api_key_configured && !protectedAPIOK {
+                healthMessage = client.apiKey.isEmpty
+                    ? "서버 API 키를 앱에 입력하고 저장하세요."
+                    : "API 키가 맞지 않습니다. 서버 설정에서 다시 입력하고 저장하세요."
+            } else if serverOK {
+                healthMessage = "서버는 연결됐고, 보안 설정을 확인하세요."
+            } else {
+                healthMessage = "서버 응답 또는 DB 상태를 확인하세요."
+            }
+        } catch {
+            health = nil
+            setCompleted("bridge", to: false)
+            healthMessage = UserFacingError.message(for: error)
+        }
+    }
+
+    private func runFullCheck() async {
+        isRunningFullCheck = true
+        isCheckingHealth = true
+        healthMessage = "전체 점검을 실행 중입니다."
+        checkMessages = Dictionary(uniqueKeysWithValues: items.map { ($0.id, "점검 대기") })
+        completedIDs.removeAll()
+        persistCompletedIDs()
+
+        defer {
+            isCheckingHealth = false
+            isRunningFullCheck = false
+            lastCheckedAt = Date.now.formatted(date: .omitted, time: .shortened)
+        }
+
+        do {
+            let response = try await client.health()
+            health = response
+
+            let serverOK = response.ok && response.db.ok
+            setCheck("bridge", ok: serverOK, detail: serverOK ? "서버/DB 정상" : "서버 또는 DB 상태 확인 필요")
+
+            var protectedAPIOK = !response.security.api_key_configured
+            if response.security.api_key_configured && !client.apiKey.isEmpty {
+                do {
+                    _ = try await client.recentEvents(limit: 1)
+                    protectedAPIOK = true
+                } catch {
+                    protectedAPIOK = false
+                }
+            }
+
+            let securityOK = response.security.api_key_configured
+                && !client.apiKey.isEmpty
+                && protectedAPIOK
+                && response.security.require_api_key
+                && response.security.patient_consent_required
+                && !response.security.file_downloads_enabled
+                && !response.security.allow_unmasked_image
+            setCheck("security", ok: securityOK, detail: securityOK ? "API 키/동의/다운로드 차단 정상" : "API 키 또는 보안 설정 확인 필요")
+
+            let events = try await client.recentEvents(limit: 50)
+            let latestAudio = events.first { $0.event_type == "audio" && $0.status == "processed" }
+            let latestCamera = events.first { ($0.event_type == "image" || $0.event_type == "video") && $0.status == "processed" }
+            let latestCombined = events.first { $0.event_type == "combined" && $0.status == "processed" }
+
+            let patientNames = [latestAudio?.patient_name, latestCamera?.patient_name]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            let patientOK = !patientNames.isEmpty && Set(patientNames).count == 1
+            setCheck("patient", ok: patientOK, detail: patientOK ? "\(patientNames[0]) 환자로 음성/카메라 연결됨" : "같은 환자의 음성+카메라 기록 필요")
+
+            setCheck("audio", ok: latestAudio != nil, detail: latestAudio.map { "음성 \(shortID($0.id)) 처리 완료" } ?? "processed 음성 기록 없음")
+            setCheck("camera", ok: latestCamera != nil, detail: latestCamera.map { "\(mediaLabel($0.event_type)) \(shortID($0.id)) 처리 완료" } ?? "processed 카메라/영상 기록 없음")
+
+            if let camera = latestCamera {
+                let eventDetail = try? await client.getEvent(camera.id)
+                let rawText = eventDetail?.result?.event?.raw_text ?? ""
+                let logs = (try? await client.auditLogs(limit: 30, eventId: camera.id)) ?? []
+                let maskingText = ([rawText] + logs.map(\.message)).joined(separator: "\n")
+                let maskingOK = maskingText.contains("[마스킹 완료]")
+                    || maskingText.contains("masking completed")
+                    || (camera.event_type == "video" && maskingText.contains("명 감지") && !maskingText.contains("0명 감지"))
+                setCheck("masking", ok: maskingOK, detail: maskingOK ? "마스킹 성공 기록 확인" : "마스킹 성공 로그를 찾지 못함")
+            } else {
+                setCheck("masking", ok: false, detail: "카메라 기록이 필요합니다")
+            }
+
+            if let combined = latestCombined {
+                setCheck("merge", ok: true, detail: "통합 차트 \(shortID(combined.id)) 생성됨")
+
+                if let chart = try? await client.fetchChart(eventId: combined.id) {
+                    let clean = !containsOperationalMaskingText(chart.chart)
+                    let qualityOK = chart.quality.map { $0.level == "good" } ?? true
+                    let chartOK = clean && qualityOK
+                    let detail = clean
+                        ? chartQualityDetail(chart.quality)
+                        : "차트 본문에 마스킹 기술문구 남음"
+                    setCheck("chart", ok: chartOK, detail: detail)
+                } else {
+                    setCheck("chart", ok: false, detail: "통합 차트 본문 조회 실패")
+                }
+
+                let label = try? await client.fetchLabel(eventId: combined.id)
+                let labelOK = combined.has_label || label != nil
+                setCheck("label", ok: labelOK, detail: labelOK ? "통합 차트 라벨 저장됨" : "통합 차트 라벨링 필요")
+            } else {
+                setCheck("merge", ok: false, detail: "통합 차트가 아직 없습니다")
+                setCheck("chart", ok: false, detail: "통합 차트 생성 후 확인 가능")
+                setCheck("label", ok: false, detail: "통합 차트 라벨링 필요")
+            }
+
+            let recentErrors = response.recent_error_logs_60m ?? 0
+            setCheck("audit", ok: recentErrors == 0, detail: recentErrors == 0 ? "최근 60분 오류 로그 없음" : "최근 60분 오류 \(recentErrors)건")
+
+            healthMessage = completedCount == items.count
+                ? "전체 점검을 통과했습니다."
+                : "\(completedCount)/\(items.count)개 통과. 미완료 항목을 확인하세요."
+        } catch {
+            health = nil
+            setCheck("bridge", ok: false, detail: UserFacingError.message(for: error))
+            healthMessage = UserFacingError.message(for: error)
+        }
+    }
+
+    private func loadCompletedIDs() {
+        completedIDs = Set(
+            storedCompletedIDs
+                .split(separator: ",")
+                .map { String($0) }
+        )
+    }
+
+    private func setCompleted(_ id: String, to isCompleted: Bool) {
+        if isCompleted {
+            completedIDs.insert(id)
+        } else {
+            completedIDs.remove(id)
+        }
+        persistCompletedIDs()
+    }
+
+    private func setCheck(_ id: String, ok: Bool, detail: String) {
+        checkMessages[id] = detail
+        setCompleted(id, to: ok)
+    }
+
+    private func shortID(_ id: String) -> String {
+        String(id.prefix(8))
+    }
+
+    private func mediaLabel(_ eventType: String) -> String {
+        eventType == "video" ? "영상" : "카메라"
+    }
+
+    private func containsOperationalMaskingText(_ text: String) -> Bool {
+        let tokens = ["[마스킹", "detector=", "segmenter=", "masked.jpg", "파일="]
+        return tokens.contains { text.contains($0) }
+    }
+
+    private func chartQualityDetail(_ quality: ChartQuality?) -> String {
+        guard let quality else {
+            return "차트 본문 기술문구 없음"
+        }
+
+        let status: String
+        switch quality.level {
+        case "good":
+            status = "품질 좋음"
+        case "needs_edit":
+            status = "수정 필요"
+        default:
+            status = "검수 권장"
+        }
+
+        if let firstIssue = quality.issues.first {
+            return "\(status) \(quality.score)점 · \(firstIssue.message)"
+        }
+        return "\(status) \(quality.score)점"
+    }
+
+    private func persistCompletedIDs() {
+        storedCompletedIDs = items
+            .map(\.id)
+            .filter { completedIDs.contains($0) }
+            .joined(separator: ",")
+    }
+}
+
+private struct CheckupItem: Identifiable {
+    let id: String
+    let icon: String
+    let title: String
+    let detail: String
+}
+
+private struct CheckupRow: View {
+    let item: CheckupItem
+    let detail: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            Label {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.title)
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } icon: {
+                Image(systemName: item.icon)
+                    .foregroundStyle(isOn ? .green : .secondary)
+            }
+        }
+    }
+}
+
+private struct StatusPill: View {
+    let text: String
+    let ok: Bool
+
+    var body: some View {
+        Text(text)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(ok ? .green : .orange)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background((ok ? Color.green : Color.orange).opacity(0.12), in: Capsule())
+    }
+}
+
+private struct HealthLine: View {
+    let title: String
+    let detail: String
+    let ok: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .foregroundStyle(ok ? .green : .orange)
+                .frame(width: 18)
+            Text(title)
+            Spacer()
+            Text(detail)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .font(.caption)
+    }
+}
+
 // MARK: - 서버 설정 Sheet
 
 private struct ServerSetupSheet: View {
+    let client: BridgeClient
     let onSave: (String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var urlText: String = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
     @State private var apiKeyText: String = UserDefaults.standard.string(forKey: "bridge_api_key") ?? ""
+    @State private var isCheckingConnection = false
+    @State private var connectionMessage = ""
+    @State private var connectionOK = false
 
     var isValid: Bool {
         URL(string: urlText)?.scheme?.hasPrefix("http") == true
@@ -155,6 +632,17 @@ private struct ServerSetupSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    NavigationLink {
+                        CheckupTab(client: client)
+                    } label: {
+                        Label("기기 점검 열기", systemImage: "checklist.checked")
+                    }
+                } footer: {
+                    Text("하단 탭에서 보이지 않으면 여기에서 같은 점검 화면을 열 수 있습니다.")
+                        .font(.caption)
+                }
+
                 Section {
                     TextField("http://서버주소:8791", text: $urlText)
                         .keyboardType(.URL)
@@ -168,21 +656,49 @@ private struct ServerSetupSheet: View {
                 }
 
                 Section {
-                    TextField("API 키 (선택)", text: $apiKeyText)
+                    Button {
+                        dismissKeyboard()
+                        Task { await checkConnection() }
+                    } label: {
+                        HStack {
+                            if isCheckingConnection {
+                                ProgressView()
+                            } else {
+                                Image(systemName: connectionOK ? "checkmark.circle.fill" : "network")
+                                    .foregroundStyle(connectionOK ? .green : .blue)
+                            }
+                            Text(isCheckingConnection ? "확인 중..." : "연결 확인")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .disabled(!isValid || isCheckingConnection)
+                    .accessibilityIdentifier("checkBridgeConnectionButton")
+
+                    if !connectionMessage.isEmpty {
+                        Text(connectionMessage)
+                            .font(.caption)
+                            .foregroundStyle(connectionOK ? .green : .red)
+                    }
+                } footer: {
+                    Text("저장 전 iPhone에서 bridge /health 응답을 받을 수 있는지 확인합니다.")
+                        .font(.caption)
+                }
+
+                Section {
+                    TextField("server/.bridge_api_key 값", text: $apiKeyText)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                 } header: {
                     Text("API 키")
                 } footer: {
-                    Text("서버에 BRIDGE_API_KEY 설정된 경우 입력하세요.")
+                    Text("LAN 연결은 API 키가 필요합니다. run_lan_bridge.sh 실행 시 출력되는 키를 입력하세요.")
                         .font(.caption)
                 }
 
                 Section {
                     Button("저장") {
-                        let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        let trimmedKey = apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onSave(trimmedURL, trimmedKey)
+                        dismissKeyboard()
+                        saveSettings()
                         dismiss()
                     }
                     .disabled(!isValid)
@@ -190,6 +706,8 @@ private struct ServerSetupSheet: View {
                     .foregroundStyle(isValid ? .blue : .gray)
                 }
             }
+            .scrollDismissesKeyboard(.interactively)
+            .keyboardDoneToolbar()
             .navigationTitle("서버 설정")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -198,6 +716,95 @@ private struct ServerSetupSheet: View {
                 }
             }
         }
+    }
+
+    private func checkConnection() async {
+        let trimmedURL = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = URL(string: trimmedURL), baseURL.scheme?.hasPrefix("http") == true else {
+            connectionOK = false
+            connectionMessage = "유효한 http URL을 입력하세요."
+            return
+        }
+
+        isCheckingConnection = true
+        connectionMessage = ""
+        defer { isCheckingConnection = false }
+
+        let healthURL = baseURL.appending(path: "health")
+        var request = URLRequest(url: healthURL)
+        request.timeoutInterval = 5
+
+        let apiKey = apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !apiKey.isEmpty {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                connectionOK = false
+                connectionMessage = "연결 실패: 서버 응답을 확인하세요."
+                return
+            }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let ok = json["ok"] as? Bool,
+               !ok {
+                connectionOK = false
+                connectionMessage = "연결됨, DB 상태를 확인하세요."
+                return
+            }
+
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let security = json["security"] as? [String: Any] {
+                let configured = security["api_key_configured"] as? Bool ?? false
+                let required = security["require_api_key"] as? Bool ?? false
+                if required && !configured {
+                    connectionOK = false
+                    connectionMessage = "서버 API 키가 아직 설정되지 않았습니다."
+                    return
+                }
+                if configured && apiKey.isEmpty {
+                    connectionOK = false
+                    connectionMessage = "서버 API 키를 입력해야 업로드할 수 있습니다."
+                    return
+                }
+                if configured {
+                    let probeURL = baseURL.appending(path: "recent-events").appending(queryItems: [
+                        URLQueryItem(name: "limit", value: "1")
+                    ])
+                    var probeRequest = URLRequest(url: probeURL)
+                    probeRequest.timeoutInterval = 5
+                    probeRequest.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+
+                    let (probeData, probeResponse) = try await URLSession.shared.data(for: probeRequest)
+                    guard let probeHTTP = probeResponse as? HTTPURLResponse else {
+                        connectionOK = false
+                        connectionMessage = "보호 API 응답을 확인할 수 없습니다."
+                        return
+                    }
+                    guard (200..<300).contains(probeHTTP.statusCode) else {
+                        let body = String(data: probeData, encoding: .utf8) ?? ""
+                        connectionOK = false
+                        connectionMessage = UserFacingError.message(for: BridgeError.badStatus(probeHTTP.statusCode, body: body))
+                        return
+                    }
+                }
+            }
+
+            connectionOK = true
+            saveSettings(trimmedURL: trimmedURL, apiKey: apiKey)
+            connectionMessage = "연결 성공: API 키 확인됨. 저장 완료."
+        } catch {
+            connectionOK = false
+            connectionMessage = UserFacingError.message(for: error)
+        }
+    }
+
+    private func saveSettings(trimmedURL: String? = nil, apiKey: String? = nil) {
+        let url = trimmedURL ?? urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = apiKey ?? apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSave(url, key)
     }
 }
 
@@ -211,22 +818,27 @@ private struct DeviceStatusBanner: View {
     var body: some View {
         // 연결 끊겼을 때만 표시
         if !isConnected {
-            HStack(spacing: DS.Spacing.xs) {
+            HStack(alignment: .top, spacing: 9) {
                 Image(systemName: "antenna.radiowaves.left.and.right.slash")
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(DS.ColorToken.warning)
+                    .frame(width: 18, height: 18)
                 Text(deviceManager.statusMessage)
-                    .font(.system(size: DS.FontSize.caption, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.86)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Button("재연결") {
                     deviceManager.retryConnection()
                 }
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(DS.ColorToken.warning)
             }
-            .padding(.horizontal, DS.Spacing.sm)
-            .padding(.vertical, 6)
-            .background(DS.ColorToken.surface, in: Capsule())
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .padding(.horizontal, 16)
             .padding(.top, 56) // 내비바 아래
             .transition(.move(edge: .top).combined(with: .opacity))
         }
@@ -243,6 +855,9 @@ private struct AudioTab: View {
     @State private var selectedPatient: Patient? = nil
     @State private var showPatientPicker = false
     @State private var store = PatientStore()
+    @State private var showConsentAlert = false
+    @State private var pendingAudioURL: URL?
+    @State private var pendingConsentPatientName = ""
 
     var body: some View {
         ScrollView {
@@ -254,7 +869,7 @@ private struct AudioTab: View {
                     HStack {
                         Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
                             .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
-                        Text(selectedPatient?.name ?? "환자 선택 (선택사항)")
+                        Text(selectedPatient?.name ?? "환자 선택 (필수)")
                             .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
                         Spacer()
                         if selectedPatient != nil {
@@ -282,9 +897,13 @@ private struct AudioTab: View {
                         if audioRecorder.isRecording {
                             audioRecorder.stopRecording()
                             if let url = audioRecorder.recordedFileURL {
-                                vm.uploadAudio(fileURL: url, patientName: selectedPatient?.name)
+                                queueAudioUpload(url)
                             }
                         } else {
+                            guard selectedPatient != nil else {
+                                showPatientPicker = true
+                                return
+                            }
                             await audioRecorder.startRecording()
                         }
                     }
@@ -331,7 +950,7 @@ private struct AudioTab: View {
                     .buttonStyle(.bordered)
 
                     Button {
-                        if let u = selectedAudioURL { vm.uploadAudio(fileURL: u, patientName: selectedPatient?.name) }
+                        if let u = selectedAudioURL { queueAudioUpload(u) }
                     } label: {
                         Label("업로드", systemImage: "arrow.up.circle")
                             .frame(maxWidth: .infinity)
@@ -362,6 +981,52 @@ private struct AudioTab: View {
                 selectedAudioURL = url
             }
         }
+        .alert("환자 동의 확인", isPresented: $showConsentAlert) {
+            Button("동의 기록 후 업로드") {
+                confirmConsentAndUpload()
+            }
+            Button("취소", role: .cancel) { }
+        } message: {
+            Text("\(pendingConsentPatientName) 환자/보호자의 녹음, 분석, 차트 생성 동의를 확인한 뒤 진행하세요.")
+        }
+    }
+
+    private func queueAudioUpload(_ url: URL) {
+        guard let patient = selectedPatient else {
+            showPatientPicker = true
+            return
+        }
+
+        Task { @MainActor in
+            do {
+                if try await vm.client.hasActiveConsent(patientName: patient.name) {
+                    vm.uploadAudio(fileURL: url, patientName: patient.name)
+                } else {
+                    pendingAudioURL = url
+                    pendingConsentPatientName = patient.name
+                    showConsentAlert = true
+                }
+            } catch {
+                pendingAudioURL = url
+                pendingConsentPatientName = patient.name
+                showConsentAlert = true
+            }
+        }
+    }
+
+    private func confirmConsentAndUpload() {
+        guard let url = pendingAudioURL else { return }
+        let patientName = pendingConsentPatientName
+        Task { @MainActor in
+            do {
+                try await vm.client.recordConsent(patientName: patientName)
+                vm.uploadAudio(fileURL: url, patientName: patientName)
+                pendingAudioURL = nil
+            } catch {
+                vm.state = .failed(message: UserFacingError.message(for: error))
+                vm.lastMessage = UserFacingError.message(for: error)
+            }
+        }
     }
 }
 
@@ -373,6 +1038,9 @@ private struct TextTab: View {
     @State private var selectedPatient: Patient? = nil
     @State private var showPatientPicker = false
     @State private var store = PatientStore()
+    @State private var showConsentAlert = false
+    @State private var pendingText = ""
+    @State private var pendingConsentPatientName = ""
 
     var body: some View {
         ScrollView {
@@ -384,7 +1052,7 @@ private struct TextTab: View {
                     HStack {
                         Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
                             .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
-                        Text(selectedPatient?.name ?? "환자 선택 (선택사항)")
+                        Text(selectedPatient?.name ?? "환자 선택 (필수)")
                             .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
                         Spacer()
                         if selectedPatient != nil {
@@ -412,11 +1080,13 @@ private struct TextTab: View {
                     TextField("환자 상태, 치료 내용 등을 입력하세요...", text: $textInput, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
                         .lineLimit(5...12)
+                        .accessibilityIdentifier("clinicalMemoInput")
                 }
 
                 Button {
+                    dismissKeyboard()
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    vm.sendText(textInput, patientName: selectedPatient?.name)
+                    queueTextSend()
                 } label: {
                     Label("전송", systemImage: "paperplane.fill")
                         .frame(maxWidth: .infinity)
@@ -424,13 +1094,65 @@ private struct TextTab: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(textInput.trimmingCharacters(in: .whitespaces).isEmpty)
+                .accessibilityIdentifier("sendTextButton")
 
                 ResultCard(vm: vm)
             }
             .padding(20)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .keyboardDoneToolbar()
         .navigationTitle("텍스트 전송")
         .navigationBarTitleDisplayMode(.large)
+        .alert("환자 동의 확인", isPresented: $showConsentAlert) {
+            Button("동의 기록 후 전송") {
+                confirmConsentAndSend()
+            }
+            Button("취소", role: .cancel) { }
+        } message: {
+            Text("\(pendingConsentPatientName) 환자/보호자의 텍스트 기록, 분석, 차트 생성 동의를 확인한 뒤 진행하세요.")
+        }
+    }
+
+    private func queueTextSend() {
+        guard let patient = selectedPatient else {
+            showPatientPicker = true
+            return
+        }
+
+        let text = textInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+
+        Task { @MainActor in
+            do {
+                if try await vm.client.hasActiveConsent(patientName: patient.name) {
+                    vm.sendText(text, patientName: patient.name)
+                } else {
+                    pendingText = text
+                    pendingConsentPatientName = patient.name
+                    showConsentAlert = true
+                }
+            } catch {
+                pendingText = text
+                pendingConsentPatientName = patient.name
+                showConsentAlert = true
+            }
+        }
+    }
+
+    private func confirmConsentAndSend() {
+        let text = pendingText
+        let patientName = pendingConsentPatientName
+        Task { @MainActor in
+            do {
+                try await vm.client.recordConsent(patientName: patientName)
+                vm.sendText(text, patientName: patientName)
+                pendingText = ""
+            } catch {
+                vm.state = .failed(message: UserFacingError.message(for: error))
+                vm.lastMessage = UserFacingError.message(for: error)
+            }
+        }
     }
 }
 

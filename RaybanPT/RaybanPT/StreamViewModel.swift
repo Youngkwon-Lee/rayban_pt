@@ -140,6 +140,12 @@ final class StreamViewModel {
         streamSession?.capturePhoto(format: .jpeg)
     }
 
+    func usePhoneCameraPhoto(_ image: UIImage) {
+        lastSavedPhoto = nil
+        capturedPhoto = image
+        statusMessage = "iPhone 사진 준비됨"
+    }
+
     func saveCapturedPhoto(patientName: String?, eventId: String? = nil) async throws -> SavedCapture {
         if let lastSavedPhoto {
             return lastSavedPhoto

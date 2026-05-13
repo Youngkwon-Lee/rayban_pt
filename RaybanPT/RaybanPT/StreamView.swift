@@ -1,8 +1,44 @@
 import SwiftUI
 import MWDATCore
 import UIKit
+import AVKit
 
 struct StreamView: View {
+    private enum PhotoSource {
+        case rayban
+        case phone
+
+        var analysisTitle: String {
+            switch self {
+            case .rayban:
+                return "Ray-Ban 카메라"
+            case .phone:
+                return "iPhone 카메라"
+            }
+        }
+
+        var uploadSource: String {
+            switch self {
+            case .rayban:
+                return "rayban-camera"
+            case .phone:
+                return "iphone-camera"
+            }
+        }
+    }
+
+    private struct PendingConsentAction: Identifiable {
+        enum Kind {
+            case photo(UIImage)
+            case video(URL)
+            case audio(URL)
+        }
+
+        let id = UUID()
+        let patientName: String
+        let kind: Kind
+    }
+
     enum SaveStatus: Equatable {
         case idle
         case saving(String)
@@ -45,6 +81,8 @@ struct StreamView: View {
     @State private var showPhotoSheet = false
     @State private var showChartSheet = false
     @State private var showLabelSheet = false
+    @State private var showVideoSheet = false
+    @State private var showPhoneCamera = false
     @State private var lastEventId: String? = nil
     @State private var analysisText: String = ""
     @State private var isCapturing = false
@@ -53,6 +91,8 @@ struct StreamView: View {
     @State private var showCaptureHistory = false
     @State private var showPhotoPermissionAlert = false
     @State private var photoPermissionMessage = "사진 보관함 접근 권한이 필요합니다."
+    @State private var photoSource: PhotoSource = .rayban
+    @State private var pendingConsentAction: PendingConsentAction?
 
     // STT
     @State private var audioRecorder = AudioRecorder()
@@ -153,10 +193,30 @@ struct StreamView: View {
                     analysisText: $analysisText,
                     saveStatus: saveStatus,
                     onSave: { await saveCurrentPhoto() },
-                    onSend: { await analyzeAndSend(photo) },
+                    onSend: { await runWithConsent(.photo(photo)) },
                     onViewChart: { showPhotoSheet = false; showChartSheet = true }
                 )
             }
+        }
+        .sheet(isPresented: $showVideoSheet) {
+            if let url = vm.recordedVideoURL {
+                VideoReviewSheet(
+                    videoURL: url,
+                    isAnalyzing: $isAnalyzing,
+                    analysisText: $analysisText,
+                    saveStatus: saveStatus,
+                    onSave: { await saveCurrentVideo() },
+                    onSend: { await runWithConsent(.video(url)) },
+                    onViewChart: { showVideoSheet = false; showChartSheet = true }
+                )
+            }
+        }
+        .sheet(isPresented: $showPhoneCamera) {
+            PhoneCameraPicker { image in
+                photoSource = .phone
+                vm.usePhoneCameraPhoto(image)
+            }
+            .ignoresSafeArea()
         }
         // 차트 시트
         .sheet(isPresented: $showChartSheet) {
@@ -183,6 +243,13 @@ struct StreamView: View {
                 }
             }
         }
+        .onChange(of: vm.recordedVideoURL) { _, newURL in
+            if newURL != nil {
+                analysisText = ""
+                lastEventId = nil
+                showVideoSheet = true
+            }
+        }
         .sheet(isPresented: $showCaptureHistory) {
             NavigationStack {
                 CaptureHistoryView()
@@ -195,6 +262,16 @@ struct StreamView: View {
             Button("닫기", role: .cancel) { }
         } message: {
             Text(photoPermissionMessage)
+        }
+        .alert(item: $pendingConsentAction) { action in
+            Alert(
+                title: Text("환자 동의 확인"),
+                message: Text("\(action.patientName) 환자/보호자의 촬영, 녹음, 분석, 차트 생성 동의를 확인한 뒤 진행하세요."),
+                primaryButton: .default(Text("동의 기록 후 진행")) {
+                    Task { await recordConsentAndContinue(action) }
+                },
+                secondaryButton: .cancel(Text("취소"))
+            )
         }
     }
 
@@ -212,14 +289,10 @@ struct StreamView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                 } else {
-                    VStack(spacing: 12) {
-                        Image(systemName: "video.slash.fill")
-                            .font(.system(size: 40, weight: .light))
-                            .foregroundStyle(.white.opacity(0.4))
-                Text(vm.isStreaming ? "프레임 수신 중..." : "스트리밍 시작 버튼을 눌러주세요")
-                            .font(.subheadline)
-                            .foregroundStyle(.white.opacity(0.4))
-                    }
+                    EmptyCameraState(
+                        isStreaming: vm.isStreaming,
+                        hasActiveDevice: vm.hasActiveDevice
+                    )
                 }
 
                 // 녹화 중 테두리
@@ -357,149 +430,210 @@ struct StreamView: View {
     // MARK: - 하단 컨트롤바
 
     private var controlBar: some View {
-        VStack(spacing: 0) {
-            // 에러 메시지
+        VStack(spacing: 8) {
             if let err = vm.errorMessage {
                 Text(err)
                     .font(.caption)
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 8)
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.red.opacity(0.78), in: Capsule())
             }
 
-            HStack(spacing: 0) {
-                // 왼쪽: 마이크(STT) 버튼
-                Button {
-                    Task {
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        if audioRecorder.isRecording {
-                            await stopAndTranscribe()
-                        } else {
-                            await audioRecorder.startRecording()
-                        }
-                    }
-                } label: {
-                    MicButton(
-                        isRecording: audioRecorder.isRecording,
-                        isTranscribing: isTranscribing
+            VStack(spacing: 8) {
+                HStack(spacing: 10) {
+                    Label(
+                        currentPatient?.name ?? "환자 미선택",
+                        systemImage: currentPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill"
                     )
-                }
-                .frame(maxWidth: .infinity)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(currentPatient == nil ? 0.72 : 0.94))
+                    .lineLimit(1)
 
-                // 중앙: 촬영 / 스트리밍 토글
-                Button {
-                    Task {
-                        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-                        if vm.isStreaming {
-                            // 촬영
-                            isCapturing = true
-                            vm.capturePhoto()
-                            try? await Task.sleep(nanoseconds: 120_000_000)
-                            isCapturing = false
-                        } else {
-                            // 환자 미선택 시 picker 먼저
-                            if currentPatient == nil {
-                                showPatientPicker = true
+                    Spacer(minLength: 8)
+
+                    if currentPatient != nil {
+                        Label("동의 확인", systemImage: "checkmark.shield.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .lineLimit(1)
+                    }
+
+                    Label(vm.isStreaming ? "스트리밍" : vm.statusMessage, systemImage: vm.isStreaming ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(vm.isStreaming ? DS.ColorToken.success : .white.opacity(0.72))
+                        .lineLimit(1)
+                }
+
+                HStack(alignment: .center, spacing: 12) {
+                    Button {
+                        Task {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            if audioRecorder.isRecording {
+                                await stopAndTranscribe()
                             } else {
-                                await vm.startStreaming()
+                                await audioRecorder.startRecording()
                             }
                         }
+                    } label: {
+                        DockActionButton(
+                            title: audioRecorder.isRecording ? "중지" : "음성",
+                            systemImage: audioRecorder.isRecording ? "stop.fill" : "mic.fill",
+                            tint: audioRecorder.isRecording ? .red : .white,
+                            isActive: audioRecorder.isRecording,
+                            isBusy: isTranscribing
+                        )
                     }
-                } label: {
-                    CaptureButton(isStreaming: vm.isStreaming, isCapturing: isCapturing)
-                }
-                .frame(maxWidth: .infinity)
-                .disabled(!vm.hasActiveDevice && !vm.isStreaming)
+                    .buttonStyle(.plain)
+                    .disabled(isTranscribing)
 
-                // 오른쪽: 스트리밍 중지 or 영상 업로드
-                rightActionButton
-                    .frame(maxWidth: .infinity)
+                    Spacer(minLength: 0)
+
+                    Button {
+                        Task {
+                            UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+                            if vm.isStreaming {
+                                isCapturing = true
+                                photoSource = .rayban
+                                vm.capturePhoto()
+                                try? await Task.sleep(nanoseconds: 120_000_000)
+                                isCapturing = false
+                            } else if vm.hasActiveDevice {
+                                if currentPatient == nil {
+                                    showPatientPicker = true
+                                } else {
+                                    await vm.startStreaming()
+                                }
+                            } else {
+                                openPhoneCamera()
+                            }
+                        }
+                    } label: {
+                        VStack(spacing: 6) {
+                            CaptureButton(
+                                isStreaming: vm.isStreaming,
+                                isCapturing: isCapturing,
+                                usesPhoneCameraFallback: !vm.hasActiveDevice
+                            )
+                            Text(centerButtonTitle)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+                    }
+                    .buttonStyle(.plain)
+
+                    Spacer(minLength: 0)
+
+                    rightActionButton
+                }
+
+                Text(controlHintText)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.86)
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 14)
+            .padding(.top, 9)
+            .padding(.bottom, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(.white.opacity(0.16), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
         }
-        .background(.regularMaterial)
     }
 
     @ViewBuilder
     private var rightActionButton: some View {
         if vm.isStreaming {
-            HStack(spacing: 16) {
+            HStack(spacing: 10) {
                 Button {
                     Task { await toggleRecording() }
                 } label: {
-                    RecordButton(isRecording: vm.recorder.isRecording)
+                    DockActionButton(
+                        title: vm.recorder.isRecording ? "녹화중" : "녹화",
+                        systemImage: vm.recorder.isRecording ? "stop.fill" : "record.circle",
+                        tint: .red,
+                        isActive: vm.recorder.isRecording
+                    )
                 }
+                .buttonStyle(.plain)
                 .disabled(isSavingInProgress)
 
                 Button {
                     Task { await stopStreamingFlow() }
                 } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 52, height: 52)
-                        .background(Color.red.opacity(0.88), in: Circle())
+                    DockActionButton(
+                        title: "종료",
+                        systemImage: "xmark",
+                        tint: .white,
+                        isActive: false
+                    )
                 }
+                .buttonStyle(.plain)
             }
         } else if lastEventId != nil {
             // 완료 후 버튼 그룹
-            HStack(spacing: 16) {
+            HStack(spacing: 10) {
                 // 라벨링 버튼
                 Button {
                     showLabelSheet = true
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color.orange.opacity(0.9))
-                            .frame(width: 52, height: 52)
-                        Image(systemName: "tag.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(.white)
-                    }
+                    DockActionButton(title: "라벨", systemImage: "tag.fill", tint: .orange)
                 }
+                .buttonStyle(.plain)
                 // 차트 보기 버튼
                 Button {
                     showChartSheet = true
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 } label: {
-                    ZStack {
-                        Circle()
-                            .fill(Color.indigo.opacity(0.9))
-                            .frame(width: 52, height: 52)
-                        Image(systemName: "doc.text.fill")
-                            .font(.system(size: 20))
-                            .foregroundStyle(.white)
-                    }
+                    DockActionButton(title: "차트", systemImage: "doc.text.fill", tint: .indigo)
                 }
+                .buttonStyle(.plain)
             }
         } else if let url = vm.recordedVideoURL {
-            HStack(spacing: 16) {
+            HStack(spacing: 10) {
                 Button {
                     Task { await saveCurrentVideo() }
                 } label: {
-                    Image(systemName: vm.lastSavedVideo == nil ? "square.and.arrow.down.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundStyle(isSavingInProgress ? Color.secondary : Color.white)
-                        .frame(width: 52, height: 52)
-                        .background(Color.green.opacity(0.9), in: Circle())
+                    DockActionButton(
+                        title: "저장",
+                        systemImage: vm.lastSavedVideo == nil ? "square.and.arrow.down.fill" : "checkmark.circle.fill",
+                        tint: .green,
+                        isBusy: isSavingInProgress
+                    )
                 }
+                .buttonStyle(.plain)
                 .disabled(isSavingInProgress)
 
                 Button {
-                    Task { await uploadVideo(url) }
+                    Task { await runWithConsent(.video(url)) }
                 } label: {
-                    Image(systemName: uploadButtonSymbol)
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle((isAnalyzing || isSavingInProgress) ? Color.secondary : Color.white)
-                        .frame(width: 52, height: 52)
-                        .background(Color.indigo.opacity(0.9), in: Circle())
+                    DockActionButton(
+                        title: "분석",
+                        systemImage: uploadButtonSymbol,
+                        tint: .indigo,
+                        isBusy: isAnalyzing || isSavingInProgress
+                    )
                 }
+                .buttonStyle(.plain)
                 .disabled(isAnalyzing || isSavingInProgress)
+                .accessibilityLabel("분석 및 업로드")
             }
         } else {
-            Color.clear.frame(width: 52, height: 52)
+            DockActionButton(
+                title: "대기",
+                systemImage: "ellipsis",
+                tint: .white.opacity(0.6),
+                isDisabled: true
+            )
         }
     }
 
@@ -519,6 +653,86 @@ struct StreamView: View {
         return isAnalyzing ? "ellipsis" : "arrow.up.circle.fill"
     }
 
+    private var controlHintText: String {
+        if vm.recorder.isRecording {
+            return "녹화 중입니다. 종료하면 영상 리뷰에서 저장하거나 분석할 수 있습니다."
+        }
+        if vm.isStreaming {
+            return "가운데 버튼은 사진 촬영, 오른쪽은 녹화와 종료입니다."
+        }
+        if lastEventId != nil {
+            return "차트가 생성되었습니다. 라벨을 붙이거나 차트를 확인하세요."
+        }
+        if vm.recordedVideoURL != nil {
+            return "녹화 영상이 준비되었습니다. 저장하거나 분석 업로드하세요."
+        }
+        if !vm.hasActiveDevice {
+            return "Ray-Ban 없이 iPhone 카메라로 촬영할 수 있습니다."
+        }
+        if currentPatient == nil {
+            return "환자를 선택하면 스트리밍을 시작할 수 있습니다."
+        }
+        return "Ray-Ban 연결 상태를 확인하고 시작 버튼을 누르세요."
+    }
+
+    private var centerButtonTitle: String {
+        if vm.isStreaming {
+            return "촬영"
+        }
+        return vm.hasActiveDevice ? "시작" : "폰촬영"
+    }
+
+    private func openPhoneCamera() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            showToast("iPhone 카메라를 사용할 수 없습니다")
+            return
+        }
+        saveStatus = .idle
+        lastEventId = nil
+        analysisText = ""
+        showPhoneCamera = true
+    }
+
+    private func runWithConsent(_ kind: PendingConsentAction.Kind) async {
+        guard let patient = currentPatient else {
+            showToast("환자를 먼저 선택하세요")
+            showPatientPicker = true
+            return
+        }
+
+        do {
+            if try await bridgeVm.client.hasActiveConsent(patientName: patient.name) {
+                await runConsentAction(kind)
+            } else {
+                pendingConsentAction = PendingConsentAction(patientName: patient.name, kind: kind)
+            }
+        } catch {
+            pendingConsentAction = PendingConsentAction(patientName: patient.name, kind: kind)
+        }
+    }
+
+    private func recordConsentAndContinue(_ action: PendingConsentAction) async {
+        do {
+            try await bridgeVm.client.recordConsent(patientName: action.patientName)
+            showToast("동의 기록 완료")
+            await runConsentAction(action.kind)
+        } catch {
+            showToast("동의 기록 실패: \(bridgeErrorMessage(error))")
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+    }
+
+    private func runConsentAction(_ kind: PendingConsentAction.Kind) async {
+        switch kind {
+        case .photo(let image):
+            await analyzeAndSend(image)
+        case .video(let url):
+            await uploadVideo(url)
+        case .audio(let url):
+            await transcribeAudio(fileURL: url)
+        }
+    }
+
     private func analyzeAndSend(_ image: UIImage) async {
         isAnalyzing = true
         analysisText = "Vision 분석 중..."
@@ -529,7 +743,7 @@ struct StreamView: View {
         analysisText = displayParts.joined(separator: "\n")
 
         let patientTag = currentPatient.map { "환자: \($0.name)" } ?? "환자: 미지정"
-        var descParts = ["[Ray-Ban 카메라 캡처 분석]", patientTag]
+        var descParts = ["[\(photoSource.analysisTitle) 캡처 분석]", patientTag]
 
         // STT 음성 메모가 있으면 S> 섹션 힌트로 포함
         if !sttText.isEmpty {
@@ -545,7 +759,8 @@ struct StreamView: View {
             let resp = try await bridgeVm.client.uploadImage(
                 image,
                 description: description,
-                patientName: currentPatient?.name
+                patientName: currentPatient?.name,
+                source: photoSource.uploadSource
             )
             lastEventId = resp.event_id
             analysisText += "\n✅ 차트 생성 완료"
@@ -555,7 +770,7 @@ struct StreamView: View {
         } catch {
             let errMsg = bridgeErrorMessage(error)
             analysisText += "\n⚠️ 업로드 실패 → 텍스트 전송\n\(errMsg)"
-            bridgeVm.sendText(description)
+            bridgeVm.sendText(description, patientName: currentPatient?.name)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showToast("⚠️ 업로드 실패")
         }
@@ -630,7 +845,7 @@ struct StreamView: View {
                 patientName: currentPatient?.name
             )
             lastEventId = accepted.event_id          // 우선 outer id로 차트 버튼 활성화
-            analysisText = "⚙️ 처리 중... (\(accepted.size_kb ?? 0)KB)"
+            analysisText = "영상 분석 업로드 완료\n⚙️ 처리 중... (\(accepted.size_kb ?? 0)KB)"
             showToast("⚙️ 영상 분석 중...")
 
             // 2) 백그라운드 폴링 — 완료 시 toast 업데이트 (최대 60초)
@@ -646,18 +861,19 @@ struct StreamView: View {
                         if let innerId = final?.result?.event?.id {
                             lastEventId = innerId
                         }
-                        analysisText = "📄 차트 생성됨"
+                        analysisText = "✅ 영상 분석 완료\n📄 차트 생성됨"
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
                         showToast("📄 차트 생성 완료 — 버튼을 눌러 확인하세요")
                     } else if final?.status == "error" {
-                        analysisText = "⚠️ \(final?.error ?? "처리 오류")"
+                        let message = UserFacingError.message(code: final?.error_code, fallback: final?.error)
+                        analysisText = "⚠️ 영상 분석 실패\n\(message)"
                         showToast("⚠️ 처리 실패")
                     }
                     // timeout이면 lastEventId(outer) 유지 — 서버 측 차트 복사로 조회 가능
                 }
             }
         } catch {
-            analysisText = "⚠️ \(bridgeErrorMessage(error))"
+            analysisText = "⚠️ 영상 업로드 실패\n\(bridgeErrorMessage(error))"
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showToast("⚠️ 업로드 실패")
         }
@@ -669,7 +885,10 @@ struct StreamView: View {
     private func stopAndTranscribe() async {
         audioRecorder.stopRecording()
         guard let fileURL = audioRecorder.recordedFileURL else { return }
+        await runWithConsent(.audio(fileURL))
+    }
 
+    private func transcribeAudio(fileURL: URL) async {
         isTranscribing = true
 
         do {
@@ -705,15 +924,7 @@ struct StreamView: View {
     }
 
     private func bridgeErrorMessage(_ error: Error) -> String {
-        (error as? BridgeError).map { e in
-            switch e {
-            case .badStatus(let c, let b): return "HTTP \(c): \(b)"
-            case .network(let m): return m
-            case .decode(let m): return m
-            case .fileNotFound: return "파일 없음"
-            case .invalidURL: return "URL 오류"
-            }
-        } ?? error.localizedDescription
+        UserFacingError.message(for: error)
     }
 
     private func handleSaveError(_ error: Error) {
@@ -746,6 +957,107 @@ struct StreamView: View {
             Image(systemName: autoSaveCaptures ? "externaldrive.badge.checkmark" : "externaldrive.badge.plus")
                 .foregroundStyle(.white)
         }
+    }
+}
+
+// MARK: - 카메라 빈 상태
+
+private struct EmptyCameraState: View {
+    let isStreaming: Bool
+    let hasActiveDevice: Bool
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: iconName)
+                .font(.system(size: 44, weight: .light))
+                .foregroundStyle(.white.opacity(0.48))
+
+            VStack(spacing: 6) {
+                Text(title)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.84))
+                Text(message)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.48))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
+        }
+        .padding(.horizontal, 32)
+    }
+
+    private var iconName: String {
+        if isStreaming { return "camera.metering.unknown" }
+        return hasActiveDevice ? "play.circle" : "camera.fill"
+    }
+
+    private var title: String {
+        if isStreaming { return "프레임 수신 대기 중" }
+        return hasActiveDevice ? "촬영 준비됨" : "iPhone 카메라 사용 가능"
+    }
+
+    private var message: String {
+        if isStreaming { return "잠시 후 카메라 프레임이 표시됩니다." }
+        if hasActiveDevice { return "환자를 선택하고 시작 버튼을 누르세요." }
+        return "가운데 폰촬영 버튼으로 사진을 찍어 분석할 수 있습니다."
+    }
+}
+
+// MARK: - 하단 독 버튼
+
+private struct DockActionButton: View {
+    let title: String
+    let systemImage: String
+    let tint: Color
+    var isActive = false
+    var isBusy = false
+    var isDisabled = false
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Circle()
+                    .fill(backgroundColor)
+                    .frame(width: 44, height: 44)
+                Circle()
+                    .stroke(borderColor, lineWidth: 1)
+                    .frame(width: 44, height: 44)
+
+                if isBusy {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                        .scaleEffect(0.78)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(iconColor)
+                }
+            }
+
+            Text(title)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.white.opacity(isDisabled ? 0.34 : 0.82))
+                .lineLimit(1)
+                .frame(width: 52)
+        }
+        .frame(width: 56, height: 62)
+        .opacity(isDisabled ? 0.55 : 1)
+    }
+
+    private var backgroundColor: Color {
+        if isDisabled { return Color.white.opacity(0.06) }
+        if isActive { return tint.opacity(0.25) }
+        return Color.black.opacity(0.38)
+    }
+
+    private var borderColor: Color {
+        if isDisabled { return Color.white.opacity(0.08) }
+        return isActive ? tint.opacity(0.85) : Color.white.opacity(0.18)
+    }
+
+    private var iconColor: Color {
+        isDisabled ? Color.white.opacity(0.34) : tint
     }
 }
 
@@ -787,6 +1099,7 @@ private struct MicButton: View {
 private struct CaptureButton: View {
     let isStreaming: Bool
     let isCapturing: Bool
+    var usesPhoneCameraFallback = false
 
     var body: some View {
         ZStack {
@@ -794,10 +1107,10 @@ private struct CaptureButton: View {
                 // 촬영 버튼 (흰 원)
                 Circle()
                     .stroke(.white, lineWidth: 3)
-                    .frame(width: 74, height: 74)
+                    .frame(width: 62, height: 62)
                 Circle()
                     .fill(.white)
-                    .frame(width: 60, height: 60)
+                    .frame(width: 50, height: 50)
                     .scaleEffect(isCapturing ? 0.85 : 1.0)
                     .animation(.easeOut(duration: 0.1), value: isCapturing)
             } else {
@@ -811,12 +1124,12 @@ private struct CaptureButton: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 74, height: 74)
+                        .frame(width: 62, height: 62)
                         .shadow(color: Color.blue.opacity(0.35), radius: 10, y: 4)
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 26))
+                    Image(systemName: usesPhoneCameraFallback ? "camera.fill" : "play.fill")
+                        .font(.system(size: 23))
                         .foregroundStyle(.white)
-                        .offset(x: 3)
+                        .offset(x: usesPhoneCameraFallback ? 0 : 3)
                 }
             }
         }
@@ -956,6 +1269,163 @@ private struct PhotoReviewSheet: View {
                     Button("닫기") { dismiss() }
                 }
             }
+        }
+    }
+}
+
+private struct VideoReviewSheet: View {
+    let videoURL: URL
+    @Binding var isAnalyzing: Bool
+    @Binding var analysisText: String
+    let saveStatus: StreamView.SaveStatus
+    let onSave: () async -> Void
+    let onSend: () async -> Void
+    let onViewChart: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var player = AVPlayer()
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(spacing: 20) {
+                    VideoPlayer(player: player)
+                        .frame(minHeight: 260)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+
+                    if !analysisText.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("분석 상태", systemImage: "film.stack")
+                                .font(.headline)
+                            Text(analysisText)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .padding(16)
+                        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+
+                    if analysisText.contains("✅") {
+                        Button {
+                            onViewChart()
+                        } label: {
+                            Label("생성된 차트 보기", systemImage: "doc.text.fill")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.indigo)
+                    }
+
+                    if let message = saveStatus.message {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(saveStatus.tint)
+                                .frame(width: 8, height: 8)
+                            Text(message)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        Button {
+                            Task { await onSave() }
+                        } label: {
+                            Label("영상 저장", systemImage: "square.and.arrow.down")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.green)
+                        .disabled({
+                            if case .saving = saveStatus { return true }
+                            return false
+                        }())
+
+                        Button {
+                            Task { await onSend() }
+                        } label: {
+                            Group {
+                                if isAnalyzing {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .tint(.white)
+                                } else {
+                                    Label("분석 & 업로드", systemImage: "waveform.and.magnifyingglass")
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 2)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.purple)
+                        .disabled(isAnalyzing || analysisText.contains("✅"))
+                    }
+                }
+                .padding(20)
+            }
+            .navigationTitle("영상 리뷰")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("닫기") { dismiss() }
+                }
+            }
+            .onAppear {
+                player = AVPlayer(url: videoURL)
+                player.play()
+            }
+            .onDisappear {
+                player.pause()
+            }
+        }
+    }
+}
+
+private struct PhoneCameraPicker: UIViewControllerRepresentable {
+    let onCapture: (UIImage) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.cameraCaptureMode = .photo
+        picker.allowsEditing = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCapture: onCapture, dismiss: dismiss)
+    }
+
+    final class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let onCapture: (UIImage) -> Void
+        let dismiss: DismissAction
+
+        init(onCapture: @escaping (UIImage) -> Void, dismiss: DismissAction) {
+            self.onCapture = onCapture
+            self.dismiss = dismiss
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            if let image = info[.originalImage] as? UIImage {
+                onCapture(image)
+            }
+            dismiss()
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            dismiss()
         }
     }
 }

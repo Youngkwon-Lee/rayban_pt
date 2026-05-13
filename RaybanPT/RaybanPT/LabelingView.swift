@@ -1,5 +1,28 @@
 import SwiftUI
 
+private func dismissLabelKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+private struct LabelKeyboardDoneToolbar: ViewModifier {
+    func body(content: Content) -> some View {
+        content.toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("완료") {
+                    dismissLabelKeyboard()
+                }
+            }
+        }
+    }
+}
+
+private extension View {
+    func labelKeyboardDoneToolbar() -> some View {
+        modifier(LabelKeyboardDoneToolbar())
+    }
+}
+
 // MARK: - 옵션 정의
 
 private let sessionTypes = ["기립훈련", "보행훈련", "상지운동", "하지운동", "균형훈련", "호흡훈련", "ADL훈련", "기타"]
@@ -50,7 +73,7 @@ final class LabelingViewModel {
                 savedLabel = label
             }
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserFacingError.message(for: error)
         }
         isLoading = false
     }
@@ -73,7 +96,7 @@ final class LabelingViewModel {
             saveSuccess = true
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         } catch {
-            errorMessage = error.localizedDescription
+            errorMessage = UserFacingError.message(for: error)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
         }
         isSaving = false
@@ -121,6 +144,7 @@ struct LabelingView: View {
                     Section {
                         TextField("예: 경부 회전+중립 유지, 계단 오르기", text: $vm.coreTask, axis: .vertical)
                             .lineLimit(2...4)
+                            .accessibilityIdentifier("labelCoreTaskInput")
                             .overlay(alignment: .trailing) {
                                 if showCoreTaskHint && vm.coreTask.trimmingCharacters(in: .whitespaces).isEmpty {
                                     Image(systemName: "exclamationmark.circle.fill")
@@ -203,6 +227,7 @@ struct LabelingView: View {
                     // ── 저장 버튼
                     Section {
                         Button {
+                            dismissLabelKeyboard()
                             if !vm.canSave {
                                 // 핵심 과제 비어있음 — 힌트 표시
                                 withAnimation { showCoreTaskHint = true }
@@ -227,6 +252,7 @@ struct LabelingView: View {
                         .disabled(vm.isSaving)
                         .listRowBackground(vm.isSaving ? Color.gray.opacity(0.5) : Color.blue)
                         .fontWeight(.semibold)
+                        .accessibilityIdentifier("labelSaveButton")
                     }
 
                     // ── 에러
@@ -252,6 +278,8 @@ struct LabelingView: View {
                         }
                     }
                 }
+                .scrollDismissesKeyboard(.interactively)
+                .labelKeyboardDoneToolbar()
 
                 // ── 성공 배너 (상단 오버레이)
                 if vm.saveSuccess {

@@ -35,6 +35,8 @@ struct UploadAccepted: Codable {
 
 struct EventResult: Codable {
     let event: EventDetail?
+    let event_id: String?
+    let intent: String?
 }
 
 struct EventDetail: Codable {
@@ -52,9 +54,160 @@ struct EventStatusResponse: Codable {
     let status: String
     let message: String?
     let error: String?
+    let error_code: String?
     let result: EventResult?
 
-    var eventId: String? { result?.event?.id }
+    var eventId: String? { result?.event?.id ?? result?.event_id }
+    var intent: String? { result?.event?.intent ?? result?.intent }
+}
+
+struct ConsentPayload: Codable {
+    let patient_name: String
+    let scope: String
+    let consent_text: String?
+    let granted_by: String?
+}
+
+struct ConsentRecord: Codable {
+    let id: String
+    let patient_name: String
+    let scope: String
+    let consent_text: String?
+    let granted_by: String?
+    let created_at: String?
+}
+
+struct ConsentStatusResponse: Codable {
+    let patient_name: String?
+    let scope: String?
+    let active: Bool?
+    let consent: ConsentRecord?
+}
+
+struct ConsentCreateResponse: Codable {
+    let ok: Bool
+    let consent: ConsentRecord
+}
+
+struct EventDeleteResponse: Codable {
+    let ok: Bool
+    let event_id: String
+    let deleted_files: [String]
+}
+
+struct RetentionPurgeResponse: Codable {
+    let ok: Bool
+    let days: Int
+    let purged_events: Int
+    let deleted_files: [String]
+}
+
+struct ConsentRevokeResponse: Codable {
+    let ok: Bool
+    let patient_name: String
+    let scope: String
+    let revoked: Int
+}
+
+struct MergeEventsRequest: Codable {
+    let image_event_id: String
+    let audio_event_id: String
+    let patient_name: String?
+}
+
+struct SOAPSummary: Codable {
+    let s: String
+    let o: String
+    let a: String
+    let p: String
+}
+
+struct MergeEventsResponse: Codable {
+    let event_id: String
+    let status: String
+    let message: String
+    let patient_name: String?
+    let soap: SOAPSummary?
+}
+
+struct AuditLog: Codable, Identifiable {
+    let id: String
+    let event_id: String?
+    let level: String
+    let message: String
+    let created_at: String
+}
+
+struct AuditLogsResponse: Codable {
+    let items: [AuditLog]
+}
+
+struct ChartReviewItem: Codable, Identifiable {
+    var id: String { event_id }
+    let event_id: String
+    let source: String
+    let event_type: String
+    let intent: String?
+    let status: String
+    let created_at: String
+    let patient_name: String?
+    let has_label: Bool
+    let quality: ChartQuality
+    let review: ChartReviewRecord?
+    let primary_issue: String
+}
+
+struct ChartReviewResponse: Codable {
+    let items: [ChartReviewItem]
+}
+
+struct ChartReviewRecord: Codable {
+    let event_id: String
+    let reviewer: String
+    let notes: String
+    let quality_score: Int
+    let quality_level: String
+    let reviewed_at: String
+}
+
+struct ChartQualityIssue: Codable, Identifiable {
+    var id: String { code + section + message }
+    let code: String
+    let section: String
+    let message: String
+    let severity: String
+}
+
+struct ChartQuality: Codable {
+    let score: Int
+    let level: String
+    let issues: [ChartQualityIssue]
+}
+
+struct BridgeHealthResponse: Codable {
+    let ok: Bool
+    let service: String
+    let version: String
+    let time: String
+    let db: BridgeHealthDB
+    let security: BridgeHealthSecurity
+    let recent_error_logs_60m: Int?
+}
+
+struct BridgeHealthDB: Codable {
+    let ok: Bool
+    let error: String?
+}
+
+struct BridgeHealthSecurity: Codable {
+    let api_key_configured: Bool
+    let require_api_key: Bool
+    let allow_insecure_lan: Bool
+    let docs_public_without_auth: Bool
+    let file_downloads_enabled: Bool
+    let allow_unmasked_image: Bool
+    let patient_consent_required: Bool
+    let video_store: Bool
 }
 
 final class BridgeClient {
@@ -83,6 +236,78 @@ final class BridgeClient {
         if !apiKey.isEmpty {
             req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         }
+    }
+
+    func hasActiveConsent(patientName: String, scope: String = "capture_analysis_storage") async throws -> Bool {
+        let trimmed = patientName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let encodedName = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "/consents/\(encodedName)?scope=\(scope)", relativeTo: baseURL)
+        else { throw BridgeError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(empty)"
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return (try JSONDecoder().decode(ConsentStatusResponse.self, from: data)).active == true
+    }
+
+    @discardableResult
+    func recordConsent(patientName: String,
+                       scope: String = "capture_analysis_storage",
+                       grantedBy: String = "therapist") async throws -> ConsentRecord {
+        guard let url = URL(string: "/consents", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+
+        let body = ConsentPayload(
+            patient_name: patientName.trimmingCharacters(in: .whitespacesAndNewlines),
+            scope: scope,
+            consent_text: nil,
+            granted_by: grantedBy
+        )
+        req.httpBody = try JSONEncoder().encode(body)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(empty)"
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(ConsentCreateResponse.self, from: data).consent
+    }
+
+    @discardableResult
+    func revokeConsent(patientName: String, scope: String = "capture_analysis_storage") async throws -> ConsentRevokeResponse {
+        let trimmed = patientName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let encodedName = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "/consents/\(encodedName)?scope=\(scope)", relativeTo: baseURL)
+        else { throw BridgeError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(empty)"
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(ConsentRevokeResponse.self, from: data)
     }
 
     func sendText(_ text: String, patientName: String? = nil, source: String = "iphone-rayban") async throws -> IngestResponse {
@@ -277,7 +502,7 @@ final class BridgeClient {
             }
             try await Task.sleep(nanoseconds: UInt64(intervalSec * 1_000_000_000))
         }
-        return EventStatusResponse(status: "timeout", message: "poll timeout", error: nil, result: nil)
+        return EventStatusResponse(status: "timeout", message: "poll timeout", error: nil, error_code: nil, result: nil)
     }
 
     // MARK: - 차트 목록 / 조회
@@ -300,6 +525,39 @@ final class BridgeClient {
     struct ChartResponse: Codable {
         let event_id: String
         let chart: String
+        let quality: ChartQuality?
+        let review: ChartReviewRecord?
+    }
+
+    private struct ChartUpdateRequest: Codable {
+        let chart: String
+    }
+
+    private struct ChartReviewRequest: Codable {
+        let reviewer: String
+        let notes: String
+    }
+
+    struct ChartUpdateResponse: Codable {
+        let ok: Bool
+        let event_id: String
+        let chart: String
+        let quality: ChartQuality?
+        let review: ChartReviewRecord?
+    }
+
+    struct ChartReviewMarkResponse: Codable {
+        let ok: Bool
+        let event_id: String
+        let quality: ChartQuality?
+        let review: ChartReviewRecord?
+    }
+
+    struct ChartReviewClearResponse: Codable {
+        let ok: Bool
+        let event_id: String
+        let quality: ChartQuality?
+        let review: ChartReviewRecord?
     }
 
     // MARK: - 라벨링
@@ -375,6 +633,34 @@ final class BridgeClient {
         return (try JSONDecoder().decode(RecentEventsResponse.self, from: data)).items
     }
 
+    func mergeEvents(imageEventId: String, audioEventId: String, patientName: String?) async throws -> MergeEventsResponse {
+        guard let url = URL(string: "/events/merge", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+
+        let body = MergeEventsRequest(
+            image_event_id: imageEventId,
+            audio_event_id: audioEventId,
+            patient_name: patientName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+        req.httpBody = try JSONEncoder().encode(body)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        do {
+            return try JSONDecoder().decode(MergeEventsResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
     func fetchChart(eventId: String) async throws -> ChartResponse {
         guard let url = URL(string: "/charts/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)
@@ -391,6 +677,140 @@ final class BridgeClient {
         }
     }
 
+    func chartReviewItems(limit: Int = 50, includeGood: Bool = false) async throws -> [ChartReviewItem] {
+        let includeValue = includeGood ? "true" : "false"
+        guard let url = URL(string: "/chart-review?limit=\(limit)&include_good=\(includeValue)", relativeTo: baseURL) else {
+            throw BridgeError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(ChartReviewResponse.self, from: data).items
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
+    func updateChart(eventId: String, chart: String) async throws -> ChartUpdateResponse {
+        guard let url = URL(string: "/charts/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+        req.httpBody = try JSONEncoder().encode(ChartUpdateRequest(chart: chart))
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(ChartUpdateResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
+    func markChartReviewed(eventId: String, reviewer: String = "therapist", notes: String = "") async throws -> ChartReviewMarkResponse {
+        guard let url = URL(string: "/charts/\(eventId)/review", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+        req.httpBody = try JSONEncoder().encode(ChartReviewRequest(reviewer: reviewer, notes: notes))
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(ChartReviewMarkResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
+    func clearChartReview(eventId: String) async throws -> ChartReviewClearResponse {
+        guard let url = URL(string: "/charts/\(eventId)/review", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(ChartReviewClearResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
+    func auditLogs(limit: Int = 50, level: String? = nil, eventId: String? = nil) async throws -> [AuditLog] {
+        var path = "/audit-logs?limit=\(limit)"
+        if let level, !level.isEmpty {
+            path += "&level=\(level)"
+        }
+        if let eventId, !eventId.isEmpty {
+            path += "&event_id=\(eventId)"
+        }
+        guard let url = URL(string: path, relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(AuditLogsResponse.self, from: data).items
+    }
+
+    @discardableResult
+    func deleteEvent(eventId: String) async throws -> EventDeleteResponse {
+        guard let url = URL(string: "/events/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(EventDeleteResponse.self, from: data)
+    }
+
+    @discardableResult
+    func purgeOldEvents(days: Int = 30) async throws -> RetentionPurgeResponse {
+        guard let url = URL(string: "/retention/events?days=\(days)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        return try JSONDecoder().decode(RetentionPurgeResponse.self, from: data)
+    }
+
     private func mimeType(for fileURL: URL) -> String {
         switch fileURL.pathExtension.lowercased() {
         case "mp3": return "audio/mpeg"
@@ -401,6 +821,26 @@ final class BridgeClient {
         case "flac": return "audio/flac"
         case "webm": return "audio/webm"
         default: return "application/octet-stream"
+        }
+    }
+
+    func health() async throws -> BridgeHealthResponse {
+        guard let url = URL(string: "/health", relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(empty)"
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+
+        do {
+            return try JSONDecoder().decode(BridgeHealthResponse.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
         }
     }
 }
