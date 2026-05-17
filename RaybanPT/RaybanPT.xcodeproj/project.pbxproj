@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		832812D82F8B94400074213F /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA000002DEADBEEF00000002 /* MWDATCore */; };
 		832812D92F8B94400074213F /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = AA000003DEADBEEF00000003 /* MWDATCamera */; };
+		AA000006DEADBEEF00000006 /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = AA000007DEADBEEF00000007 /* MWDATDisplay */; };
 		A10000012F9B000100000001 /* TextSendUITest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000022F9B000100000001 /* TextSendUITest.swift */; };
 /* End PBXBuildFile section */
 
@@ -63,6 +64,7 @@
 			files = (
 				832812D92F8B94400074213F /* MWDATCamera in Frameworks */,
 				832812D82F8B94400074213F /* MWDATCore in Frameworks */,
+				AA000006DEADBEEF00000006 /* MWDATDisplay in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -135,6 +137,7 @@
 			packageProductDependencies = (
 				AA000002DEADBEEF00000002 /* MWDATCore */,
 				AA000003DEADBEEF00000003 /* MWDATCamera */,
+				AA000007DEADBEEF00000007 /* MWDATDisplay */,
 			);
 			productName = RaybanPT;
 			productReference = 83F9597B2F8A7C5100267708 /* RaybanPT.app */;
@@ -493,7 +496,7 @@
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
 			requirement = {
 				kind = exactVersion;
-				version = 0.5.0;
+				version = 0.7.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -508,6 +511,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA000001DEADBEEF00000001 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATCamera;
+		};
+		AA000007DEADBEEF00000007 /* MWDATDisplay */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001DEADBEEF00000001 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATDisplay;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

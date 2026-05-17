@@ -11,7 +11,7 @@ struct StreamView: View {
         var analysisTitle: String {
             switch self {
             case .rayban:
-                return "Ray-Ban 카메라"
+                return "스마트 글라스 카메라"
             case .phone:
                 return "iPhone 카메라"
             }
@@ -108,7 +108,7 @@ struct StreamView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Color.black.ignoresSafeArea()
+            DS.ColorToken.cameraBackground.ignoresSafeArea()
 
             // 카메라 피드
             cameraFeed
@@ -158,7 +158,7 @@ struct StreamView: View {
             // 하단 컨트롤바
             controlBar
         }
-        .navigationTitle(currentPatient.map { $0.name } ?? "Ray-Ban 카메라")
+        .navigationTitle(currentPatient.map { $0.name } ?? "스마트 글라스 카메라")
         .navigationBarTitleDisplayMode(.inline)
         .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarColorScheme(.dark, for: .navigationBar)
@@ -250,6 +250,34 @@ struct StreamView: View {
                 showVideoSheet = true
             }
         }
+        .onChange(of: vm.isStreaming) { _, streaming in
+            Task {
+                if streaming {
+                    await GlassHUDManager.shared.startContext(patient: currentPatient?.name)
+                } else {
+                    await GlassHUDManager.shared.stopContext()
+                }
+            }
+        }
+        .onChange(of: currentPatient?.id) { _, _ in
+            Task {
+                if vm.isStreaming, !vm.recorder.isRecording {
+                    await GlassHUDManager.shared.updateContextPatient(currentPatient?.name)
+                }
+            }
+        }
+        .onChange(of: vm.recorder.isRecording) { _, recording in
+            Task {
+                if recording {
+                    await GlassHUDManager.shared.startRecording(patient: currentPatient?.name)
+                } else {
+                    await GlassHUDManager.shared.stopRecording()
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .glassCaptouchRecordToggle)) { _ in
+            Task { await toggleRecording() }
+        }
         .sheet(isPresented: $showCaptureHistory) {
             NavigationStack {
                 CaptureHistoryView()
@@ -280,7 +308,7 @@ struct StreamView: View {
     private var cameraFeed: some View {
         GeometryReader { geo in
             ZStack {
-                Color.black
+                DS.ColorToken.cameraBackground
 
                 if let frame = vm.currentFrame {
                     Image(uiImage: frame)
@@ -295,10 +323,17 @@ struct StreamView: View {
                     )
                 }
 
+                if DemoConfig.usesMaskedCaptureFrame {
+                    maskedCaptureBadge
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.top, 184)
+                        .padding(.leading, 24)
+                }
+
                 // 녹화 중 테두리
                 if vm.recorder.isRecording {
                     RoundedRectangle(cornerRadius: 0)
-                        .stroke(Color.red, lineWidth: 3)
+                        .stroke(DS.ColorToken.danger, lineWidth: 3)
                         .ignoresSafeArea()
                         .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
                                    value: vm.recorder.isRecording)
@@ -307,12 +342,30 @@ struct StreamView: View {
         }
     }
 
+    private var maskedCaptureBadge: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.shield.fill")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(DS.ColorToken.success)
+            Text("마스킹 적용")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(DS.ColorToken.surface, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(DS.ColorToken.success.opacity(0.45), lineWidth: 1)
+        }
+    }
+
     // MARK: - 툴바 라벨 (타입 추론 분리)
 
     @ViewBuilder
     private var patientToolbarLabel: some View {
         let iconName = currentPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill"
-        let iconColor: Color = currentPatient == nil ? .orange : .green
+        let iconColor: Color = currentPatient == nil ? DS.ColorToken.warning : DS.ColorToken.success
         HStack(spacing: 5) {
             Image(systemName: iconName).foregroundStyle(iconColor)
             if let p = currentPatient {
@@ -331,7 +384,7 @@ struct StreamView: View {
                 .shadow(color: vm.isStreaming ? DS.ColorToken.success : DS.ColorToken.warning, radius: 4)
 
             Text(vm.isStreaming
-                 ? (vm.recorder.isRecording ? "녹화 중 · \(vm.recorder.frameCount)f" : "스트리밍 중")
+                 ? (vm.recorder.isRecording ? "녹화 중 · \(vm.recorder.frameCount)f" : (DemoConfig.isGlassDemoEnabled ? "데모 스트리밍 중" : "스트리밍 중"))
                  : vm.statusMessage)
                 .font(.system(size: DS.FontSize.caption, weight: .semibold))
                 .fontWeight(.medium)
@@ -340,7 +393,7 @@ struct StreamView: View {
             if vm.recorder.isRecording {
                 Spacer()
                 Image(systemName: "record.circle.fill")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(DS.ColorToken.danger)
                     .font(.caption)
             }
         }
@@ -406,7 +459,7 @@ struct StreamView: View {
             } else {
                 Image(systemName: "text.bubble.fill")
                     .font(.caption)
-                    .foregroundStyle(.yellow)
+                    .foregroundStyle(DS.ColorToken.warning)
                 Text(sttText)
                     .font(.system(size: DS.FontSize.caption, weight: .regular))
                     .foregroundStyle(.white)
@@ -438,7 +491,7 @@ struct StreamView: View {
                     .lineLimit(2)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color.red.opacity(0.78), in: Capsule())
+                    .background(DS.ColorToken.danger.opacity(0.84), in: Capsule())
             }
 
             VStack(spacing: 8) {
@@ -480,7 +533,7 @@ struct StreamView: View {
                         DockActionButton(
                             title: audioRecorder.isRecording ? "중지" : "음성",
                             systemImage: audioRecorder.isRecording ? "stop.fill" : "mic.fill",
-                            tint: audioRecorder.isRecording ? .red : .white,
+                            tint: audioRecorder.isRecording ? DS.ColorToken.danger : .white,
                             isActive: audioRecorder.isRecording,
                             isBusy: isTranscribing
                         )
@@ -538,12 +591,12 @@ struct StreamView: View {
             .padding(.horizontal, 14)
             .padding(.top, 9)
             .padding(.bottom, 10)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .background(DS.ColorToken.controlSurface, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(.white.opacity(0.16), lineWidth: 1)
+                    .stroke(DS.ColorToken.controlStroke, lineWidth: 1)
             }
-            .shadow(color: .black.opacity(0.28), radius: 18, y: 10)
+            .shadow(color: DS.ColorToken.primary.opacity(0.16), radius: 18, y: 10)
             .padding(.horizontal, 14)
             .padding(.bottom, 8)
         }
@@ -559,7 +612,7 @@ struct StreamView: View {
                     DockActionButton(
                         title: vm.recorder.isRecording ? "녹화중" : "녹화",
                         systemImage: vm.recorder.isRecording ? "stop.fill" : "record.circle",
-                        tint: .red,
+                        tint: DS.ColorToken.danger,
                         isActive: vm.recorder.isRecording
                     )
                 }
@@ -586,7 +639,7 @@ struct StreamView: View {
                     showLabelSheet = true
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 } label: {
-                    DockActionButton(title: "라벨", systemImage: "tag.fill", tint: .orange)
+                    DockActionButton(title: "라벨", systemImage: "tag.fill", tint: DS.ColorToken.warning)
                 }
                 .buttonStyle(.plain)
                 // 차트 보기 버튼
@@ -594,7 +647,7 @@ struct StreamView: View {
                     showChartSheet = true
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 } label: {
-                    DockActionButton(title: "차트", systemImage: "doc.text.fill", tint: .indigo)
+                    DockActionButton(title: "차트", systemImage: "doc.text.fill", tint: DS.ColorToken.primary)
                 }
                 .buttonStyle(.plain)
             }
@@ -606,7 +659,7 @@ struct StreamView: View {
                     DockActionButton(
                         title: "저장",
                         systemImage: vm.lastSavedVideo == nil ? "square.and.arrow.down.fill" : "checkmark.circle.fill",
-                        tint: .green,
+                        tint: DS.ColorToken.success,
                         isBusy: isSavingInProgress
                     )
                 }
@@ -619,7 +672,7 @@ struct StreamView: View {
                     DockActionButton(
                         title: "분석",
                         systemImage: uploadButtonSymbol,
-                        tint: .indigo,
+                        tint: DS.ColorToken.primary,
                         isBusy: isAnalyzing || isSavingInProgress
                     )
                 }
@@ -657,6 +710,12 @@ struct StreamView: View {
         if vm.recorder.isRecording {
             return "녹화 중입니다. 종료하면 영상 리뷰에서 저장하거나 분석할 수 있습니다."
         }
+        if DemoConfig.isGlassDemoEnabled {
+            if DemoConfig.usesMaskedCaptureFrame {
+                return "데모 모드: 실제 마스킹 촬영 결과를 라이브 프레임처럼 보여줍니다."
+            }
+            return "데모 모드: 스마트 글라스 연결과 라이브 프레임 수신 흐름을 보여줍니다."
+        }
         if vm.isStreaming {
             return "가운데 버튼은 사진 촬영, 오른쪽은 녹화와 종료입니다."
         }
@@ -667,12 +726,12 @@ struct StreamView: View {
             return "녹화 영상이 준비되었습니다. 저장하거나 분석 업로드하세요."
         }
         if !vm.hasActiveDevice {
-            return "Ray-Ban 없이 iPhone 카메라로 촬영할 수 있습니다."
+            return "스마트 글라스 없이 iPhone 카메라로 촬영할 수 있습니다."
         }
         if currentPatient == nil {
             return "환자를 선택하면 스트리밍을 시작할 수 있습니다."
         }
-        return "Ray-Ban 연결 상태를 확인하고 시작 버튼을 누르세요."
+        return "스마트 글라스 연결 상태를 확인하고 시작 버튼을 누르세요."
     }
 
     private var centerButtonTitle: String {
@@ -767,6 +826,8 @@ struct StreamView: View {
             bridgeVm.markDone()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             showToast("✅ 차트 저장됨 — 오른쪽 📄 버튼으로 보기")
+            let insightBody = currentPatient.map { "환자: \($0.name)" } ?? "SOAP 노트 생성됨"
+            await GlassHUDManager.shared.showInsight(title: "차트 생성됨", body: insightBody)
         } catch {
             let errMsg = bridgeErrorMessage(error)
             analysisText += "\n⚠️ 업로드 실패 → 텍스트 전송\n\(errMsg)"
@@ -855,6 +916,11 @@ struct StreamView: View {
                     maxTries: 60,
                     intervalSec: 1.0
                 )
+                if final?.status == "done" {
+                    let patientName = currentPatient?.name
+                    let insightBody = patientName.map { "환자: \($0)" } ?? "SOAP 노트 생성됨"
+                    await GlassHUDManager.shared.showInsight(title: "차트 생성됨", body: insightBody)
+                }
                 await MainActor.run {
                     if final?.status == "done" {
                         // inner event_id가 있으면 교체 (차트 파일이 거기에 있음)
@@ -1048,7 +1114,7 @@ private struct DockActionButton: View {
     private var backgroundColor: Color {
         if isDisabled { return Color.white.opacity(0.06) }
         if isActive { return tint.opacity(0.25) }
-        return Color.black.opacity(0.38)
+        return DS.ColorToken.surfaceSoft
     }
 
     private var borderColor: Color {
@@ -1070,11 +1136,11 @@ private struct MicButton: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(Color.black.opacity(0.42))
+                .fill(DS.ColorToken.surfaceSoft)
                 .frame(width: 52, height: 52)
 
             Circle()
-                .stroke(isRecording ? Color.red : Color.white.opacity(0.45), lineWidth: 2)
+                .stroke(isRecording ? DS.ColorToken.danger : Color.white.opacity(0.45), lineWidth: 2)
                 .frame(width: 52, height: 52)
 
             if isTranscribing {
@@ -1085,7 +1151,7 @@ private struct MicButton: View {
             } else {
                 Image(systemName: isRecording ? "stop.fill" : "mic.fill")
                     .font(.system(size: isRecording ? 18 : 20))
-                    .foregroundStyle(isRecording ? .red : .white)
+                    .foregroundStyle(isRecording ? DS.ColorToken.danger : .white)
                     .scaleEffect(isRecording ? 1.1 : 1.0)
                     .animation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true),
                                value: isRecording)
@@ -1119,13 +1185,13 @@ private struct CaptureButton: View {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [Color.blue, Color.indigo],
+                                colors: [DS.ColorToken.primaryAlt, DS.ColorToken.primary],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
                         .frame(width: 62, height: 62)
-                        .shadow(color: Color.blue.opacity(0.35), radius: 10, y: 4)
+                        .shadow(color: DS.ColorToken.primary.opacity(0.34), radius: 10, y: 4)
                     Image(systemName: usesPhoneCameraFallback ? "camera.fill" : "play.fill")
                         .font(.system(size: 23))
                         .foregroundStyle(.white)
@@ -1147,7 +1213,7 @@ private struct RecordButton: View {
                 .stroke(.white.opacity(0.5), lineWidth: 2)
                 .frame(width: 48, height: 48)
             RoundedRectangle(cornerRadius: isRecording ? 4 : 22, style: .continuous)
-                .fill(Color.red)
+                .fill(DS.ColorToken.danger)
                 .frame(width: isRecording ? 20 : 36, height: isRecording ? 20 : 36)
                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: isRecording)
         }
@@ -1208,7 +1274,7 @@ private struct PhotoReviewSheet: View {
                                 .padding(.vertical, 4)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.indigo)
+                        .tint(DS.ColorToken.primary)
                         .transition(.opacity.combined(with: .scale(0.95)))
                     }
 
@@ -1233,7 +1299,7 @@ private struct PhotoReviewSheet: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
-                        .tint(.green)
+                        .tint(DS.ColorToken.success)
                         .disabled({
                             if case .saving = saveStatus { return true }
                             return false
@@ -1317,7 +1383,7 @@ private struct VideoReviewSheet: View {
                                 .padding(.vertical, 4)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.indigo)
+                        .tint(DS.ColorToken.primary)
                     }
 
                     if let message = saveStatus.message {
@@ -1340,7 +1406,7 @@ private struct VideoReviewSheet: View {
                                 .frame(maxWidth: .infinity)
                         }
                         .buttonStyle(.bordered)
-                        .tint(.green)
+                        .tint(DS.ColorToken.success)
                         .disabled({
                             if case .saving = saveStatus { return true }
                             return false

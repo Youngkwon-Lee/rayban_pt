@@ -5,7 +5,7 @@
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>글라스PT</string>
 	<key>CFBundleDisplayName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleVersion</key>
@@ -17,19 +17,19 @@
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Ray-Ban으로 촬영한 사진을 저장합니다.</string>
+	<string>스마트 글라스로 촬영한 사진을 저장합니다.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>Ray-Ban으로 촬영한 사진을 사진 앱에 저장하고 확인합니다.</string>
+	<string>스마트 글라스로 촬영한 사진을 사진 앱에 저장하고 확인합니다.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Ray-Ban 안경 마이크로 환자 음성을 녹음합니다.</string>
+	<string>스마트 글라스 마이크로 환자 음성을 녹음합니다.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>Ray-Ban Meta 안경 연결에 블루투스가 필요합니다.</string>
+	<string>스마트 글라스 연결에 블루투스가 필요합니다.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>Ray-Ban Meta 안경 연결에 블루투스가 필요합니다.</string>
+	<string>스마트 글라스 연결에 블루투스가 필요합니다.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>Ray-Ban 기기가 없을 때 iPhone 카메라로 환자 사진을 촬영합니다.</string>
+	<string>스마트 글라스가 없을 때 iPhone 카메라로 환자 사진을 촬영합니다.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Ray-Ban Meta 안경 통신에 로컬 네트워크 접근이 필요합니다.</string>
+	<string>스마트 글라스 통신에 로컬 네트워크 접근이 필요합니다.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-peripheral</string>
@@ -76,6 +76,8 @@
 		<string>$(META_CLIENT_TOKEN)</string>
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
+		<key>DAMEnabled</key>
+		<true/>
 	</dict>
 	<key>CFBundleURLTypes</key>
 	<array>
