@@ -44,10 +44,22 @@ final class StreamViewModel {
         deviceSelector = selector
 
         deviceTask = Task { [weak self] in
-            for await device in selector.activeDeviceStream() {
+            for await deviceId in selector.activeDeviceStream() {
                 guard let self else { return }
-                self.hasActiveDevice = device != nil
-                self.statusMessage = device != nil ? "기기 준비됨" : "대기 중"
+                self.hasActiveDevice = deviceId != nil
+                if let deviceId,
+                   let device = self.wearables.deviceForIdentifier(deviceId) {
+                    let compat = device.compatibility()
+                    print("[MWDAT] device compatibility: \(compat)")
+                    if compat == .deviceUpdateRequired {
+                        self.statusMessage = "글라스 펌웨어 업데이트 필요"
+                        try? await self.wearables.openFirmwareUpdate()
+                    } else {
+                        self.statusMessage = "기기 준비됨"
+                    }
+                } else {
+                    self.statusMessage = "대기 중"
+                }
             }
         }
     }
@@ -63,14 +75,16 @@ final class StreamViewModel {
 
         do {
             let status = try await wearables.checkPermissionStatus(.camera)
-            if status != .granted {
-                let requested = try await wearables.requestPermission(.camera)
-                guard requested == .granted else {
-                    statusMessage = "카메라 권한 거부됨"
-                    return
-                }
+            print("[MWDAT] camera permission status: \(status)")
+            // 항상 requestPermission 호출 — 글라스 측 승인 플로우 트리거
+            let requested = try await wearables.requestPermission(.camera)
+            print("[MWDAT] camera permission after request: \(requested)")
+            guard requested == .granted else {
+                statusMessage = "카메라 권한 거부됨"
+                return
             }
         } catch {
+            print("[MWDAT] permission check error: \(error)")
             statusMessage = "권한 오류: \(error.localizedDescription)"
             return
         }
@@ -79,25 +93,44 @@ final class StreamViewModel {
         do {
             session = try wearables.createSession(deviceSelector: selector)
             deviceSession = session
+            print("[MWDAT] session created")
         } catch {
+            print("[MWDAT] createSession error: \(error)")
             statusMessage = "세션 생성 실패: \(error.localizedDescription)"
             return
         }
 
         do {
             try session.start()
+            print("[MWDAT] session.start() called")
         } catch {
+            print("[MWDAT] session.start() threw: \(error)")
             statusMessage = "세션 시작 실패: \(error.localizedDescription)"
             deviceSession = nil
             return
         }
 
+        print("[MWDAT] session.state after start(): \(session.state)")
         if session.state != .started {
             statusMessage = "기기 연결 중..."
+
+            let errorMonitor = Task { [weak self] in
+                for await error in session.errorStream() {
+                    print("[MWDAT] session errorStream: \(error) / \(error.localizedDescription)")
+                    await self?.handleSessionError(error)
+                }
+            }
+            defer { errorMonitor.cancel() }
+
             for await state in session.stateStream() {
+                print("[MWDAT] session stateStream: \(state)")
                 if state == .started { break }
                 if state == .stopped {
-                    statusMessage = "기기 연결 실패"
+                    // Allow 200 ms for error monitor to flush its first event
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if statusMessage.hasPrefix("기기 연결") {
+                        statusMessage = "글라스 준비 중 — 잠시 후 다시 시도하세요"
+                    }
                     deviceSession = nil
                     return
                 }
@@ -106,10 +139,12 @@ final class StreamViewModel {
 
         let config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: 24)
         guard let newStream = try? session.addStream(config: config) else {
+            print("[MWDAT] addStream returned nil")
             statusMessage = "스트림 추가 실패"
             return
         }
         stream = newStream
+        print("[MWDAT] stream added")
 
         stateToken = newStream.statePublisher.listen { [weak self] state in
             Task { [weak self, state] in
@@ -138,6 +173,7 @@ final class StreamViewModel {
 
         await GlassHUDManager.shared.attachDisplay(to: session)
         await newStream.start()
+        print("[MWDAT] newStream.start() called")
     }
 
     func stopStreaming() async {
@@ -291,8 +327,26 @@ final class StreamViewModel {
     }
 
     private func handleStreamError(_ error: StreamError) {
+        print("[MWDAT] stream error: \(error) / \(error.localizedDescription)")
         errorMessage = error.localizedDescription
         statusMessage = "오류: \(error.localizedDescription)"
+    }
+
+    private func handleSessionError(_ error: DeviceSessionError) async {
+        print("[MWDAT] DeviceSessionError: \(error) / \(error.localizedDescription)")
+        errorMessage = error.localizedDescription
+        switch error {
+        case .datAppOnTheGlassesUpdateRequired:
+            statusMessage = "글라스 앱 업데이트 필요 — Meta AI 앱 열기"
+            try? await wearables.openDATGlassesAppUpdate()
+        case .dwaUnavailable:
+            statusMessage = "글라스에 앱이 미설치됨 — Meta AI에서 업데이트 필요"
+            try? await wearables.openDATGlassesAppUpdate()
+        case .noEligibleDevice:
+            statusMessage = "연결된 글라스 없음"
+        default:
+            statusMessage = "세션 오류: \(error.localizedDescription)"
+        }
     }
 
     private func handleCapturedPhotoData(_ data: Data) {

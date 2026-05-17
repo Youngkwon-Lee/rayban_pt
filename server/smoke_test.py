@@ -37,6 +37,8 @@ import app as bridge  # noqa: E402
 
 API_KEY = os.environ["BRIDGE_API_KEY"]
 PATIENT_NAME = "SmokePatient"
+SMOKE_ORG_ID = "org-smoke"
+SMOKE_PROVIDER_PERSON_ID = "provider-smoke"
 
 
 def require(condition: bool, message: str) -> None:
@@ -51,8 +53,12 @@ def error_code(payload: dict[str, Any]) -> str:
     return str(payload.get("code", ""))
 
 
-def auth_headers() -> dict[str, str]:
-    return {"x-api-key": API_KEY}
+def auth_headers(scoped: bool = False) -> dict[str, str]:
+    headers = {"x-api-key": API_KEY}
+    if scoped:
+        headers["x-glasspt-org-id"] = SMOKE_ORG_ID
+        headers["x-glasspt-provider-person-id"] = SMOKE_PROVIDER_PERSON_ID
+    return headers
 
 
 def blank_jpeg_base64() -> str:
@@ -126,7 +132,7 @@ def main() -> None:
         )
         ingest = client.post(
             "/ingest",
-            headers=auth_headers(),
+            headers=auth_headers(scoped=True),
             json={
                 "source": "smoke",
                 "event_type": "text",
@@ -139,7 +145,13 @@ def main() -> None:
 
         event = client.get(f"/events/{event_id}", headers=auth_headers())
         require(event.status_code == 200, "event lookup should succeed")
-        raw_text = event.json()["result"]["event"]["raw_text"]
+        event_detail = event.json()["result"]["event"]
+        raw_text = event_detail["raw_text"]
+        require(event_detail["owner_org_id"] == SMOKE_ORG_ID, "event org scope should persist")
+        require(
+            event_detail["owner_provider_person_id"] == SMOKE_PROVIDER_PERSON_ID,
+            "event provider scope should persist",
+        )
         for token in ["010-1234-5678", "test@example.com", "900101-1234567", "ABCD1234", "김민수"]:
             require(token not in raw_text, f"PHI token was not redacted: {token}")
         for token in ["[REDACTED_PHONE]", "[REDACTED_EMAIL]", "[REDACTED_RRN]", "[REDACTED_ID]"]:
@@ -229,6 +241,49 @@ PTx.>
         )
         require(label.status_code == 200, "label upsert should succeed")
         require(label.json()["label"]["flags"] == ["fatigue"], "label flags should round-trip")
+
+        masked_file = bridge.MASKED_DIR / f"{event_id}_masked.jpg"
+        masked_file.write_bytes(base64.b64decode(blank_jpeg_base64()))
+        masked_response = client.get(f"/masked-files/{masked_file.name}", headers=auth_headers())
+        require(masked_response.status_code == 200, "masked artifact should be downloadable with api key")
+        require(masked_response.headers["content-type"].startswith("image/jpeg"), "masked artifact content type mismatch")
+
+        physio_feed = client.get("/physio/sessions?limit=5", headers=auth_headers())
+        require(physio_feed.status_code == 200, "physio session feed should load")
+        feed_items = physio_feed.json()["items"]
+        exported = next((item for item in feed_items if item["event_id"] == event_id), None)
+        require(exported is not None, "physio session feed should include the saved event")
+        require(exported["persisted"] is True, "physio session should be marked persisted")
+        require(exported["label"]["core_task"] == "balance", "physio session label should round-trip")
+        require(exported["soap"]["a"], "physio session should include SOAP summary")
+        require(exported["quality"]["level"] in {"good", "review", "needs_edit"}, "physio session quality should be present")
+        require(exported["artifacts"][0]["download_path"] == f"/masked-files/{masked_file.name}", "physio session artifact path mismatch")
+        require("010-1234-5678" not in exported["chart_excerpt"], "physio chart excerpt should stay redacted")
+        require(exported["owner_org_id"] == SMOKE_ORG_ID, "physio export should include org scope")
+        require(
+            exported["owner_provider_person_id"] == SMOKE_PROVIDER_PERSON_ID,
+            "physio export should include provider scope",
+        )
+
+        scoped_feed = client.get(
+            f"/physio/sessions?limit=5&org_id={SMOKE_ORG_ID}&provider_person_id={SMOKE_PROVIDER_PERSON_ID}",
+            headers=auth_headers(),
+        )
+        require(scoped_feed.status_code == 200, "scoped physio feed should load")
+        require(
+            any(item["event_id"] == event_id for item in scoped_feed.json()["items"]),
+            "scoped physio feed should include matching provider event",
+        )
+
+        other_scope_feed = client.get(
+            "/physio/sessions?limit=5&org_id=other-org&provider_person_id=other-provider",
+            headers=auth_headers(),
+        )
+        require(other_scope_feed.status_code == 200, "other scoped physio feed should load")
+        require(
+            all(item["event_id"] != event_id for item in other_scope_feed.json()["items"]),
+            "other provider should not see scoped event",
+        )
 
         image_fail = client.post(
             "/ingest",

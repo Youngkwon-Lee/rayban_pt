@@ -22,12 +22,23 @@ final class DeviceSessionManager {
     private init() {}
 
     func start() {
+        guard !DemoConfig.isGlassDemoEnabled else {
+            registrationState = .registered
+            linkState = .connected
+            activeDeviceId = nil
+            statusMessage = "스마트 글라스 데모 연결됨"
+            return
+        }
+
         registrationTask = Task {
             for await state in wearables.registrationStateStream() {
+                print("[MWDAT] registrationState → \(state)")
                 self.registrationState = state
-                self.statusMessage = "등록 상태: \(state.description)"
                 if state == .registered {
+                    self.statusMessage = "스마트 글라스 등록됨"
                     self.observeDevices()
+                } else {
+                    self.statusMessage = "등록 상태: \(state)"
                 }
             }
         }
@@ -35,15 +46,19 @@ final class DeviceSessionManager {
         Task {
             do {
                 registrationState = wearables.registrationState
+                print("[MWDAT] 초기 registrationState: \(registrationState)")
                 if registrationState == .registered {
                     observeDevices()
                 } else {
                     statusMessage = "SDK 등록 중..."
                     try await wearables.startRegistration()
+                    print("[MWDAT] startRegistration() 완료")
                 }
             } catch let e as RegistrationError {
-                statusMessage = "등록 실패: \(e.description)"
+                print("[MWDAT] RegistrationError: \(e) / \(e.localizedDescription)")
+                statusMessage = "등록 오류: \(e.localizedDescription)"
             } catch {
+                print("[MWDAT] 등록 오류: \(error.localizedDescription)")
                 statusMessage = "등록 오류: \(error.localizedDescription)"
             }
         }
@@ -133,6 +148,14 @@ final class DeviceSessionManager {
     }
 
     func retryConnection() {
+        if DemoConfig.isGlassDemoEnabled {
+            registrationState = .registered
+            linkState = .connected
+            activeDeviceId = nil
+            statusMessage = "스마트 글라스 데모 연결됨"
+            return
+        }
+
         stop()
         linkState = .disconnected
         registrationState = .unavailable

@@ -122,6 +122,10 @@ class IngestPayload(BaseModel):
     audio_path: Optional[str] = None
     image_base64: Optional[str] = None  # base64 encoded JPEG/PNG
     patient_name: Optional[str] = None
+    owner_org_id: Optional[str] = None
+    owner_provider_person_id: Optional[str] = None
+    org_id: Optional[str] = None
+    provider_person_id: Optional[str] = None
 
 
 class RehabLabelPayload(BaseModel):
@@ -157,6 +161,30 @@ class ChartReviewPayload(BaseModel):
 
 def _error(status_code: int, code: str, detail: str):
     raise HTTPException(status_code=status_code, detail={"code": code, "message": detail})
+
+
+def _clean_scope_value(value: Optional[str]) -> Optional[str]:
+    text = (value or "").strip()
+    return text or None
+
+
+def _scope_from_request(
+    request: Request,
+    *,
+    owner_org_id: Optional[str] = None,
+    owner_provider_person_id: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    org_id = (
+        _clean_scope_value(owner_org_id)
+        or _clean_scope_value(request.headers.get("x-glasspt-org-id"))
+        or _clean_scope_value(request.headers.get("x-org-id"))
+    )
+    provider_person_id = (
+        _clean_scope_value(owner_provider_person_id)
+        or _clean_scope_value(request.headers.get("x-glasspt-provider-person-id"))
+        or _clean_scope_value(request.headers.get("x-provider-person-id"))
+    )
+    return org_id, provider_person_id
 
 
 def _validate_upload_size(content: bytes, kind: str):
@@ -251,6 +279,17 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_chart_reviews_reviewed_at ON chart_reviews(reviewed_at);
         """
     )
+    event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "owner_org_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN owner_org_id TEXT")
+    if "owner_provider_person_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN owner_provider_person_id TEXT")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_events_owner_org_created_at ON events(owner_org_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_owner_provider_created_at ON events(owner_provider_person_id, created_at);
+        """
+    )
 
 
 def _conn():
@@ -340,6 +379,112 @@ def _get_chart_review_by_event_id(conn: sqlite3.Connection, event_id: str):
         "quality_score": int(row[3] or 0),
         "quality_level": row[4] or "",
         "reviewed_at": row[5],
+    }
+
+
+def _get_latest_soap_by_event_id(conn: sqlite3.Connection, event_id: str):
+    row = conn.execute(
+        "SELECT s, o, a, p, created_at FROM soap_notes WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
+        (event_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "s": row[0] or "",
+        "o": row[1] or "",
+        "a": row[2] or "",
+        "p": row[3] or "",
+        "created_at": row[4],
+    }
+
+
+def _read_chart_export(event_id: str) -> tuple[str, Optional[dict]]:
+    chart_path = CHART_DIR / f"{event_id}_11.txt"
+    if not chart_path.exists():
+        return "", None
+    chart = chart_path.read_text(encoding="utf-8")
+    return chart, _chart_quality(chart)
+
+
+def _list_event_artifacts(event_id: str) -> list[dict]:
+    artifacts: list[dict] = []
+    for path in sorted(MASKED_DIR.glob(f"{event_id}*")):
+        if not path.is_file():
+            continue
+        kind = "masked_image" if path.name.endswith("_masked.jpg") else "masked_video_frame"
+        artifacts.append(
+            {
+                "kind": kind,
+                "filename": path.name,
+                "content_type": "image/jpeg",
+                "file_size_bytes": path.stat().st_size,
+                "download_path": f"/masked-files/{path.name}",
+            }
+        )
+    return artifacts
+
+
+def _first_non_empty(*values: object) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _build_physio_session_export_item(conn: sqlite3.Connection, event_row):
+    event_id = event_row[0]
+    label = _get_label_by_event_id(conn, event_id)
+    soap = _get_latest_soap_by_event_id(conn, event_id)
+    review = _get_chart_review_by_event_id(conn, event_id)
+    chart_text, quality = _read_chart_export(event_id)
+    sections = _parse_chart_sections(chart_text) if chart_text else {}
+
+    title = _first_non_empty(
+        " · ".join(
+            part
+            for part in [
+                label.get("session_type") if label else "",
+                label.get("core_task") if label else "",
+            ]
+            if part
+        ),
+        sections.get("Dx.>"),
+        event_row[3],
+        soap.get("a") if soap else "",
+        event_row[2],
+    )
+    summary = _first_non_empty(
+        label.get("notes") if label else "",
+        soap.get("a") if soap else "",
+        soap.get("o") if soap else "",
+        sections.get("A>"),
+        sections.get("O>"),
+        event_row[3],
+        _clip_chart_text(chart_text, 360),
+    )
+
+    return {
+        "id": event_id,
+        "event_id": event_id,
+        "source": event_row[1],
+        "event_type": event_row[2],
+        "intent": event_row[3],
+        "status": event_row[4],
+        "created_at": event_row[5],
+        "patient_name": event_row[6] or None,
+        "owner_org_id": event_row[7] or None,
+        "owner_provider_person_id": event_row[8] or None,
+        "title": title,
+        "summary": summary,
+        "label": label,
+        "soap": soap,
+        "chart_excerpt": _clip_chart_text(chart_text, 900) if chart_text else "",
+        "quality": quality,
+        "review": review,
+        "artifacts": _list_event_artifacts(event_id),
+        "persisted": True,
+        "storage": "rayban-local-bridge.sqlite",
     }
 
 
@@ -754,7 +899,7 @@ def _extract_patient_from_text(text: str) -> str:
 
 def _get_event_for_merge(conn: sqlite3.Connection, event_id: str) -> dict:
     row = conn.execute(
-        "SELECT id, source, event_type, raw_text, patient_name, created_at "
+        "SELECT id, source, event_type, raw_text, patient_name, created_at, owner_org_id, owner_provider_person_id "
         "FROM events WHERE id = ?",
         (event_id,),
     ).fetchone()
@@ -767,7 +912,20 @@ def _get_event_for_merge(conn: sqlite3.Connection, event_id: str) -> dict:
         "raw_text": row[3] or "",
         "patient_name": row[4] or "",
         "created_at": row[5],
+        "owner_org_id": row[6] or "",
+        "owner_provider_person_id": row[7] or "",
     }
+
+
+def _resolve_merged_scope(image_event: dict, audio_event: dict) -> tuple[Optional[str], Optional[str]]:
+    scopes = []
+    for key in ("owner_org_id", "owner_provider_person_id"):
+        image_value = _clean_scope_value(image_event.get(key))
+        audio_value = _clean_scope_value(audio_event.get(key))
+        if image_value and audio_value and image_value != audio_value:
+            _error(400, "SCOPE_MISMATCH", "서로 다른 조직/전문가의 이벤트는 통합할 수 없습니다.")
+        scopes.append(image_value or audio_value)
+    return scopes[0], scopes[1]
 
 
 def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str = "") -> dict:
@@ -789,6 +947,7 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
         or _extract_patient_from_text(image_text)
         or None
     )
+    owner_org_id, owner_provider_person_id = _resolve_merged_scope(image_event, audio_event)
     consent_id = _require_patient_consent("text", patient or "")
 
     subjective = audio_text.strip() or "환자 주관적 호소 미입력"
@@ -833,9 +992,9 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event_id, "merged", "combined", raw_text, "note", "processed", patient),
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (event_id, "merged", "combined", raw_text, "note", "processed", patient, owner_org_id, owner_provider_person_id),
         )
         conn.execute(
             "INSERT INTO soap_notes (id, event_id, s, o, a, p) VALUES (?, ?, ?, ?, ?, ?)",
@@ -872,13 +1031,25 @@ def stt_whisper_local(audio_path: Optional[str]) -> str:
         return f"[STT_STUB] {audio_path}"
 
 
-def _process_event(source: str, event_type: str, text: Optional[str] = None, audio_path: Optional[str] = None, image_base64: Optional[str] = None, image_notes: str = "", patient_name: str = ""):
+def _process_event(
+    source: str,
+    event_type: str,
+    text: Optional[str] = None,
+    audio_path: Optional[str] = None,
+    image_base64: Optional[str] = None,
+    image_notes: str = "",
+    patient_name: str = "",
+    owner_org_id: Optional[str] = None,
+    owner_provider_person_id: Optional[str] = None,
+):
     audio_store = os.getenv("AUDIO_STORE", "false").lower() == "true"
     image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     phi_redact = os.getenv("PHI_REDACT", "true").lower() == "true"
     soap_enabled = os.getenv("SOAP_ENABLED", "true").lower() == "true"
     masking_meta = None
     masking_audit = ""
+    owner_org_id = _clean_scope_value(owner_org_id)
+    owner_provider_person_id = _clean_scope_value(owner_provider_person_id)
 
     if event_type not in {"audio", "text", "command", "image", "video"}:
         raise HTTPException(status_code=400, detail="event_type must be audio/text/command/image/video")
@@ -987,8 +1158,19 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (event_id, source, event_type, parsed_text, intent, "processed", patient_name or None),
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                source,
+                event_type,
+                parsed_text,
+                intent,
+                "processed",
+                patient_name or None,
+                owner_org_id,
+                owner_provider_person_id,
+            ),
         )
         if soap_id and soap:
             conn.execute(
@@ -1033,6 +1215,10 @@ def _process_event(source: str, event_type: str, text: Optional[str] = None, aud
         "media": {
             "masking": masking_meta,
         } if masking_meta else {},
+        "scope": {
+            "owner_org_id": owner_org_id,
+            "owner_provider_person_id": owner_provider_person_id,
+        },
     }
 
 
@@ -1043,7 +1229,7 @@ def _event_status_result(processed: dict) -> dict:
     if event_id:
         with _conn() as conn:
             row = conn.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id "
                 "FROM events WHERE id = ?",
                 (event_id,),
             ).fetchone()
@@ -1056,6 +1242,8 @@ def _event_status_result(processed: dict) -> dict:
                 "intent": row[4],
                 "status": row[5],
                 "created_at": row[6],
+                "owner_org_id": row[7],
+                "owner_provider_person_id": row[8],
             }
     result = {"event": event_obj, "soap": processed.get("soap")}
     if processed.get("media"):
@@ -1458,7 +1646,12 @@ def revoke_patient_consent(patient_name: str, scope: str = "capture_analysis_sto
 
 
 @app.post("/ingest")
-def ingest(payload: IngestPayload):
+def ingest(payload: IngestPayload, request: Request):
+    owner_org_id, owner_provider_person_id = _scope_from_request(
+        request,
+        owner_org_id=payload.owner_org_id or payload.org_id,
+        owner_provider_person_id=payload.owner_provider_person_id or payload.provider_person_id,
+    )
     return _process_event(
         source=payload.source,
         event_type=payload.event_type,
@@ -1466,6 +1659,8 @@ def ingest(payload: IngestPayload):
         audio_path=payload.audio_path,
         image_base64=payload.image_base64,
         patient_name=payload.patient_name or "",
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
     )
 
 
@@ -1489,7 +1684,14 @@ def merge_events(payload: MergeEventsPayload):
     }
 
 
-def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_name: str = ""):
+def _process_upload_job(
+    event_id: str,
+    source: str,
+    saved_path: Path,
+    patient_name: str = "",
+    owner_org_id: Optional[str] = None,
+    owner_provider_person_id: Optional[str] = None,
+):
     attempts = 2
     last_error = None
     for i in range(attempts):
@@ -1506,6 +1708,8 @@ def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_na
                 event_type="audio",
                 audio_path=str(saved_path),
                 patient_name=patient_name,
+                owner_org_id=owner_org_id,
+                owner_provider_person_id=owner_provider_person_id,
             )
             inner_id = result.get("event_id", "")
             if inner_id and inner_id != event_id:
@@ -1536,9 +1740,12 @@ def _process_upload_job(event_id: str, source: str, saved_path: Path, patient_na
 @app.post("/ingest-upload")
 async def ingest_upload(
     background_tasks: BackgroundTasks,
+    request: Request,
     source: str = Form("iphone"),
     event_type: str = Form("audio"),
     patient_name: str = Form(""),
+    owner_org_id: str = Form(""),
+    owner_provider_person_id: str = Form(""),
     audio: UploadFile = File(...),
 ):
     if event_type != "audio":
@@ -1562,8 +1769,21 @@ async def ingest_upload(
     saved_path.write_bytes(content)
 
     event_id = str(uuid.uuid4())
+    scoped_org_id, scoped_provider_person_id = _scope_from_request(
+        request,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+    )
     _touch_async_result(event_id, {"status": "accepted", "message": "uploaded"})
-    background_tasks.add_task(_process_upload_job, event_id, source, saved_path, patient_name)
+    background_tasks.add_task(
+        _process_upload_job,
+        event_id,
+        source,
+        saved_path,
+        patient_name,
+        scoped_org_id,
+        scoped_provider_person_id,
+    )
 
     return {
         "event_id": event_id,
@@ -1582,7 +1802,7 @@ def get_event(event_id: str):
     # fallback: DB에서 처리 완료 이벤트 조회
     with _conn() as conn:
         ev = conn.execute(
-            "SELECT id, source, event_type, raw_text, intent, status, created_at FROM events WHERE id = ?",
+            "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id FROM events WHERE id = ?",
             (event_id,),
         ).fetchone()
         if not ev:
@@ -1601,6 +1821,8 @@ def get_event(event_id: str):
         "intent": ev[4],
         "status": ev[5],
         "created_at": ev[6],
+        "owner_org_id": ev[7],
+        "owner_provider_person_id": ev[8],
     }
     soap_obj = None
     if soap:
@@ -1672,7 +1894,15 @@ def purge_old_events(days: int = 30):
 
 
 
-def _process_image_job(event_id: str, source: str, saved_path, description: str, patient_name: str = ""):
+def _process_image_job(
+    event_id: str,
+    source: str,
+    saved_path,
+    description: str,
+    patient_name: str = "",
+    owner_org_id: Optional[str] = None,
+    owner_provider_person_id: Optional[str] = None,
+):
     image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     try:
         _touch_async_result(event_id, {"status": "processing", "message": "image processing"})
@@ -1688,6 +1918,8 @@ def _process_image_job(event_id: str, source: str, saved_path, description: str,
             text=text,
             image_base64=image_base64,
             patient_name=patient_name,
+            owner_org_id=owner_org_id,
+            owner_provider_person_id=owner_provider_person_id,
         )
         inner_id = result.get("event_id", "")
         if inner_id and inner_id != event_id:
@@ -1720,9 +1952,12 @@ def _process_image_job(event_id: str, source: str, saved_path, description: str,
 @app.post("/ingest-image")
 async def ingest_image(
     background_tasks: BackgroundTasks,
+    request: Request,
     source: str = Form("rayban"),
     description: str = Form(""),
     patient_name: str = Form(""),
+    owner_org_id: str = Form(""),
+    owner_provider_person_id: str = Form(""),
     image: UploadFile = File(...),
 ):
     ext = (Path(image.filename or "").suffix or "").lower()
@@ -1743,8 +1978,22 @@ async def ingest_image(
     saved_path.write_bytes(content)
 
     event_id = str(__import__('uuid').uuid4())
+    scoped_org_id, scoped_provider_person_id = _scope_from_request(
+        request,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+    )
     _touch_async_result(event_id, {"status": "accepted", "message": "image uploaded"})
-    background_tasks.add_task(_process_image_job, event_id, source, saved_path, description, patient_name)
+    background_tasks.add_task(
+        _process_image_job,
+        event_id,
+        source,
+        saved_path,
+        description,
+        patient_name,
+        scoped_org_id,
+        scoped_provider_person_id,
+    )
 
     return {
         "event_id": event_id,
@@ -1755,7 +2004,14 @@ async def ingest_image(
 
 
 
-def _process_video_job(event_id: str, source: str, saved_path: Path, patient_name: str = ""):
+def _process_video_job(
+    event_id: str,
+    source: str,
+    saved_path: Path,
+    patient_name: str = "",
+    owner_org_id: Optional[str] = None,
+    owner_provider_person_id: Optional[str] = None,
+):
     import subprocess
     import tempfile
     import shutil as _shutil
@@ -1835,7 +2091,14 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
         combined = (chr(10) + chr(10)).join(parts)
 
         # ── 6. SOAP 차트 생성 ────────────────────────────────────────
-        result = _process_event(source=source, event_type="video", text=combined, patient_name=patient_name)
+        result = _process_event(
+            source=source,
+            event_type="video",
+            text=combined,
+            patient_name=patient_name,
+            owner_org_id=owner_org_id,
+            owner_provider_person_id=owner_provider_person_id,
+        )
         inner_id = result.get("event_id", "")
 
         # outer_event_id 로도 차트 조회 가능하도록 복사
@@ -1844,11 +2107,15 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
             outer_chart = CHART_DIR / f"{event_id}_11.txt"
             if inner_chart.exists() and not outer_chart.exists():
                 _shutil.copy(inner_chart, outer_chart)
+            for outer_masked in MASKED_DIR.glob(f"{event_id}_f*.jpg"):
+                inner_masked = MASKED_DIR / outer_masked.name.replace(event_id, inner_id, 1)
+                if not inner_masked.exists():
+                    _shutil.copy(outer_masked, inner_masked)
 
         # iOS EventStatusResponse 구조에 맞게 래핑
         with _conn() as _c:
             ev_row = _c.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id "
                 "FROM events WHERE id = ?",
                 (inner_id,),
             ).fetchone()
@@ -1858,6 +2125,8 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
                 "id": ev_row[0], "source": ev_row[1], "event_type": ev_row[2],
                 "raw_text": ev_row[3], "intent": ev_row[4],
                 "status": ev_row[5], "created_at": ev_row[6],
+                "owner_org_id": ev_row[7],
+                "owner_provider_person_id": ev_row[8],
             }
 
         _touch_async_result(event_id, {
@@ -1888,8 +2157,11 @@ def _process_video_job(event_id: str, source: str, saved_path: Path, patient_nam
 @app.post("/ingest-video")
 async def ingest_video(
     background_tasks: BackgroundTasks,
+    request: Request,
     source: str = Form("rayban-camera"),
     patient_name: str = Form(""),
+    owner_org_id: str = Form(""),
+    owner_provider_person_id: str = Form(""),
     video: UploadFile = File(...),
 ):
     ext = (Path(video.filename or "").suffix or "").lower()
@@ -1910,8 +2182,21 @@ async def ingest_video(
     saved_path.write_bytes(content)
 
     event_id = str(uuid.uuid4())
+    scoped_org_id, scoped_provider_person_id = _scope_from_request(
+        request,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+    )
     _touch_async_result(event_id, {"status": "accepted", "message": "video uploaded"})
-    background_tasks.add_task(_process_video_job, event_id, source, saved_path, patient_name)
+    background_tasks.add_task(
+        _process_video_job,
+        event_id,
+        source,
+        saved_path,
+        patient_name,
+        scoped_org_id,
+        scoped_provider_person_id,
+    )
 
     return {
         "event_id": event_id,
@@ -2056,7 +2341,7 @@ def chart_review(limit: int = 50, include_good: bool = False, event_type: str = 
         _error(400, "INVALID_EVENT_TYPE_FILTER", "event_type은 combined 또는 all이어야 합니다.")
 
     where_sql = "" if clean_event_type == "all" else "WHERE event_type = ?"
-    params: list[str | int] = []
+    params: list[object] = []
     if clean_event_type != "all":
         params.append(clean_event_type)
     params.append(n)
@@ -2131,6 +2416,21 @@ def get_uploaded_file(filename: str):
 
     return FileResponse(str(file_path), media_type=media_type, filename=safe_name)
 
+
+@app.get("/masked-files/{filename}")
+def get_masked_file(filename: str):
+    """마스킹이 끝난 산출물만 보호된 경로로 내려준다."""
+    safe_name = Path(filename).name
+    if safe_name != filename:
+        raise HTTPException(status_code=404, detail="file not found")
+
+    file_path = MASKED_DIR / safe_name
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+
+    return FileResponse(str(file_path), media_type="image/jpeg", filename=safe_name)
+
+
 @app.get("/recent-events")
 def recent_events(limit: int = 10):
     n = max(1, min(limit, 50))
@@ -2156,6 +2456,67 @@ def recent_events(limit: int = 10):
                 }
             )
     return {"items": items}
+
+
+@app.get("/physio/sessions")
+def physio_sessions(
+    limit: int = 20,
+    patient_name: str = "",
+    org_id: str = "",
+    provider_person_id: str = "",
+    include_unscoped: bool = False,
+):
+    """physio_app에서 바로 읽을 수 있는 현장 세션 피드."""
+    n = max(1, min(limit, 100))
+    clean_patient_name = patient_name.strip()
+    clean_org_id = (org_id or "").strip()
+    clean_provider_person_id = (provider_person_id or "").strip()
+    clauses: list[str] = []
+    params: list[object] = []
+
+    if clean_patient_name:
+        clauses.append("patient_name = ?")
+        params.append(clean_patient_name)
+    if clean_org_id:
+        if include_unscoped:
+            clauses.append("(owner_org_id = ? OR owner_org_id IS NULL OR owner_org_id = '')")
+        else:
+            clauses.append("owner_org_id = ?")
+        params.append(clean_org_id)
+    if clean_provider_person_id:
+        if include_unscoped:
+            clauses.append("(owner_provider_person_id = ? OR owner_provider_person_id IS NULL OR owner_provider_person_id = '')")
+        else:
+            clauses.append("owner_provider_person_id = ?")
+        params.append(clean_provider_person_id)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(n)
+
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, source, event_type, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id
+            FROM events
+            {where_sql}
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        items = [_build_physio_session_export_item(conn, row) for row in rows]
+
+    return {
+        "ok": True,
+        "count": len(items),
+        "items": items,
+        "storage": "rayban-local-bridge.sqlite",
+        "schema_version": "physio-session-feed/v1",
+        "scope": {
+            "org_id": clean_org_id or None,
+            "provider_person_id": clean_provider_person_id or None,
+            "include_unscoped": include_unscoped,
+        },
+    }
 
 
 @app.post("/labels/{event_id}")
@@ -2230,7 +2591,7 @@ def recent_failures(limit: int = 20):
 def audit_logs(limit: int = 50, level: str = "", event_id: str = ""):
     n = max(1, min(limit, 200))
     filters = []
-    params: list[str | int] = []
+    params: list[object] = []
 
     clean_level = level.strip().lower()
     if clean_level:

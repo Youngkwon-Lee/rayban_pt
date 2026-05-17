@@ -40,7 +40,7 @@ final class TextSendUITest: XCTestCase {
 
         // 업로드 중 → 완료 대기
         let done = app.staticTexts["완료"]
-        let postUploadDialog = app.staticTexts["차트가 생성됐어요 ✓"]
+        let postUploadDialog = app.staticTexts["차트가 생성됐어요"]
         XCTAssertTrue(
             done.waitForExistence(timeout: 15) || postUploadDialog.waitForExistence(timeout: 2),
             "완료 표시 없음"
@@ -69,17 +69,12 @@ final class TextSendUITest: XCTestCase {
         }
     }
 
-    func testCheckupAccess() throws {
-        let checkupTab = app.tabBars.buttons["점검"]
-        XCTAssertTrue(checkupTab.waitForExistence(timeout: 5), "점검 탭이 없음")
-        checkupTab.tap()
-
-        let checkupTitle = app.navigationBars["기기 점검"]
-        XCTAssertTrue(checkupTitle.waitForExistence(timeout: 3), "점검 탭에서 기기 점검 화면을 열 수 없음")
-
+    func testCheckupAccessFromServerSettings() throws {
         let cameraTab = app.tabBars.buttons["카메라"]
         XCTAssertTrue(cameraTab.waitForExistence(timeout: 3), "카메라 탭이 없음")
         cameraTab.tap()
+
+        XCTAssertFalse(app.tabBars.buttons["점검"].exists, "점검은 하단 탭에서 제거되어야 함")
 
         let serverButton = app.buttons["serverSettingsButton"]
         XCTAssertTrue(serverButton.waitForExistence(timeout: 3), "서버 설정 버튼이 없음")

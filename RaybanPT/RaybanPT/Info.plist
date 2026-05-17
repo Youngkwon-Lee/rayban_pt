@@ -77,8 +77,12 @@
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
 		<key>DAMEnabled</key>
-		<true/>
+		<false/>
 	</dict>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>fb-viewapp</string>
+	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

@@ -60,7 +60,7 @@ so backend processors (STT, redaction, summarization, SOAP or other formats) can
 
 ## Device E2E checklist
 
-Use the iOS app `점검` tab before a field test:
+Use the iOS app server settings sheet before a field test:
 
 - [ ] `/health` succeeds and DB is ok
 - [ ] API key is entered in the app

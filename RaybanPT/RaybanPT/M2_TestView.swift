@@ -40,7 +40,7 @@ struct M2_TestView: View {
     // 미라벨 뱃지
     @State private var unlabeledBadge = 0
 
-    enum Tab { case audio, text, camera, checkup, charts }
+    enum Tab { case audio, text, camera, charts }
 
     static var defaultBridgeURL: URL {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
@@ -84,19 +84,13 @@ struct M2_TestView: View {
             .tabItem { Label("텍스트", systemImage: "text.bubble.fill") }
             .tag(Tab.text)
 
-            // 점검 탭
-            NavigationStack {
-                CheckupTab(client: vm.client)
-            }
-            .tabItem { Label("점검", systemImage: "checklist.checked") }
-            .tag(Tab.checkup)
-
             // 차트 탭
             ChartListView(client: vm.client)
             .tabItem { Label("차트", systemImage: "doc.text.fill") }
             .tag(Tab.charts)
             .badge(unlabeledBadge > 0 ? unlabeledBadge : 0)
         }
+        .tint(DS.ColorToken.primary)
         .overlay(alignment: .top) {
             if selectedTab == .camera {
                 DeviceStatusBanner(deviceManager: deviceManager)
@@ -108,23 +102,18 @@ struct M2_TestView: View {
             Button {
                 showServerSetup = true
             } label: {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(needsServerSetup ? .orange : .white.opacity(0.5))
-                    .padding(10)
-                    .background(needsServerSetup ? Color.orange.opacity(0.2) : DS.ColorToken.surface,
-                                in: Circle())
+                ServerSettingsButton(needsSetup: needsServerSetup)
             }
             .accessibilityIdentifier("serverSettingsButton")
             .padding(.bottom, 68)
             .padding(.trailing, 16)
         }
         // MARK: 업로드 완료 다이얼로그
-        .confirmationDialog("차트가 생성됐어요 ✓", isPresented: $showPostUploadDialog, titleVisibility: .visible) {
-            Button("🏷 지금 라벨링하기") {
+        .confirmationDialog("차트가 생성됐어요", isPresented: $showPostUploadDialog, titleVisibility: .visible) {
+            Button("지금 라벨링하기") {
                 showPostLabelSheet = true
             }
-            Button("📄 차트 보기") {
+            Button("차트 보기") {
                 showPostChartSheet = true
             }
             Button("나중에", role: .cancel) { }
@@ -152,14 +141,22 @@ struct M2_TestView: View {
             if oldTab == .charts { Task { await refreshBadge() } }
         }
         .sheet(isPresented: $showServerSetup) {
-            ServerSetupSheet(client: vm.client) { newURL, newAPIKey in
+            ServerSetupSheet(client: vm.client) { newURL, newAPIKey, newOrgId, newProviderPersonId in
                 UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
                 UserDefaults.standard.set(newAPIKey, forKey: "bridge_api_key")
+                UserDefaults.standard.set(newOrgId, forKey: "glasspt_owner_org_id")
+                UserDefaults.standard.set(newProviderPersonId, forKey: "glasspt_owner_provider_person_id")
                 vm.client.updateBaseURL(URL(string: newURL)!)
                 vm.client.updateAPIKey(newAPIKey)
+                vm.client.updateOwnerScope(orgId: newOrgId, providerPersonId: newProviderPersonId)
                 NotificationCenter.default.post(name: Notification.Name("bridgeSettingsDidChange"), object: nil)
                 Task { await refreshBadge() }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("bridgeSettingsDidChange"))) { _ in
+            let orgId = UserDefaults.standard.string(forKey: "glasspt_owner_org_id") ?? ""
+            let providerPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id") ?? ""
+            vm.client.updateOwnerScope(orgId: orgId, providerPersonId: providerPersonId)
         }
         .task { await refreshBadge() }
         .onAppear {
@@ -175,6 +172,35 @@ struct M2_TestView: View {
 }
 
 // MARK: - 기기 E2E 점검
+
+private struct ServerSettingsButton: View {
+    let needsSetup: Bool
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 13, weight: .semibold))
+                Circle()
+                    .fill(needsSetup ? DS.ColorToken.warning : DS.ColorToken.success)
+                    .frame(width: 7, height: 7)
+                    .offset(x: 4, y: -4)
+            }
+            Text("서버")
+                .font(.system(size: 12, weight: .semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(DS.ColorToken.surface, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(needsSetup ? DS.ColorToken.warning.opacity(0.45) : Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        .accessibilityLabel(needsSetup ? "서버 설정 필요" : "서버 설정")
+    }
+}
 
 private struct CheckupTab: View {
     let client: BridgeClient
@@ -239,7 +265,7 @@ private struct CheckupTab: View {
 
                     Text(healthMessage)
                         .font(.caption)
-                        .foregroundStyle(health?.ok == true ? Color.secondary : Color.orange)
+                        .foregroundStyle(health?.ok == true ? Color.secondary : DS.ColorToken.warning)
 
                     if let health {
                         VStack(spacing: 8) {
@@ -308,7 +334,7 @@ private struct CheckupTab: View {
             Section {
                 HStack {
                     Label(deviceManager.statusMessage, systemImage: deviceManager.linkState == .connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                        .foregroundStyle(deviceManager.linkState == .connected ? .green : .orange)
+                        .foregroundStyle(deviceManager.linkState == .connected ? DS.ColorToken.success : DS.ColorToken.warning)
                     Spacer()
                     Button("재연결") {
                         deviceManager.retryConnection()
@@ -316,7 +342,7 @@ private struct CheckupTab: View {
                     .buttonStyle(.bordered)
                 }
             } header: {
-                Text("Ray-Ban 상태")
+                Text("기기 상태")
             }
 
             Section {
@@ -572,7 +598,7 @@ private struct CheckupRow: View {
                 }
             } icon: {
                 Image(systemName: item.icon)
-                    .foregroundStyle(isOn ? .green : .secondary)
+                    .foregroundStyle(isOn ? DS.ColorToken.success : .secondary)
             }
         }
     }
@@ -585,10 +611,10 @@ private struct StatusPill: View {
     var body: some View {
         Text(text)
             .font(.caption2.weight(.bold))
-            .foregroundStyle(ok ? .green : .orange)
+            .foregroundStyle(ok ? DS.ColorToken.success : DS.ColorToken.warning)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background((ok ? Color.green : Color.orange).opacity(0.12), in: Capsule())
+            .background((ok ? DS.ColorToken.success : DS.ColorToken.warning).opacity(0.12), in: Capsule())
     }
 }
 
@@ -600,7 +626,7 @@ private struct HealthLine: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                .foregroundStyle(ok ? .green : .orange)
+                .foregroundStyle(ok ? DS.ColorToken.success : DS.ColorToken.warning)
                 .frame(width: 18)
             Text(title)
             Spacer()
@@ -617,10 +643,12 @@ private struct HealthLine: View {
 
 private struct ServerSetupSheet: View {
     let client: BridgeClient
-    let onSave: (String, String) -> Void
+    let onSave: (String, String, String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var urlText: String = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
     @State private var apiKeyText: String = UserDefaults.standard.string(forKey: "bridge_api_key") ?? ""
+    @State private var ownerOrgIdText: String = UserDefaults.standard.string(forKey: "glasspt_owner_org_id") ?? ""
+    @State private var ownerProviderPersonIdText: String = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id") ?? ""
     @State private var isCheckingConnection = false
     @State private var connectionMessage = ""
     @State private var connectionOK = false
@@ -639,7 +667,7 @@ private struct ServerSetupSheet: View {
                         Label("기기 점검 열기", systemImage: "checklist.checked")
                     }
                 } footer: {
-                    Text("하단 탭에서 보이지 않으면 여기에서 같은 점검 화면을 열 수 있습니다.")
+                    Text("현장 테스트 전 브리지, 보안, 마스킹, 차트 품질을 여기에서 확인합니다.")
                         .font(.caption)
                 }
 
@@ -665,7 +693,7 @@ private struct ServerSetupSheet: View {
                                 ProgressView()
                             } else {
                                 Image(systemName: connectionOK ? "checkmark.circle.fill" : "network")
-                                    .foregroundStyle(connectionOK ? .green : .blue)
+                                    .foregroundStyle(connectionOK ? DS.ColorToken.success : DS.ColorToken.primary)
                             }
                             Text(isCheckingConnection ? "확인 중..." : "연결 확인")
                         }
@@ -677,7 +705,7 @@ private struct ServerSetupSheet: View {
                     if !connectionMessage.isEmpty {
                         Text(connectionMessage)
                             .font(.caption)
-                            .foregroundStyle(connectionOK ? .green : .red)
+                            .foregroundStyle(connectionOK ? DS.ColorToken.success : DS.ColorToken.danger)
                     }
                 } footer: {
                     Text("저장 전 iPhone에서 bridge /health 응답을 받을 수 있는지 확인합니다.")
@@ -696,6 +724,20 @@ private struct ServerSetupSheet: View {
                 }
 
                 Section {
+                    TextField("physio_app organization id", text: $ownerOrgIdText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                    TextField("physio_app expert person id", text: $ownerProviderPersonIdText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    Text("Physio App 연동")
+                } footer: {
+                    Text("physio_app의 GlassPT 화면에 표시되는 조직 ID와 전문가 ID를 입력하면, 새 촬영/음성/텍스트 기록이 해당 로그인 전문가의 수신함에만 표시됩니다.")
+                        .font(.caption)
+                }
+
+                Section {
                     Button("저장") {
                         dismissKeyboard()
                         saveSettings()
@@ -703,7 +745,7 @@ private struct ServerSetupSheet: View {
                     }
                     .disabled(!isValid)
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .foregroundStyle(isValid ? .blue : .gray)
+                    .foregroundStyle(isValid ? DS.ColorToken.primary : .gray)
                 }
             }
             .scrollDismissesKeyboard(.interactively)
@@ -804,7 +846,9 @@ private struct ServerSetupSheet: View {
     private func saveSettings(trimmedURL: String? = nil, apiKey: String? = nil) {
         let url = trimmedURL ?? urlText.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = apiKey ?? apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        onSave(url, key)
+        let orgId = ownerOrgIdText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let providerPersonId = ownerProviderPersonIdText.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSave(url, key, orgId, providerPersonId)
     }
 }
 
@@ -837,7 +881,7 @@ private struct DeviceStatusBanner: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
             .padding(.horizontal, 16)
             .padding(.top, 56) // 내비바 아래
             .transition(.move(edge: .top).combined(with: .opacity))
@@ -868,7 +912,7 @@ private struct AudioTab: View {
                 } label: {
                     HStack {
                         Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
-                            .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
+                            .foregroundStyle(selectedPatient == nil ? Color.secondary : DS.ColorToken.primary)
                         Text(selectedPatient?.name ?? "환자 선택 (필수)")
                             .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
                         Spacer()
@@ -883,7 +927,7 @@ private struct AudioTab: View {
                         }
                     }
                     .padding(12)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .background(DS.ColorToken.panel, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showPatientPicker) {
@@ -911,24 +955,24 @@ private struct AudioTab: View {
                     VStack(spacing: 14) {
                         ZStack {
                             Circle()
-                                .fill(audioRecorder.isRecording ? Color.red.opacity(0.12) : Color.blue.opacity(0.10))
+                                .fill(audioRecorder.isRecording ? DS.ColorToken.danger.opacity(0.12) : DS.ColorToken.primary.opacity(0.10))
                                 .frame(width: 100, height: 100)
                             Image(systemName: audioRecorder.isRecording ? "stop.circle.fill" : "mic.circle.fill")
                                 .font(.system(size: 56))
-                                .foregroundStyle(audioRecorder.isRecording ? .red : .blue)
+                                .foregroundStyle(audioRecorder.isRecording ? DS.ColorToken.danger : DS.ColorToken.primary)
                                 .scaleEffect(audioRecorder.isRecording ? 1.08 : 1.0)
                                 .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true),
                                            value: audioRecorder.isRecording)
                         }
-                        Text(audioRecorder.isRecording ? "중지 & 업로드" : "Ray-Ban 녹음")
+                        Text(audioRecorder.isRecording ? "중지 & 업로드" : "글라스 녹음")
                             .font(.headline)
-                            .foregroundStyle(audioRecorder.isRecording ? .red : .blue)
+                            .foregroundStyle(audioRecorder.isRecording ? DS.ColorToken.danger : DS.ColorToken.primary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 28)
                     .background(
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(audioRecorder.isRecording ? Color.red.opacity(0.06) : Color.blue.opacity(0.06))
+                        RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+                            .fill(audioRecorder.isRecording ? DS.ColorToken.danger.opacity(0.06) : DS.ColorToken.primary.opacity(0.06))
                     )
                 }
                 .buttonStyle(.plain)
@@ -1051,7 +1095,7 @@ private struct TextTab: View {
                 } label: {
                     HStack {
                         Image(systemName: selectedPatient == nil ? "person.crop.circle.badge.plus" : "person.crop.circle.fill")
-                            .foregroundStyle(selectedPatient == nil ? Color.secondary : Color.blue)
+                            .foregroundStyle(selectedPatient == nil ? Color.secondary : DS.ColorToken.primary)
                         Text(selectedPatient?.name ?? "환자 선택 (필수)")
                             .foregroundStyle(selectedPatient == nil ? .secondary : .primary)
                         Spacer()
@@ -1066,7 +1110,7 @@ private struct TextTab: View {
                         }
                     }
                     .padding(12)
-                    .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 10))
+                    .background(DS.ColorToken.panel, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .sheet(isPresented: $showPatientPicker) {
@@ -1181,8 +1225,8 @@ private struct ResultCard: View {
                 }
             }
             .padding(16)
-            .background(Color(.secondarySystemBackground),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .background(DS.ColorToken.panel,
+                        in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
             .transition(.opacity.combined(with: .move(edge: .bottom)))
             .animation(.spring(response: 0.35, dampingFraction: 0.8), value: vm.state)
         }
@@ -1195,19 +1239,19 @@ private struct ResultCard: View {
             EmptyView()
         case .connecting, .uploading:
             Label("업로드 중", systemImage: "arrow.up.circle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(DS.ColorToken.warning)
                 .font(.caption)
         case .processing:
             Label("처리 중", systemImage: "gearshape.fill")
-                .foregroundStyle(.blue)
+                .foregroundStyle(DS.ColorToken.primary)
                 .font(.caption)
         case .done:
             Label("완료", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+                .foregroundStyle(DS.ColorToken.success)
                 .font(.caption)
         case .failed(let msg):
             Label(msg.isEmpty ? "오류" : "오류", systemImage: "xmark.circle.fill")
-                .foregroundStyle(.red)
+                .foregroundStyle(DS.ColorToken.danger)
                 .font(.caption)
         }
     }

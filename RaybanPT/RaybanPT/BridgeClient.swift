@@ -16,6 +16,8 @@ struct IngestRequest: Codable {
     let audio_path: String?
     let image_base64: String?
     let patient_name: String?
+    let owner_org_id: String?
+    let owner_provider_person_id: String?
 }
 
 struct IngestResponse: Codable {
@@ -213,6 +215,8 @@ struct BridgeHealthSecurity: Codable {
 final class BridgeClient {
     private(set) var baseURL: URL
     private(set) var apiKey: String
+    private(set) var ownerOrgId: String
+    private(set) var ownerProviderPersonId: String
     private let session: URLSession
 
     init(baseURL: URL, apiKey: String = "", session: URLSession = .shared) {
@@ -220,6 +224,8 @@ final class BridgeClient {
         self.session = session
         let stored = UserDefaults.standard.string(forKey: "bridge_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.apiKey = !apiKey.isEmpty ? apiKey : (stored ?? "")
+        self.ownerOrgId = UserDefaults.standard.string(forKey: "glasspt_owner_org_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.ownerProviderPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     /// 런타임에 서버 URL 변경 (UserDefaults 설정 후 적용)
@@ -231,10 +237,21 @@ final class BridgeClient {
         self.apiKey = key
     }
 
+    func updateOwnerScope(orgId: String, providerPersonId: String) {
+        self.ownerOrgId = orgId.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.ownerProviderPersonId = providerPersonId.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// API 키 헤더를 URLRequest에 추가
     private func addAuth(_ req: inout URLRequest) {
         if !apiKey.isEmpty {
             req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        }
+        if !ownerOrgId.isEmpty {
+            req.setValue(ownerOrgId, forHTTPHeaderField: "x-glasspt-org-id")
+        }
+        if !ownerProviderPersonId.isEmpty {
+            req.setValue(ownerProviderPersonId, forHTTPHeaderField: "x-glasspt-provider-person-id")
         }
     }
 
@@ -316,7 +333,16 @@ final class BridgeClient {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        let body = IngestRequest(source: source, event_type: "text", text: text, audio_path: nil, image_base64: nil, patient_name: patientName)
+        let body = IngestRequest(
+            source: source,
+            event_type: "text",
+            text: text,
+            audio_path: nil,
+            image_base64: nil,
+            patient_name: patientName,
+            owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId
+        )
         req.httpBody = try JSONEncoder().encode(body)
         addAuth(&req)
 
@@ -367,6 +393,18 @@ final class BridgeClient {
             body.appendString("\(name)\r\n")
         }
 
+        if !ownerOrgId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"owner_org_id\"\r\n\r\n")
+            body.appendString("\(ownerOrgId)\r\n")
+        }
+
+        if !ownerProviderPersonId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"owner_provider_person_id\"\r\n\r\n")
+            body.appendString("\(ownerProviderPersonId)\r\n")
+        }
+
         // audio file
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
@@ -408,7 +446,9 @@ final class BridgeClient {
             text: description,
             audio_path: nil,
             image_base64: base64Str,
-            patient_name: patientName
+            patient_name: patientName,
+            owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId
         )
         req.httpBody = try JSONEncoder().encode(body)
         addAuth(&req)
@@ -450,6 +490,18 @@ final class BridgeClient {
             body.appendString("--\(boundary)\r\n")
             body.appendString("Content-Disposition: form-data; name=\"patient_name\"\r\n\r\n")
             body.appendString("\(name)\r\n")
+        }
+
+        if !ownerOrgId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"owner_org_id\"\r\n\r\n")
+            body.appendString("\(ownerOrgId)\r\n")
+        }
+
+        if !ownerProviderPersonId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"owner_provider_person_id\"\r\n\r\n")
+            body.appendString("\(ownerProviderPersonId)\r\n")
         }
 
         body.appendString("--\(boundary)\r\n")
