@@ -191,6 +191,11 @@ struct StreamView: View {
         }
         .onAppear { vm.setup() }
         .onAppear { deviceSession.start() }
+        .onAppear {
+            if DemoConfig.isHUDAutoTestEnabled {
+                runHUDAutoTest()
+            }
+        }
         .onDisappear { Task { await vm.tearDown() } }
         // 촬영 리뷰 시트
         .sheet(isPresented: $showPhotoSheet) {
@@ -719,6 +724,39 @@ struct StreamView: View {
     }
 
     // MARK: - Actions
+
+    private func runHUDAutoTest() {
+        Task {
+            let hud = GlassHUDManager.shared
+            // 1) 스트리밍이 활성화될 때까지 대기 (enableGlassDemoMode → isStreaming=true)
+            for _ in 0..<20 {
+                if vm.isStreaming { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            print("[HUDAutoTest] ① context: \(hud.demoHUDSummary ?? "nil")")
+
+            // 2) 녹화 시작 (HUD 상태만, 실제 VideoRecorder 건드리지 않음)
+            await hud.startRecording(patient: "테스트 김철수")
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            print("[HUDAutoTest] ② recording: \(hud.demoHUDSummary ?? "nil")")
+
+            // 3) 녹화 중지 → context 복귀
+            await hud.stopRecording()
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            print("[HUDAutoTest] ③ context after stop: \(hud.demoHUDSummary ?? "nil")")
+
+            // 4) AI 인사이트
+            await hud.showInsight(title: "차트 생성됨", body: "환자: 테스트 김철수")
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            print("[HUDAutoTest] ④ insight: \(hud.demoHUDSummary ?? "nil")")
+
+            // 5) 인사이트 자동 해제 후 context 복귀 (8초 타이머)
+            try? await Task.sleep(nanoseconds: 7_000_000_000)
+            print("[HUDAutoTest] ⑤ after insight: \(hud.demoHUDSummary ?? "nil")")
+            print("[HUDAutoTest] ✅ 완료")
+        }
+    }
 
     private var isSavingInProgress: Bool {
         if case .saving = saveStatus {
