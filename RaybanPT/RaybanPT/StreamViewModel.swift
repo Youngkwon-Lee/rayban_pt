@@ -147,6 +147,7 @@ final class StreamViewModel {
             }
             demoFrameTask?.cancel()
             demoFrameTask = nil
+            await GlassHUDManager.shared.detachDisplay()
             currentFrame = nil
             isStreaming = false
             statusMessage = "스마트 글라스 데모 중지됨"
@@ -333,6 +334,9 @@ final class StreamViewModel {
                 self.statusMessage = "스마트 글라스 라이브 수신 중 · \(index)f"
                 index += 1
             }
+        }
+        Task {
+            await GlassHUDManager.shared.attachSimulatedDisplay()
         }
     }
 

@@ -71,6 +71,7 @@ struct StreamView: View {
     @AppStorage("rayban_pt.auto_save_captures") private var autoSaveCaptures = false
     @State private var vm = StreamViewModel()
     @State private var deviceSession = DeviceSessionManager.shared
+    @State private var glassHUD = GlassHUDManager.shared
     @StateObject private var bridgeVm: AdapterViewModel
     @State private var store = PatientStore()
     @State private var captureStore = CaptureStore.shared
@@ -120,6 +121,13 @@ struct StreamView: View {
                 if vm.isStreaming || vm.recorder.isRecording {
                     statusPill
                         .padding(.top, 8)
+                        .padding(.horizontal, 16)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
+                // 데모 모드: 안경 HUD 시뮬레이터 배지
+                if DemoConfig.isGlassDemoEnabled, let hudSummary = glassHUD.demoHUDSummary {
+                    glassHUDPreviewPill(summary: hudSummary)
                         .padding(.horizontal, 16)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
@@ -372,6 +380,26 @@ struct StreamView: View {
                 Text(p.name).font(.caption).foregroundStyle(.white)
             }
         }
+    }
+
+    // MARK: - 글라스 HUD 데모 미리보기 배지
+
+    private func glassHUDPreviewPill(summary: String) -> some View {
+        HStack(spacing: DS.Spacing.xs) {
+            Image(systemName: "eyeglasses")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(DS.ColorToken.primary)
+            Text(summary)
+                .font(.system(size: DS.FontSize.caption, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .frame(minHeight: 32)
+        .background(DS.ColorToken.primary.opacity(0.18), in: Capsule())
+        .overlay(Capsule().stroke(DS.ColorToken.primary.opacity(0.35), lineWidth: 1))
     }
 
     // MARK: - 상태 Pill

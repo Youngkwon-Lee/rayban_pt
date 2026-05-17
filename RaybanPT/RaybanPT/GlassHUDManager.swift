@@ -16,8 +16,11 @@ final class GlassHUDManager {
     static let shared = GlassHUDManager()
 
     private(set) var isDisplayConnected = false
+    /// Non-nil in demo mode — mirrors what would be shown on the real glass display.
+    private(set) var demoHUDSummary: String? = nil
 
     private var display: Display?
+    private var isSimulated = false
     private var stateListenerToken: AnyListenerToken?
     private var displayStateContinuation: AsyncStream<DisplayState>.Continuation?
     private var displayStateTask: Task<Void, Never>?
@@ -74,6 +77,13 @@ final class GlassHUDManager {
         }
     }
 
+    /// Demo mode — treats as connected without a real DeviceSession.
+    func attachSimulatedDisplay() async {
+        isSimulated = true
+        isDisplayConnected = true
+        await pushHUD()
+    }
+
     func detachDisplay() async {
         elapsedTask?.cancel()
         elapsedTask = nil
@@ -86,7 +96,9 @@ final class GlassHUDManager {
         displayStateTask = nil
         await display?.stop()
         display = nil
+        isSimulated = false
         isDisplayConnected = false
+        demoHUDSummary = nil
         hudMode = .off
         activePatient = nil
         sessionCount = 0
@@ -169,11 +181,19 @@ final class GlassHUDManager {
     }
 
     private func pushHUD() async {
+        if isSimulated {
+            demoHUDSummary = buildDemoSummary()
+            return
+        }
         guard let display, isDisplayConnected else { return }
         try? await display.send(buildView())
     }
 
     private func clearHUD() async {
+        if isSimulated {
+            demoHUDSummary = nil
+            return
+        }
         guard let display else { return }
         try? await display.send(FlexBox(direction: .column) {})
     }
@@ -257,6 +277,23 @@ final class GlassHUDManager {
                 Text(body, style: .meta, color: .secondary)
             }
             .padding(16)
+        }
+    }
+
+    private func buildDemoSummary() -> String {
+        switch hudMode {
+        case .off:
+            return "HUD: 꺼짐"
+        case .context:
+            let patient = activePatient ?? "환자 미선택"
+            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "녹화 대기"
+            return "👤 \(patient)  ·  \(status)  [REC↗]"
+        case .recording:
+            let elapsed = elapsedString()
+            let suffix = activePatient.map { " · \($0)" } ?? ""
+            return "🔴 REC \(elapsed)  세션 \(sessionCount)\(suffix)  [■]"
+        case .insight(let title, let body, _):
+            return "💡 \(title)  ·  \(body)"
         }
     }
 
