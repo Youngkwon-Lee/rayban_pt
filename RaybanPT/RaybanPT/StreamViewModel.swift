@@ -40,7 +40,7 @@ final class StreamViewModel {
 
         guard stream == nil else { return }
 
-        let selector = AutoDeviceSelector(wearables: wearables)
+        let selector = AutoDeviceSelector(wearables: wearables, filter: { $0.supportsDisplay() })
         deviceSelector = selector
 
         deviceTask = Task { [weak self] in
