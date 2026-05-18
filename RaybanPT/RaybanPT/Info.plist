@@ -32,8 +32,14 @@
 	<string>스마트 글라스 통신에 로컬 네트워크 접근이 필요합니다.</string>
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>processing</string>
+		<string>bluetooth-central</string>
 		<string>bluetooth-peripheral</string>
 		<string>external-accessory</string>
+	</array>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_bonjour._tcp</string>
 	</array>
 	<key>UISupportedExternalAccessoryProtocols</key>
 	<array>
@@ -77,7 +83,7 @@
 		<key>TeamID</key>
 		<string>$(DEVELOPMENT_TEAM)</string>
 		<key>DAMEnabled</key>
-		<false/>
+		<true/>
 	</dict>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>

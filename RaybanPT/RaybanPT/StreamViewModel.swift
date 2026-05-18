@@ -73,6 +73,10 @@ final class StreamViewModel {
         guard stream == nil, let selector = deviceSelector else { return }
         errorMessage = nil
 
+        // BLE 상태 스냅샷 로그
+        let mgr = DeviceSessionManager.shared
+        print("[BLE] linkState=\(mgr.linkState) registrationState=\(mgr.registrationState) activeDeviceId=\(mgr.activeDeviceId ?? "nil") hasActiveDevice=\(hasActiveDevice)")
+
         do {
             let status = try await wearables.checkPermissionStatus(.camera)
             print("[MWDAT] camera permission status: \(status)")
@@ -126,6 +130,7 @@ final class StreamViewModel {
                 print("[MWDAT] session stateStream: \(state)")
                 if state == .started { break }
                 if state == .stopped {
+                    print("[BLE] session stopped — linkState=\(DeviceSessionManager.shared.linkState)")
                     // Allow 200 ms for error monitor to flush its first event
                     try? await Task.sleep(nanoseconds: 200_000_000)
                     if statusMessage.hasPrefix("기기 연결") {
@@ -333,15 +338,19 @@ final class StreamViewModel {
     }
 
     private func handleSessionError(_ error: DeviceSessionError) async {
+        let mgr = DeviceSessionManager.shared
+        print("[BLE] handleSessionError — linkState=\(mgr.linkState) registrationState=\(mgr.registrationState)")
         print("[MWDAT] DeviceSessionError: \(error) / \(error.localizedDescription)")
         errorMessage = error.localizedDescription
         switch error {
-        case .datAppOnTheGlassesUpdateRequired:
-            statusMessage = "글라스 앱 업데이트 필요 — Meta AI 앱 열기"
-            try? await wearables.openDATGlassesAppUpdate()
-        case .dwaUnavailable:
-            statusMessage = "글라스에 앱이 미설치됨 — Meta AI에서 업데이트 필요"
-            try? await wearables.openDATGlassesAppUpdate()
+        case .datAppOnTheGlassesUpdateRequired, .dwaUnavailable:
+            statusMessage = "Meta AI 열림 → 'Update app on glasses' 버튼을 탭하세요"
+            do {
+                try await wearables.openDATGlassesAppUpdate()
+            } catch {
+                print("[MWDAT] openDATGlassesAppUpdate 실패: \(error)")
+                statusMessage = "Meta AI 수동으로 열기 → App Connections → RaybanPT → Update app on glasses"
+            }
         case .noEligibleDevice:
             statusMessage = "연결된 글라스 없음"
         default:
