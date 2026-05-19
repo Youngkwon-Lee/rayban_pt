@@ -158,6 +158,9 @@ struct M2_TestView: View {
             let providerPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id") ?? ""
             vm.client.updateOwnerScope(orgId: orgId, providerPersonId: providerPersonId)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .glassExperienceLaunchRequested)) { _ in
+            selectedTab = .camera
+        }
         .task { await refreshBadge() }
         .onAppear {
             if needsServerSetup { showServerSetup = true }

@@ -291,6 +291,12 @@ struct StreamView: View {
         .onReceive(NotificationCenter.default.publisher(for: .glassCaptouchRecordToggle)) { _ in
             Task { await toggleRecording() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .glassExperienceLaunchRequested)) { _ in
+            Task {
+                guard !vm.isStreaming else { return }
+                await vm.startStreaming()
+            }
+        }
         .sheet(isPresented: $showCaptureHistory) {
             NavigationStack {
                 CaptureHistoryView()

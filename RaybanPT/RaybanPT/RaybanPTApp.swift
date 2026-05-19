@@ -1,6 +1,10 @@
 import SwiftUI
 import MWDATCore
 
+extension Notification.Name {
+    static let glassExperienceLaunchRequested = Notification.Name("glassExperienceLaunchRequested")
+}
+
 private enum GlassPTPairingLink {
     static func handle(_ url: URL) -> Bool {
         guard url.scheme?.lowercased() == "raybanpt" else { return false }
@@ -87,8 +91,15 @@ struct RaybanPTApp: App {
                     }
                     #endif
                     Task {
+                        print("[MWDAT] onOpenURL 수신: \(url.absoluteString)")
                         do {
                             _ = try await Wearables.shared.handleUrl(url)
+                            print("[MWDAT] handleUrl 성공 → glassExperienceLaunchRequested 발송")
+                            NotificationCenter.default.post(
+                                name: .glassExperienceLaunchRequested,
+                                object: nil,
+                                userInfo: ["url": url.absoluteString]
+                            )
                         } catch {
                             print("[MWDAT] handleUrl 실패: \(error)")
                         }
