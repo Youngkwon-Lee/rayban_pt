@@ -876,6 +876,69 @@ final class BridgeClient {
         }
     }
 
+    // MARK: - Glass Relay (phone-free PT HUD)
+
+    struct GlassInsight: Codable {
+        let id: String
+        let title: String
+        let body: String
+    }
+
+    struct GlassStatePayload: Codable {
+        let patient: String?
+        let is_recording: Bool?
+        let recording_start: String?
+        let session_count: Int?
+        let last_insight: GlassInsight?
+    }
+
+    struct GlassCommandResponse: Codable {
+        let command: String?
+        let id: String?
+        let created_at: String?
+    }
+
+    func pushGlassState(
+        patient: String?,
+        isRecording: Bool,
+        recordingStart: Date?,
+        sessionCount: Int,
+        lastInsight: GlassInsight?
+    ) async {
+        guard let url = URL(string: "/glass/state", relativeTo: baseURL) else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        addAuth(&req)
+
+        var isoStart: String? = nil
+        if let d = recordingStart {
+            let fmt = ISO8601DateFormatter()
+            fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            isoStart = fmt.string(from: d)
+        }
+
+        let payload = GlassStatePayload(
+            patient: patient,
+            is_recording: isRecording,
+            recording_start: isoStart,
+            session_count: sessionCount,
+            last_insight: lastInsight
+        )
+        req.httpBody = try? JSONEncoder().encode(payload)
+
+        _ = try? await session.data(for: req)
+    }
+
+    func pollGlassCommand() async -> String? {
+        guard let url = URL(string: "/glass/command", relativeTo: baseURL) else { return nil }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+        guard let (data, _) = try? await session.data(for: req) else { return nil }
+        return (try? JSONDecoder().decode(GlassCommandResponse.self, from: data))?.command
+    }
+
     func health() async throws -> BridgeHealthResponse {
         guard let url = URL(string: "/health", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)

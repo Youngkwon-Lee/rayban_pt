@@ -340,6 +340,45 @@ PTx.>
 
     print("OK: bridge safety smoke test passed")
 
+    # ── Glass relay ───────────────────────────────────────────────────────────
+    initial = client.get("/glass/state", headers=auth_headers())
+    require(initial.status_code == 200, "glass state should return 200")
+    require(initial.json()["is_recording"] is False, "initial state should not be recording")
+
+    pushed = client.post(
+        "/glass/state",
+        headers=auth_headers(),
+        json={"patient": "TestPT", "is_recording": True, "session_count": 1},
+    )
+    require(pushed.status_code == 200, "glass state push should succeed")
+
+    state = client.get("/glass/state", headers=auth_headers()).json()
+    require(state["patient"] == "TestPT", "patient should be stored")
+    require(state["is_recording"] is True, "recording flag should be stored")
+    require(state["session_count"] == 1, "session count should be stored")
+
+    cmd_post = client.post(
+        "/glass/command",
+        headers=auth_headers(),
+        json={"command": "toggle_recording"},
+    )
+    require(cmd_post.status_code == 200, "glass command post should succeed")
+
+    cmd_poll = client.get("/glass/command", headers=auth_headers()).json()
+    require(cmd_poll["command"] == "toggle_recording", "command should be returned once")
+
+    cmd_empty = client.get("/glass/command", headers=auth_headers()).json()
+    require(cmd_empty["command"] is None, "command queue should be empty after poll")
+
+    bad_cmd = client.post(
+        "/glass/command",
+        headers=auth_headers(),
+        json={"command": "bad_command"},
+    )
+    require(bad_cmd.status_code == 400, "invalid command should return 400")
+
+    print("OK: glass relay smoke test passed")
+
 
 if __name__ == "__main__":
     main()

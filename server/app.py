@@ -14,6 +14,7 @@ import json
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 load_dotenv()
@@ -31,6 +32,12 @@ MASKED_DIR = ROOT / "storage" / "masked"
 MASKED_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="rayban-local-bridge", version="0.4.0")
+
+app.mount(
+    "/glass-app",
+    StaticFiles(directory=str(ROOT / "static" / "glass-webapp"), html=True),
+    name="glass-webapp",
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -2585,6 +2592,81 @@ def recent_failures(limit: int = 20):
             for r in rows
         ]
     }
+
+
+# ── Glass Relay (phone-free PT HUD) ─────────────────────────────────────────
+import threading as _threading
+
+_glass_lock = _threading.Lock()
+_glass_state: dict = {
+    "patient": None,
+    "is_recording": False,
+    "recording_start": None,
+    "session_count": 0,
+    "last_insight": None,
+    "updated_at": None,
+}
+_glass_pending_command: Optional[dict] = None
+
+
+class GlassStateUpdate(BaseModel):
+    patient: Optional[str] = None
+    is_recording: Optional[bool] = None
+    recording_start: Optional[str] = None
+    session_count: Optional[int] = None
+    last_insight: Optional[dict] = None
+
+
+class GlassCommandRequest(BaseModel):
+    command: str
+
+
+@app.get("/glass/state")
+def glass_state_get():
+    with _glass_lock:
+        return dict(_glass_state)
+
+
+@app.post("/glass/state")
+def glass_state_post(update: GlassStateUpdate):
+    with _glass_lock:
+        if update.patient is not None:
+            _glass_state["patient"] = update.patient
+        if update.is_recording is not None:
+            _glass_state["is_recording"] = update.is_recording
+        if update.recording_start is not None:
+            _glass_state["recording_start"] = update.recording_start
+        if update.session_count is not None:
+            _glass_state["session_count"] = update.session_count
+        if update.last_insight is not None:
+            _glass_state["last_insight"] = update.last_insight
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    return {"ok": True}
+
+
+@app.post("/glass/command")
+def glass_command_post(cmd: GlassCommandRequest):
+    global _glass_pending_command
+    if cmd.command not in {"toggle_recording"}:
+        _error(400, "INVALID_COMMAND", "command must be 'toggle_recording'")
+    with _glass_lock:
+        _glass_pending_command = {
+            "command": cmd.command,
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        }
+    return {"ok": True, "command": cmd.command}
+
+
+@app.get("/glass/command")
+def glass_command_get():
+    global _glass_pending_command
+    with _glass_lock:
+        cmd = _glass_pending_command
+        _glass_pending_command = None
+    if cmd is None:
+        return {"command": None}
+    return cmd
 
 
 @app.get("/audit-logs")

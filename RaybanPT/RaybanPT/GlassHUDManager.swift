@@ -26,6 +26,13 @@ final class GlassHUDManager {
     private var displayStateTask: Task<Void, Never>?
     private var elapsedTask: Task<Void, Never>?
     private var insightTask: Task<Void, Never>?
+    private var commandPollTask: Task<Void, Never>?
+
+    private var bridgeClient: BridgeClient? {
+        let stored = UserDefaults.standard.string(forKey: "bridge_base_url")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !stored.isEmpty, let url = URL(string: stored) else { return nil }
+        return BridgeClient(baseURL: url)
+    }
 
     private enum HUDMode {
         case off
@@ -58,6 +65,7 @@ final class GlassHUDManager {
                     switch state {
                     case .started:
                         self.isDisplayConnected = true
+                        self.startCommandPolling()
                         await self.pushHUD()
                     case .stopping, .stopped:
                         self.isDisplayConnected = false
@@ -81,6 +89,7 @@ final class GlassHUDManager {
     func attachSimulatedDisplay() async {
         isSimulated = true
         isDisplayConnected = true
+        startCommandPolling()
         await pushHUD()
     }
 
@@ -89,6 +98,8 @@ final class GlassHUDManager {
         elapsedTask = nil
         insightTask?.cancel()
         insightTask = nil
+        commandPollTask?.cancel()
+        commandPollTask = nil
         stateListenerToken = nil
         displayStateContinuation?.finish()
         displayStateContinuation = nil
@@ -125,7 +136,7 @@ final class GlassHUDManager {
         hudMode = .off
         activePatient = nil
         sessionCount = 0
-        await clearHUD()
+        await pushHUD()
     }
 
     // MARK: - Recording HUD
@@ -183,10 +194,10 @@ final class GlassHUDManager {
     private func pushHUD() async {
         if isSimulated {
             demoHUDSummary = buildDemoSummary()
-            return
+        } else if let display, isDisplayConnected {
+            try? await display.send(buildView())
         }
-        guard let display, isDisplayConnected else { return }
-        try? await display.send(buildView())
+        await bridgePushState()
     }
 
     private func clearHUD() async {
@@ -198,16 +209,66 @@ final class GlassHUDManager {
         try? await display.send(FlexBox(direction: .column) {})
     }
 
+    private func bridgePushState() async {
+        guard let client = bridgeClient else { return }
+        var isRec = false
+        if case .recording = hudMode { isRec = true }
+        var insight: BridgeClient.GlassInsight? = nil
+        if case .insight(let t, let b, _) = hudMode {
+            insight = BridgeClient.GlassInsight(id: t + b, title: t, body: b)
+        }
+        await client.pushGlassState(
+            patient: activePatient,
+            isRecording: isRec,
+            recordingStart: recordingStart,
+            sessionCount: sessionCount,
+            lastInsight: insight
+        )
+    }
+
+    private func startCommandPolling() {
+        commandPollTask?.cancel()
+        commandPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self, !Task.isCancelled else { break }
+                guard let client = self.bridgeClient else { continue }
+                if let cmd = await client.pollGlassCommand(), cmd == "toggle_recording" {
+                    NotificationCenter.default.post(
+                        name: .glassCaptouchRecordToggle,
+                        object: nil
+                    )
+                }
+            }
+        }
+    }
+
     private func buildView() -> FlexBox {
         switch hudMode {
         case .off:
-            return FlexBox(direction: .column) {}
+            return buildStandbyView()
         case .context:
             return buildContextView()
         case .recording:
             return buildRecordingView()
         case .insight(let title, let body, _):
             return buildInsightView(title: title, body: body)
+        }
+    }
+
+    private func buildStandbyView() -> FlexBox {
+        FlexBox(direction: .column, spacing: 8) {
+            FlexBox(direction: .column, spacing: 4) {
+                Text("GlassPT Ready", style: .body)
+                Text("iPhone에서 스트리밍을 시작하세요", style: .meta, color: .secondary)
+            }
+            .padding(16)
+            .background(.card)
+
+            FlexBox(direction: .column) {
+                Text("표시 연결됨 · 캡처 대기", style: .meta, color: .secondary)
+            }
+            .padding(16)
         }
     }
 

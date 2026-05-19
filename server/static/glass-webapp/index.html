@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
+  <title>PT HUD</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <div id="home" class="screen">
+
+      <header class="header">
+        <div class="header-title">PT HUD</div>
+        <div class="header-conn" id="conn-status">
+          <span class="conn-dot" id="conn-dot"></span>
+          <span id="conn-label">연결 중…</span>
+        </div>
+      </header>
+
+      <div class="content">
+
+        <!-- Patient card -->
+        <div class="card patient-card" id="patient-card">
+          <div class="card-row">
+            <span class="card-icon">👤</span>
+            <div class="card-body">
+              <div class="card-title" id="patient-name">환자 미선택</div>
+              <div class="card-meta" id="session-label">녹화 대기</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Recording status card -->
+        <div class="card status-card" id="status-card">
+          <div class="card-row">
+            <span class="rec-dot hidden" id="rec-dot">●</span>
+            <div class="card-body">
+              <div class="card-title status-title" id="status-title">대기 중</div>
+              <div class="card-meta" id="status-meta"></div>
+            </div>
+            <div class="rec-timer" id="rec-timer"></div>
+          </div>
+        </div>
+
+        <!-- AI Insight card (hidden until insight arrives) -->
+        <div class="card insight-card hidden" id="insight-card">
+          <div class="card-row">
+            <span class="card-icon">💡</span>
+            <div class="card-body">
+              <div class="card-title insight-title" id="insight-title">AI 분석</div>
+              <div class="card-meta" id="insight-body"></div>
+            </div>
+            <div class="insight-dismiss" id="insight-timer-bar">
+              <div class="insight-progress" id="insight-progress"></div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <nav class="nav-bar">
+        <button class="nav-item focusable primary" id="toggle-btn" data-action="toggle-recording">
+          ● 녹화 시작
+        </button>
+      </nav>
+
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
