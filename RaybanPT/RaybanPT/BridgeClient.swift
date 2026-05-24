@@ -18,6 +18,8 @@ struct IngestRequest: Codable {
     let patient_name: String?
     let owner_org_id: String?
     let owner_provider_person_id: String?
+    let physio_client_id: String?
+    let physio_session_id: String?
 }
 
 struct IngestResponse: Codable {
@@ -49,6 +51,8 @@ struct EventDetail: Codable {
     let intent: String?
     let status: String?
     let created_at: String?
+    let physio_client_id: String?
+    let physio_session_id: String?
 }
 
 
@@ -217,6 +221,8 @@ final class BridgeClient {
     private(set) var apiKey: String
     private(set) var ownerOrgId: String
     private(set) var ownerProviderPersonId: String
+    private(set) var physioClientId: String
+    private(set) var physioSessionId: String
     private let session: URLSession
 
     init(baseURL: URL, apiKey: String = "", session: URLSession = .shared) {
@@ -226,6 +232,8 @@ final class BridgeClient {
         self.apiKey = !apiKey.isEmpty ? apiKey : (stored ?? "")
         self.ownerOrgId = UserDefaults.standard.string(forKey: "glasspt_owner_org_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.ownerProviderPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.physioClientId = UserDefaults.standard.string(forKey: "glasspt_physio_client_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.physioSessionId = UserDefaults.standard.string(forKey: "glasspt_physio_session_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     /// 런타임에 서버 URL 변경 (UserDefaults 설정 후 적용)
@@ -240,6 +248,13 @@ final class BridgeClient {
     func updateOwnerScope(orgId: String, providerPersonId: String) {
         self.ownerOrgId = orgId.trimmingCharacters(in: .whitespacesAndNewlines)
         self.ownerProviderPersonId = providerPersonId.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func updatePhysioContext(clientId: String, sessionId: String) {
+        self.physioClientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.physioSessionId = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        UserDefaults.standard.set(self.physioClientId, forKey: "glasspt_physio_client_id")
+        UserDefaults.standard.set(self.physioSessionId, forKey: "glasspt_physio_session_id")
     }
 
     /// API 키 헤더를 URLRequest에 추가
@@ -341,7 +356,9 @@ final class BridgeClient {
             image_base64: nil,
             patient_name: patientName,
             owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
-            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            physio_client_id: physioClientId.isEmpty ? nil : physioClientId,
+            physio_session_id: physioSessionId.isEmpty ? nil : physioSessionId
         )
         req.httpBody = try JSONEncoder().encode(body)
         addAuth(&req)
@@ -405,6 +422,18 @@ final class BridgeClient {
             body.appendString("\(ownerProviderPersonId)\r\n")
         }
 
+        if !physioClientId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"physio_client_id\"\r\n\r\n")
+            body.appendString("\(physioClientId)\r\n")
+        }
+
+        if !physioSessionId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"physio_session_id\"\r\n\r\n")
+            body.appendString("\(physioSessionId)\r\n")
+        }
+
         // audio file
         body.appendString("--\(boundary)\r\n")
         body.appendString("Content-Disposition: form-data; name=\"audio\"; filename=\"\(filename)\"\r\n")
@@ -448,7 +477,9 @@ final class BridgeClient {
             image_base64: base64Str,
             patient_name: patientName,
             owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
-            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            physio_client_id: physioClientId.isEmpty ? nil : physioClientId,
+            physio_session_id: physioSessionId.isEmpty ? nil : physioSessionId
         )
         req.httpBody = try JSONEncoder().encode(body)
         addAuth(&req)
@@ -502,6 +533,18 @@ final class BridgeClient {
             body.appendString("--\(boundary)\r\n")
             body.appendString("Content-Disposition: form-data; name=\"owner_provider_person_id\"\r\n\r\n")
             body.appendString("\(ownerProviderPersonId)\r\n")
+        }
+
+        if !physioClientId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"physio_client_id\"\r\n\r\n")
+            body.appendString("\(physioClientId)\r\n")
+        }
+
+        if !physioSessionId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"physio_session_id\"\r\n\r\n")
+            body.appendString("\(physioSessionId)\r\n")
         }
 
         body.appendString("--\(boundary)\r\n")

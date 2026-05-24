@@ -5,9 +5,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
-	<string>글라스PT</string>
+	<string>Care Live</string>
 	<key>CFBundleDisplayName</key>
-	<string>$(PRODUCT_NAME)</string>
+	<string>Care Live</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CFBundleShortVersionString</key>
@@ -99,6 +99,7 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>raybanpt</string>
+				<string>carelive</string>
 			</array>
 		</dict>
 	</array>

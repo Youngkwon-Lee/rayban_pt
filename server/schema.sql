@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS events (
     patient_name TEXT,
     owner_org_id TEXT,
     owner_provider_person_id TEXT,
+    physio_client_id TEXT,
+    physio_session_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -68,6 +70,8 @@ CREATE TABLE IF NOT EXISTS chart_reviews (
 CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_owner_org_created_at ON events(owner_org_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_owner_provider_created_at ON events(owner_provider_person_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_physio_client_created_at ON events(physio_client_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_physio_session_created_at ON events(physio_session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_soap_notes_event_id ON soap_notes(event_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_event_id ON audit_logs(event_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_level_created_at ON audit_logs(level, created_at);

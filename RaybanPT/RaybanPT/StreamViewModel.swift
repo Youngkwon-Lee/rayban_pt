@@ -56,6 +56,7 @@ final class StreamViewModel {
                         try? await self.wearables.openFirmwareUpdate()
                     } else {
                         self.statusMessage = "기기 준비됨"
+                        await self.prepareStandbyDisplay()
                     }
                 } else {
                     self.statusMessage = "대기 중"
@@ -80,12 +81,13 @@ final class StreamViewModel {
         do {
             let status = try await wearables.checkPermissionStatus(.camera)
             print("[MWDAT] camera permission status: \(status)")
-            // 항상 requestPermission 호출 — 글라스 측 승인 플로우 트리거
-            let requested = try await wearables.requestPermission(.camera)
-            print("[MWDAT] camera permission after request: \(requested)")
-            guard requested == .granted else {
-                statusMessage = "카메라 권한 거부됨"
-                return
+            if status != .granted {
+                let requested = try await wearables.requestPermission(.camera)
+                print("[MWDAT] camera permission after request: \(requested)")
+                guard requested == .granted else {
+                    statusMessage = "카메라 권한 거부됨"
+                    return
+                }
             }
         } catch {
             print("[MWDAT] permission check error: \(error)")
@@ -95,51 +97,11 @@ final class StreamViewModel {
 
         let session: DeviceSession
         do {
-            session = try wearables.createSession(deviceSelector: selector)
-            deviceSession = session
-            print("[MWDAT] session created")
+            session = try await ensureStartedSession(selector: selector)
         } catch {
-            print("[MWDAT] createSession error: \(error)")
-            statusMessage = "세션 생성 실패: \(error.localizedDescription)"
-            return
-        }
-
-        do {
-            try session.start()
-            print("[MWDAT] session.start() called")
-        } catch {
-            print("[MWDAT] session.start() threw: \(error)")
+            print("[MWDAT] ensureStartedSession error: \(error)")
             statusMessage = "세션 시작 실패: \(error.localizedDescription)"
-            deviceSession = nil
             return
-        }
-
-        print("[MWDAT] session.state after start(): \(session.state)")
-        if session.state != .started {
-            statusMessage = "기기 연결 중..."
-
-            let errorMonitor = Task { [weak self] in
-                for await error in session.errorStream() {
-                    print("[MWDAT] session errorStream: \(error) / \(error.localizedDescription)")
-                    await self?.handleSessionError(error)
-                }
-            }
-            defer { errorMonitor.cancel() }
-
-            for await state in session.stateStream() {
-                print("[MWDAT] session stateStream: \(state)")
-                if state == .started { break }
-                if state == .stopped {
-                    print("[BLE] session stopped — linkState=\(DeviceSessionManager.shared.linkState)")
-                    // Allow 200 ms for error monitor to flush its first event
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                    if statusMessage.hasPrefix("기기 연결") {
-                        statusMessage = "글라스 준비 중 — 잠시 후 다시 시도하세요"
-                    }
-                    deviceSession = nil
-                    return
-                }
-            }
         }
 
         let config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: 24)
@@ -179,6 +141,24 @@ final class StreamViewModel {
         await GlassHUDManager.shared.attachDisplay(to: session)
         await newStream.start()
         print("[MWDAT] newStream.start() called")
+    }
+
+    func prepareStandbyDisplay(patientName: String? = nil) async {
+        if DemoConfig.isGlassDemoEnabled {
+            await GlassHUDManager.shared.attachSimulatedDisplay()
+            await GlassHUDManager.shared.showStandby(patient: patientName)
+            return
+        }
+
+        guard stream == nil, let selector = deviceSelector else { return }
+
+        do {
+            let session = try await ensureStartedSession(selector: selector)
+            await GlassHUDManager.shared.attachDisplay(to: session)
+            await GlassHUDManager.shared.showStandby(patient: patientName)
+        } catch {
+            print("[MWDAT] prepareStandbyDisplay failed: \(error)")
+        }
     }
 
     func stopStreaming() async {
@@ -349,7 +329,7 @@ final class StreamViewModel {
                 try await wearables.openDATGlassesAppUpdate()
             } catch {
                 print("[MWDAT] openDATGlassesAppUpdate 실패: \(error)")
-                statusMessage = "Meta AI 수동으로 열기 → App Connections → RaybanPT → Update app on glasses"
+                statusMessage = "Meta AI 수동으로 열기 → App Connections → Care Live → Update app on glasses"
             }
         case .noEligibleDevice:
             statusMessage = "연결된 글라스 없음"
@@ -378,13 +358,69 @@ final class StreamViewModel {
         Task { await token.cancel() }
     }
 
+    private func ensureStartedSession(selector: AutoDeviceSelector) async throws -> DeviceSession {
+        if let session = deviceSession, session.state == .started {
+            return session
+        }
+
+        let session: DeviceSession
+        if let existingSession = deviceSession {
+            session = existingSession
+        } else {
+            session = try wearables.createSession(deviceSelector: selector)
+            deviceSession = session
+            print("[MWDAT] session created")
+        }
+
+        if session.state == .started {
+            return session
+        }
+
+        do {
+            try session.start()
+            print("[MWDAT] session.start() called")
+        } catch {
+            deviceSession = nil
+            throw error
+        }
+
+        print("[MWDAT] session.state after start(): \(session.state)")
+        if session.state != .started {
+            statusMessage = "기기 연결 중..."
+
+            let errorMonitor = Task { [weak self] in
+                for await error in session.errorStream() {
+                    print("[MWDAT] session errorStream: \(error) / \(error.localizedDescription)")
+                    await self?.handleSessionError(error)
+                }
+            }
+            defer { errorMonitor.cancel() }
+
+            for await state in session.stateStream() {
+                print("[MWDAT] session stateStream: \(state)")
+                if state == .started { break }
+                if state == .stopped {
+                    print("[BLE] session stopped — linkState=\(DeviceSessionManager.shared.linkState)")
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    if statusMessage.hasPrefix("기기 연결") {
+                        statusMessage = "글라스 준비 중 — 잠시 후 다시 시도하세요"
+                    }
+                    deviceSession = nil
+                    throw DeviceSessionError.noEligibleDevice
+                }
+            }
+        }
+
+        return session
+    }
+
     // MARK: - Demo mode
 
     private func enableGlassDemoMode() {
         hasActiveDevice = true
         isStreaming = true
         errorMessage = nil
-        statusMessage = "스마트 글라스 라이브 수신 중"
+        statusMessage = "Care Live 수신 중"
 
         guard demoFrameTask == nil else { return }
         currentFrame = makeCurrentDemoFrame(index: 0)
@@ -394,7 +430,7 @@ final class StreamViewModel {
                 try? await Task.sleep(nanoseconds: 650_000_000)
                 guard let self else { return }
                 self.currentFrame = self.makeCurrentDemoFrame(index: index)
-                self.statusMessage = "스마트 글라스 라이브 수신 중 · \(index)f"
+                self.statusMessage = "Care Live 수신 중 · \(index)f"
                 index += 1
             }
         }

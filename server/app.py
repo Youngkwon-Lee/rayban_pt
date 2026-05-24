@@ -133,6 +133,11 @@ class IngestPayload(BaseModel):
     owner_provider_person_id: Optional[str] = None
     org_id: Optional[str] = None
     provider_person_id: Optional[str] = None
+    physio_client_id: Optional[str] = None
+    physio_session_id: Optional[str] = None
+    client_id: Optional[str] = None
+    session_id: Optional[str] = None
+    encounter_id: Optional[str] = None
 
 
 class RehabLabelPayload(BaseModel):
@@ -291,10 +296,16 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE events ADD COLUMN owner_org_id TEXT")
     if "owner_provider_person_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN owner_provider_person_id TEXT")
+    if "physio_client_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN physio_client_id TEXT")
+    if "physio_session_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN physio_session_id TEXT")
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_events_owner_org_created_at ON events(owner_org_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_owner_provider_created_at ON events(owner_provider_person_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_physio_client_created_at ON events(physio_client_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_physio_session_created_at ON events(physio_session_id, created_at);
         """
     )
 
@@ -482,6 +493,8 @@ def _build_physio_session_export_item(conn: sqlite3.Connection, event_row):
         "patient_name": event_row[6] or None,
         "owner_org_id": event_row[7] or None,
         "owner_provider_person_id": event_row[8] or None,
+        "physio_client_id": event_row[9] or None,
+        "physio_session_id": event_row[10] or None,
         "title": title,
         "summary": summary,
         "label": label,
@@ -935,6 +948,17 @@ def _resolve_merged_scope(image_event: dict, audio_event: dict) -> tuple[Optiona
     return scopes[0], scopes[1]
 
 
+def _resolve_merged_physio_context(image_event: dict, audio_event: dict) -> tuple[Optional[str], Optional[str]]:
+    values = []
+    for key in ("physio_client_id", "physio_session_id"):
+        image_value = _clean_scope_value(image_event.get(key))
+        audio_value = _clean_scope_value(audio_event.get(key))
+        if image_value and audio_value and image_value != audio_value:
+            _error(400, "PHYSIO_CONTEXT_MISMATCH", "서로 다른 physio client/session 이벤트는 통합할 수 없습니다.")
+        values.append(image_value or audio_value)
+    return values[0], values[1]
+
+
 def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str = "") -> dict:
     if image_event["event_type"] not in {"image", "video"}:
         _error(400, "INVALID_IMAGE_EVENT", "image_event_id는 image 또는 video 이벤트여야 합니다.")
@@ -955,6 +979,7 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
         or None
     )
     owner_org_id, owner_provider_person_id = _resolve_merged_scope(image_event, audio_event)
+    physio_client_id, physio_session_id = _resolve_merged_physio_context(image_event, audio_event)
     consent_id = _require_patient_consent("text", patient or "")
 
     subjective = audio_text.strip() or "환자 주관적 호소 미입력"
@@ -999,9 +1024,21 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (event_id, "merged", "combined", raw_text, "note", "processed", patient, owner_org_id, owner_provider_person_id),
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                event_id,
+                "merged",
+                "combined",
+                raw_text,
+                "note",
+                "processed",
+                patient,
+                owner_org_id,
+                owner_provider_person_id,
+                physio_client_id,
+                physio_session_id,
+            ),
         )
         conn.execute(
             "INSERT INTO soap_notes (id, event_id, s, o, a, p) VALUES (?, ?, ?, ?, ?, ?)",
@@ -1048,6 +1085,8 @@ def _process_event(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    physio_client_id: Optional[str] = None,
+    physio_session_id: Optional[str] = None,
 ):
     audio_store = os.getenv("AUDIO_STORE", "false").lower() == "true"
     image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
@@ -1057,6 +1096,8 @@ def _process_event(
     masking_audit = ""
     owner_org_id = _clean_scope_value(owner_org_id)
     owner_provider_person_id = _clean_scope_value(owner_provider_person_id)
+    physio_client_id = _clean_scope_value(physio_client_id)
+    physio_session_id = _clean_scope_value(physio_session_id)
 
     if event_type not in {"audio", "text", "command", "image", "video"}:
         raise HTTPException(status_code=400, detail="event_type must be audio/text/command/image/video")
@@ -1165,8 +1206,8 @@ def _process_event(
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_id,
                 source,
@@ -1177,6 +1218,8 @@ def _process_event(
                 patient_name or None,
                 owner_org_id,
                 owner_provider_person_id,
+                physio_client_id,
+                physio_session_id,
             ),
         )
         if soap_id and soap:
@@ -1225,6 +1268,8 @@ def _process_event(
         "scope": {
             "owner_org_id": owner_org_id,
             "owner_provider_person_id": owner_provider_person_id,
+            "physio_client_id": physio_client_id,
+            "physio_session_id": physio_session_id,
         },
     }
 
@@ -1236,7 +1281,7 @@ def _event_status_result(processed: dict) -> dict:
     if event_id:
         with _conn() as conn:
             row = conn.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id "
                 "FROM events WHERE id = ?",
                 (event_id,),
             ).fetchone()
@@ -1251,6 +1296,8 @@ def _event_status_result(processed: dict) -> dict:
                 "created_at": row[6],
                 "owner_org_id": row[7],
                 "owner_provider_person_id": row[8],
+                "physio_client_id": row[9],
+                "physio_session_id": row[10],
             }
     result = {"event": event_obj, "soap": processed.get("soap")}
     if processed.get("media"):
@@ -1668,6 +1715,8 @@ def ingest(payload: IngestPayload, request: Request):
         patient_name=payload.patient_name or "",
         owner_org_id=owner_org_id,
         owner_provider_person_id=owner_provider_person_id,
+        physio_client_id=payload.physio_client_id or payload.client_id,
+        physio_session_id=payload.physio_session_id or payload.session_id or payload.encounter_id,
     )
 
 
@@ -1698,6 +1747,8 @@ def _process_upload_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    physio_client_id: Optional[str] = None,
+    physio_session_id: Optional[str] = None,
 ):
     attempts = 2
     last_error = None
@@ -1717,6 +1768,8 @@ def _process_upload_job(
                 patient_name=patient_name,
                 owner_org_id=owner_org_id,
                 owner_provider_person_id=owner_provider_person_id,
+                physio_client_id=physio_client_id,
+                physio_session_id=physio_session_id,
             )
             inner_id = result.get("event_id", "")
             if inner_id and inner_id != event_id:
@@ -1753,6 +1806,8 @@ async def ingest_upload(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    physio_client_id: str = Form(""),
+    physio_session_id: str = Form(""),
     audio: UploadFile = File(...),
 ):
     if event_type != "audio":
@@ -1790,6 +1845,8 @@ async def ingest_upload(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        physio_client_id,
+        physio_session_id,
     )
 
     return {
@@ -1809,7 +1866,7 @@ def get_event(event_id: str):
     # fallback: DB에서 처리 완료 이벤트 조회
     with _conn() as conn:
         ev = conn.execute(
-            "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id FROM events WHERE id = ?",
+            "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id FROM events WHERE id = ?",
             (event_id,),
         ).fetchone()
         if not ev:
@@ -1830,6 +1887,8 @@ def get_event(event_id: str):
         "created_at": ev[6],
         "owner_org_id": ev[7],
         "owner_provider_person_id": ev[8],
+        "physio_client_id": ev[9],
+        "physio_session_id": ev[10],
     }
     soap_obj = None
     if soap:
@@ -1909,6 +1968,8 @@ def _process_image_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    physio_client_id: Optional[str] = None,
+    physio_session_id: Optional[str] = None,
 ):
     image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     try:
@@ -1927,6 +1988,8 @@ def _process_image_job(
             patient_name=patient_name,
             owner_org_id=owner_org_id,
             owner_provider_person_id=owner_provider_person_id,
+            physio_client_id=physio_client_id,
+            physio_session_id=physio_session_id,
         )
         inner_id = result.get("event_id", "")
         if inner_id and inner_id != event_id:
@@ -1965,6 +2028,8 @@ async def ingest_image(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    physio_client_id: str = Form(""),
+    physio_session_id: str = Form(""),
     image: UploadFile = File(...),
 ):
     ext = (Path(image.filename or "").suffix or "").lower()
@@ -2000,6 +2065,8 @@ async def ingest_image(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        physio_client_id,
+        physio_session_id,
     )
 
     return {
@@ -2018,6 +2085,8 @@ def _process_video_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    physio_client_id: Optional[str] = None,
+    physio_session_id: Optional[str] = None,
 ):
     import subprocess
     import tempfile
@@ -2105,6 +2174,8 @@ def _process_video_job(
             patient_name=patient_name,
             owner_org_id=owner_org_id,
             owner_provider_person_id=owner_provider_person_id,
+            physio_client_id=physio_client_id,
+            physio_session_id=physio_session_id,
         )
         inner_id = result.get("event_id", "")
 
@@ -2122,7 +2193,7 @@ def _process_video_job(
         # iOS EventStatusResponse 구조에 맞게 래핑
         with _conn() as _c:
             ev_row = _c.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id "
                 "FROM events WHERE id = ?",
                 (inner_id,),
             ).fetchone()
@@ -2134,6 +2205,8 @@ def _process_video_job(
                 "status": ev_row[5], "created_at": ev_row[6],
                 "owner_org_id": ev_row[7],
                 "owner_provider_person_id": ev_row[8],
+                "physio_client_id": ev_row[9],
+                "physio_session_id": ev_row[10],
             }
 
         _touch_async_result(event_id, {
@@ -2169,6 +2242,8 @@ async def ingest_video(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    physio_client_id: str = Form(""),
+    physio_session_id: str = Form(""),
     video: UploadFile = File(...),
 ):
     ext = (Path(video.filename or "").suffix or "").lower()
@@ -2203,6 +2278,8 @@ async def ingest_video(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        physio_client_id,
+        physio_session_id,
     )
 
     return {
@@ -2471,6 +2548,8 @@ def physio_sessions(
     patient_name: str = "",
     org_id: str = "",
     provider_person_id: str = "",
+    client_id: str = "",
+    session_id: str = "",
     include_unscoped: bool = False,
 ):
     """physio_app에서 바로 읽을 수 있는 현장 세션 피드."""
@@ -2478,6 +2557,8 @@ def physio_sessions(
     clean_patient_name = patient_name.strip()
     clean_org_id = (org_id or "").strip()
     clean_provider_person_id = (provider_person_id or "").strip()
+    clean_client_id = (client_id or "").strip()
+    clean_session_id = (session_id or "").strip()
     clauses: list[str] = []
     params: list[object] = []
 
@@ -2496,13 +2577,19 @@ def physio_sessions(
         else:
             clauses.append("owner_provider_person_id = ?")
         params.append(clean_provider_person_id)
+    if clean_client_id:
+        clauses.append("physio_client_id = ?")
+        params.append(clean_client_id)
+    if clean_session_id:
+        clauses.append("physio_session_id = ?")
+        params.append(clean_session_id)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.append(n)
 
     with _conn() as conn:
         rows = conn.execute(
             f"""
-            SELECT id, source, event_type, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id
+            SELECT id, source, event_type, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id
             FROM events
             {where_sql}
             ORDER BY created_at DESC
@@ -2517,10 +2604,12 @@ def physio_sessions(
         "count": len(items),
         "items": items,
         "storage": "rayban-local-bridge.sqlite",
-        "schema_version": "physio-session-feed/v1",
+        "schema_version": "physio-session-feed/v2",
         "scope": {
             "org_id": clean_org_id or None,
             "provider_person_id": clean_provider_person_id or None,
+            "client_id": clean_client_id or None,
+            "session_id": clean_session_id or None,
             "include_unscoped": include_unscoped,
         },
     }

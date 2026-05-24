@@ -139,6 +139,12 @@ final class GlassHUDManager {
         await pushHUD()
     }
 
+    func showStandby(patient: String?) async {
+        activePatient = patient
+        hudMode = .off
+        await pushHUD()
+    }
+
     // MARK: - Recording HUD
 
     func startRecording(patient: String?) async {
@@ -258,35 +264,40 @@ final class GlassHUDManager {
 
     private func buildStandbyView() -> FlexBox {
         FlexBox(direction: .column, spacing: 8) {
-            FlexBox(direction: .column, spacing: 4) {
-                Text("GlassPT Ready", style: .body)
-                Text("iPhone에서 스트리밍을 시작하세요", style: .meta, color: .secondary)
+            buildHeaderCard(
+                title: "Care Live",
+                subtitle: "세션 준비 완료"
+            )
+            if let activePatient, !activePatient.isEmpty {
+                buildPatientCard(
+                    patient: activePatient,
+                    detail: "선택 환자"
+                )
             }
-            .padding(16)
-            .background(.card)
-
-            FlexBox(direction: .column) {
-                Text("표시 연결됨 · 캡처 대기", style: .meta, color: .secondary)
-            }
-            .padding(16)
+            buildInfoCard(
+                title: "라이브 시작 준비",
+                body: "iPhone에서 라이브를 시작하거나 안경 버튼으로 바로 진행하세요."
+            )
         }
     }
 
     // Patient name + session counter + REC start button
     private func buildContextView() -> FlexBox {
         let patient = activePatient ?? "환자 미선택"
-        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "녹화 대기"
+        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
         return FlexBox(direction: .column, spacing: 8) {
-            FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
-                Icon(name: .person)
-                Text(patient, style: .body)
-            }
-            .padding(16)
-            .background(.card)
-            FlexBox(direction: .column) {
-                Text(sessionLine, style: .meta, color: .secondary)
-            }
-            .padding(16)
+            buildHeaderCard(
+                title: "Care Live Session",
+                subtitle: "라이브 연결됨"
+            )
+            buildPatientCard(
+                patient: patient,
+                detail: sessionLine
+            )
+            buildInfoCard(
+                title: "핸즈프리 기록",
+                body: "관찰이 시작되면 안경에서 바로 녹화를 시작할 수 있습니다."
+            )
             Button(label: "녹화 시작", style: .primary, iconName: .videoCamera, onClick: {
                 Task { @MainActor in
                     NotificationCenter.default.post(
@@ -303,17 +314,20 @@ final class GlassHUDManager {
         let elapsed = elapsedString()
         let patient = activePatient
         return FlexBox(direction: .column, spacing: 8) {
-            FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
-                Text("● REC  \(elapsed)", style: .body)
-            }
-            .padding(16)
-            .background(.card)
+            buildHeaderCard(
+                title: "REC \(elapsed)",
+                subtitle: "실시간 기록 중"
+            )
             if let patient {
-                FlexBox(direction: .column) {
-                    Text("세션 \(sessionCount) · \(patient)", style: .meta, color: .secondary)
-                }
-                .padding(16)
+                buildPatientCard(
+                    patient: patient,
+                    detail: "실시간 기록 수집 중"
+                )
             }
+            buildInfoCard(
+                title: "기록 진행 중",
+                body: "중지하면 저장과 분석으로 바로 이어집니다."
+            )
             Button(label: "녹화 중지", style: .secondary, iconName: .x, onClick: {
                 Task { @MainActor in
                     NotificationCenter.default.post(
@@ -328,31 +342,65 @@ final class GlassHUDManager {
     // AI chart summary — shown for 8 seconds then returns to previous mode
     private func buildInsightView(title: String, body: String) -> FlexBox {
         return FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "Care Live Insight",
+                subtitle: "분석 결과 도착"
+            )
             FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
                 Icon(name: .lightBulb)
                 Text(title, style: .body)
             }
             .padding(16)
             .background(.card)
-            FlexBox(direction: .column) {
-                Text(body, style: .meta, color: .secondary)
-            }
-            .padding(16)
+            buildInfoCard(
+                title: "요약",
+                body: body
+            )
         }
+    }
+
+    private func buildHeaderCard(title: String, subtitle: String) -> FlexBox {
+        FlexBox(direction: .column, spacing: 4) {
+            Text(title, style: .body)
+            Text(subtitle, style: .meta, color: .secondary)
+        }
+        .padding(16)
+        .background(.card)
+    }
+
+    private func buildPatientCard(patient: String, detail: String) -> FlexBox {
+        FlexBox(direction: .column, spacing: 6) {
+            FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
+                Icon(name: .person)
+                Text(patient, style: .body)
+            }
+            Text(detail, style: .meta, color: .secondary)
+        }
+        .padding(16)
+        .background(.card)
+    }
+
+    private func buildInfoCard(title: String, body: String) -> FlexBox {
+        FlexBox(direction: .column, spacing: 4) {
+            Text(title, style: .body)
+            Text(body, style: .meta, color: .secondary)
+        }
+        .padding(16)
     }
 
     private func buildDemoSummary() -> String {
         switch hudMode {
         case .off:
-            return "HUD: 꺼짐"
+            let patient = activePatient.map { " · \($0)" } ?? ""
+            return "🟦 준비 완료\(patient)"
         case .context:
             let patient = activePatient ?? "환자 미선택"
-            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "녹화 대기"
-            return "👤 \(patient)  ·  \(status)  [REC↗]"
+            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
+            return "🟢 라이브  \(patient) · \(status)"
         case .recording:
             let elapsed = elapsedString()
             let suffix = activePatient.map { " · \($0)" } ?? ""
-            return "🔴 REC \(elapsed)  세션 \(sessionCount)\(suffix)  [■]"
+            return "🔴 REC \(elapsed) · 세션 \(max(sessionCount, 1))\(suffix)"
         case .insight(let title, let body, _):
             return "💡 \(title)  ·  \(body)"
         }

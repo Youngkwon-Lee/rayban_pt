@@ -29,6 +29,7 @@ private extension View {
 struct M2_TestView: View {
     @StateObject private var vm: AdapterViewModel
     @Environment(DeviceSessionManager.self) private var deviceManager
+    @State private var glassExperience = GlassExperienceCoordinator.shared
     @State private var selectedTab: Tab = .camera
     @State private var showServerSetup = false
 
@@ -61,6 +62,10 @@ struct M2_TestView: View {
         return stored.isEmpty
     }
 
+    private var isGuidedModeActive: Bool {
+        glassExperience.isGuidedModeActive && selectedTab == .camera
+    }
+
     var body: some View {
         TabView(selection: $selectedTab) {
             // 카메라 탭
@@ -91,22 +96,32 @@ struct M2_TestView: View {
             .badge(unlabeledBadge > 0 ? unlabeledBadge : 0)
         }
         .tint(DS.ColorToken.primary)
+        .toolbar(isGuidedModeActive ? .hidden : .visible, for: .tabBar)
         .overlay(alignment: .top) {
             if selectedTab == .camera {
                 DeviceStatusBanner(deviceManager: deviceManager)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
-        .overlay(alignment: .bottomTrailing) {
-            // 서버 설정 버튼 (항상 접근 가능)
-            Button {
-                showServerSetup = true
-            } label: {
-                ServerSettingsButton(needsSetup: needsServerSetup)
+        .overlay(alignment: .topTrailing) {
+            if isGuidedModeActive {
+                guidedModeExitButton
+                    .padding(.top, 56)
+                    .padding(.trailing, 16)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
-            .accessibilityIdentifier("serverSettingsButton")
-            .padding(.bottom, 68)
-            .padding(.trailing, 16)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if !isGuidedModeActive {
+                Button {
+                    showServerSetup = true
+                } label: {
+                    ServerSettingsButton(needsSetup: needsServerSetup)
+                }
+                .accessibilityIdentifier("serverSettingsButton")
+                .padding(.bottom, 68)
+                .padding(.trailing, 16)
+            }
         }
         // MARK: 업로드 완료 다이얼로그
         .confirmationDialog("차트가 생성됐어요", isPresented: $showPostUploadDialog, titleVisibility: .visible) {
@@ -165,6 +180,30 @@ struct M2_TestView: View {
         .onAppear {
             if needsServerSetup { showServerSetup = true }
         }
+    }
+
+    private var guidedModeExitButton: some View {
+        Button {
+            glassExperience.endGuidedMode()
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "rectangle.portrait.and.arrow.right")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("일반 화면")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(DS.ColorToken.surface, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("일반 화면으로 전환")
     }
 
     // MARK: - 미라벨 뱃지 갱신
@@ -736,7 +775,7 @@ private struct ServerSetupSheet: View {
                 } header: {
                     Text("Physio App 연동")
                 } footer: {
-                    Text("physio_app의 GlassPT 화면에 표시되는 조직 ID와 전문가 ID를 입력하면, 새 촬영/음성/텍스트 기록이 해당 로그인 전문가의 수신함에만 표시됩니다.")
+                    Text("physio_app의 Care Live 기록함 화면에 표시되는 조직 ID와 전문가 ID를 입력하면, 새 촬영/음성/텍스트 기록이 해당 로그인 전문가의 기록만 보이도록 정렬됩니다.")
                         .font(.caption)
                 }
 
