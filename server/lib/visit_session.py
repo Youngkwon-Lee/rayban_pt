@@ -1,0 +1,262 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+
+VISIT_PHASES = {"pre_review", "assessment", "intervention", "home_program", "summary"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS visit_sessions (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            provider_person_id TEXT NOT NULL,
+            subject_person_id TEXT NOT NULL,
+            encounter_id TEXT NOT NULL,
+            patient_alias TEXT NOT NULL DEFAULT '',
+            phase TEXT NOT NULL DEFAULT 'pre_review',
+            status TEXT NOT NULL DEFAULT 'active',
+            recording_status TEXT NOT NULL DEFAULT 'idle',
+            selected_at TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            session_timer_started_at TEXT,
+            history_summary TEXT NOT NULL DEFAULT '',
+            readiness TEXT NOT NULL DEFAULT 'ready',
+            error_state TEXT,
+            cue TEXT NOT NULL DEFAULT '',
+            event_ids TEXT NOT NULL DEFAULT '[]',
+            draft_progress_note TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_visit_sessions_org_updated_at
+            ON visit_sessions(organization_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_visit_sessions_subject_updated_at
+            ON visit_sessions(subject_person_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_visit_sessions_encounter_id
+            ON visit_sessions(encounter_id);
+        """
+    )
+
+
+def _as_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _from_json_list(value: str | None) -> list[str]:
+    try:
+        parsed = json.loads(value or "[]")
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item).strip()]
+    except Exception:
+        pass
+    return []
+
+
+def _from_json_dict(value: str | None) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def normalize_phase(phase: str) -> str:
+    clean = (phase or "").strip()
+    if clean not in VISIT_PHASES:
+        raise ValueError(f"phase must be one of: {', '.join(sorted(VISIT_PHASES))}")
+    return clean
+
+
+def row_to_visit_session(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": row[0],
+        "organization_id": row[1],
+        "provider_person_id": row[2],
+        "subject_person_id": row[3],
+        "encounter_id": row[4],
+        "patient_alias": row[5],
+        "phase": row[6],
+        "status": row[7],
+        "recording_status": row[8],
+        "selected_at": row[9],
+        "started_at": row[10],
+        "ended_at": row[11],
+        "session_timer_started_at": row[12],
+        "history_summary": row[13],
+        "readiness": row[14],
+        "error_state": row[15],
+        "cue": row[16],
+        "event_ids": _from_json_list(row[17]),
+        "draft_progress_note": _from_json_dict(row[18]),
+        "created_at": row[19],
+        "updated_at": row[20],
+    }
+
+
+def get_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, organization_id, provider_person_id, subject_person_id, encounter_id,
+               patient_alias, phase, status, recording_status, selected_at, started_at, ended_at,
+               session_timer_started_at, history_summary, readiness, error_state, cue, event_ids,
+               draft_progress_note, created_at, updated_at
+        FROM visit_sessions
+        WHERE id = ?
+        """,
+        (session_id,),
+    ).fetchone()
+    return row_to_visit_session(row) if row else None
+
+
+def create_visit_session(
+    conn: sqlite3.Connection,
+    *,
+    organization_id: str,
+    provider_person_id: str,
+    subject_person_id: str,
+    encounter_id: str | None = None,
+    patient_alias: str = "",
+    history_summary: str = "",
+) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    canonical_encounter_id = (encounter_id or "").strip() or str(uuid.uuid4())
+    now = utc_now()
+    conn.execute(
+        """
+        INSERT INTO visit_sessions (
+            id, organization_id, provider_person_id, subject_person_id, encounter_id,
+            patient_alias, phase, status, recording_status, selected_at, started_at,
+            session_timer_started_at, history_summary, readiness, cue, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, 'pre_review', 'active', 'idle', ?, ?, ?, ?, 'ready',
+                '기록 확인 후 평가로 진행', ?)
+        """,
+        (
+            session_id,
+            organization_id,
+            provider_person_id,
+            subject_person_id,
+            canonical_encounter_id,
+            patient_alias.strip() or "Patient",
+            now,
+            now,
+            now,
+            history_summary.strip(),
+            now,
+        ),
+    )
+    return get_visit_session(conn, session_id) or {}
+
+
+def update_visit_phase(conn: sqlite3.Connection, session_id: str, phase: str, cue: str | None = None) -> dict[str, Any]:
+    normalized = normalize_phase(phase)
+    existing = get_visit_session(conn, session_id)
+    if not existing:
+        raise KeyError(session_id)
+    conn.execute(
+        """
+        UPDATE visit_sessions
+        SET phase = ?, cue = COALESCE(?, cue), updated_at = ?
+        WHERE id = ?
+        """,
+        (normalized, cue, utc_now(), session_id),
+    )
+    return get_visit_session(conn, session_id) or {}
+
+
+def set_visit_recording(conn: sqlite3.Connection, session_id: str, is_recording: bool) -> dict[str, Any]:
+    existing = get_visit_session(conn, session_id)
+    if not existing:
+        raise KeyError(session_id)
+    now = utc_now()
+    conn.execute(
+        """
+        UPDATE visit_sessions
+        SET recording_status = ?,
+            session_timer_started_at = CASE WHEN ? = 'recording' THEN COALESCE(session_timer_started_at, ?) ELSE session_timer_started_at END,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        ("recording" if is_recording else "idle", "recording" if is_recording else "idle", now, now, session_id),
+    )
+    return get_visit_session(conn, session_id) or {}
+
+
+def attach_visit_event(conn: sqlite3.Connection, session_id: str, event_id: str) -> dict[str, Any]:
+    existing = get_visit_session(conn, session_id)
+    if not existing:
+        raise KeyError(session_id)
+    event_ids = existing["event_ids"]
+    if event_id not in event_ids:
+        event_ids.append(event_id)
+    conn.execute(
+        "UPDATE visit_sessions SET event_ids = ?, updated_at = ? WHERE id = ?",
+        (_as_json(event_ids), utc_now(), session_id),
+    )
+    return get_visit_session(conn, session_id) or {}
+
+
+def build_draft_progress_note(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "note_format": "progress",
+        "status": "draft",
+        "requires_approval": True,
+        "subjective": session.get("history_summary") or "기록 확인 후 방문 재활 세션 진행.",
+        "objective": f"방문 세션 phase={session.get('phase')}, linked_events={len(session.get('event_ids') or [])}.",
+        "assessment": "AI 추출 결과는 clinician review 전 draft 상태.",
+        "plan": "평가/중재/가정 과제 내용을 검토 후 확정.",
+    }
+
+
+def end_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any]:
+    existing = get_visit_session(conn, session_id)
+    if not existing:
+        raise KeyError(session_id)
+    draft = build_draft_progress_note(existing)
+    conn.execute(
+        """
+        UPDATE visit_sessions
+        SET status = 'ended',
+            phase = 'summary',
+            recording_status = 'idle',
+            ended_at = COALESCE(ended_at, ?),
+            draft_progress_note = ?,
+            cue = '진행 노트 초안 검토 필요',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (utc_now(), _as_json(draft), utc_now(), session_id),
+    )
+    return get_visit_session(conn, session_id) or {}
+
+
+def visit_hud_state(session: dict[str, Any]) -> dict[str, Any]:
+    recording = session.get("recording_status") == "recording"
+    return {
+        "patient": session.get("patient_alias") or "Patient",
+        "mode": "recording" if recording else session.get("phase") or "ready",
+        "message": session.get("cue") or f"{session.get('phase', 'ready')} 준비",
+        "is_recording": recording,
+        "recording_start": session.get("session_timer_started_at") if recording else None,
+        "session_count": len(session.get("event_ids") or []),
+        "last_insight": {
+            "id": session.get("id"),
+            "title": "Visit Session",
+            "body": session.get("cue") or session.get("phase") or "ready",
+            "severity": "info" if session.get("readiness") == "ready" else "warning",
+            "lens_safe": True,
+            "source": "visit_session_orchestrator",
+        },
+    }

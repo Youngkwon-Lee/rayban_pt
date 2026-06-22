@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 import logging
 import concurrent.futures
+import requests
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +22,19 @@ load_dotenv()
 
 # ── auto-chart 통합 ──────────────────────────────────────────────────────────
 from lib.auto_chart import generate_chart, mask_faces as _mask_faces, save_chart
+from lib.moai_identity import resolve_moai_identity
+from lib.moai_mapper import build_moai_export_bundle
+from lib.moai_writer import build_moai_write_plan, execute_moai_write_plan, load_moai_writer_config
+from lib.visit_session import (
+    attach_visit_event,
+    create_visit_session,
+    end_visit_session,
+    ensure_visit_session_schema,
+    get_visit_session,
+    set_visit_recording,
+    update_visit_phase,
+    visit_hud_state,
+)
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "storage" / "bridge.db"
@@ -37,6 +51,11 @@ app.mount(
     "/glass-app",
     StaticFiles(directory=str(ROOT / "static" / "glass-webapp"), html=True),
     name="glass-webapp",
+)
+app.mount(
+    "/neural-band-console",
+    StaticFiles(directory=str(ROOT / "static" / "neural-band-console"), html=True),
+    name="neural-band-console",
 )
 
 
@@ -55,8 +74,10 @@ ENABLE_FILE_DOWNLOADS = _env_bool("ENABLE_FILE_DOWNLOADS", False)
 ALLOW_UNMASKED_IMAGE = _env_bool("ALLOW_UNMASKED_IMAGE", False)
 REQUIRE_PATIENT_CONSENT = _env_bool("REQUIRE_PATIENT_CONSENT", False)
 VIDEO_STORE = _env_bool("VIDEO_STORE", False)
+PILOT_CAPTURE_MODE = _env_bool("PILOT_CAPTURE_MODE", False)
 
-PUBLIC_PATHS = {"/", "/health"}
+PUBLIC_PATHS = {"/", "/health", "/label-taxonomy"}
+PUBLIC_PATH_PREFIXES = ("/glass-app", "/neural-band-console")
 DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 ASYNC_RESULTS: dict[str, dict] = {}
@@ -92,7 +113,11 @@ def _is_loopback_host(host: str) -> bool:
 async def api_key_guard(request: Request, call_next):
     path = request.url.path
 
-    if path in PUBLIC_PATHS or (ALLOW_DOCS_WITHOUT_AUTH and path in DOC_PATHS):
+    if (
+        path in PUBLIC_PATHS
+        or path.startswith(PUBLIC_PATH_PREFIXES)
+        or (ALLOW_DOCS_WITHOUT_AUTH and path in DOC_PATHS)
+    ):
         return await call_next(request)
 
     incoming_key = request.headers.get("x-api-key", "") or request.query_params.get("api_key", "")
@@ -133,6 +158,7 @@ class IngestPayload(BaseModel):
     owner_provider_person_id: Optional[str] = None
     org_id: Optional[str] = None
     provider_person_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
     physio_client_id: Optional[str] = None
     physio_session_id: Optional[str] = None
     client_id: Optional[str] = None
@@ -143,10 +169,170 @@ class IngestPayload(BaseModel):
 class RehabLabelPayload(BaseModel):
     session_type: str
     core_task: str
+    custom_task: str = ""
+    body_position: str = ""
     assist_level: str
-    performance: str
-    flags: list[str] = []
+    performance: Optional[str] = None
+    performance_level: Optional[str] = None
+    review_status: str = "reviewed"
+    reviewer_person_id: str = ""
+    usable_for_training: bool = False
+    label_confidence: Optional[float] = None
+    repetition_count: Optional[int] = None
+    hold_duration_seconds: Optional[float] = None
+    tolerance: str = ""
+    fatigue_level: str = ""
+    compensations: list[str] = Field(default_factory=list)
+    caregiver_present: Optional[bool] = None
+    flags: list[str] = Field(default_factory=list)
+    safety_flags: Optional[list[str]] = None
     notes: str = ""
+
+
+LABEL_TAXONOMY_V0 = {
+    "schema_version": "rayban_pt_label_taxonomy/v0",
+    "session_type": [
+        {"value": "assessment", "label": "Assessment"},
+        {"value": "therapeutic_exercise", "label": "Therapeutic exercise"},
+        {"value": "neuromotor_training", "label": "Neuromotor training"},
+        {"value": "gait_training", "label": "Gait training"},
+        {"value": "balance_training", "label": "Balance training"},
+        {"value": "caregiver_training", "label": "Caregiver training"},
+        {"value": "home_exercise_review", "label": "Home exercise review"},
+        {"value": "other", "label": "Other"},
+    ],
+    "core_task": [
+        {"value": "prone_head_control", "label": "Prone head control"},
+        {"value": "sitting_balance", "label": "Sitting balance"},
+        {"value": "standing_balance", "label": "Standing balance"},
+        {"value": "gait_practice", "label": "Gait practice"},
+        {"value": "sit_to_stand", "label": "Sit to stand"},
+        {"value": "reaching", "label": "Reaching"},
+        {"value": "range_of_motion", "label": "Range of motion"},
+        {"value": "caregiver_handling", "label": "Caregiver handling"},
+        {"value": "positioning", "label": "Positioning"},
+        {"value": "other", "label": "Other"},
+    ],
+    "body_position": [
+        {"value": "supine", "label": "Supine"},
+        {"value": "prone", "label": "Prone"},
+        {"value": "side_lying", "label": "Side lying"},
+        {"value": "sitting", "label": "Sitting"},
+        {"value": "quadruped", "label": "Quadruped"},
+        {"value": "kneeling", "label": "Kneeling"},
+        {"value": "standing", "label": "Standing"},
+        {"value": "walking", "label": "Walking"},
+        {"value": "unknown", "label": "Unknown"},
+    ],
+    "assist_level": [
+        {"value": "independent", "label": "Independent"},
+        {"value": "supervision", "label": "Supervision"},
+        {"value": "standby_assist", "label": "Standby assist"},
+        {"value": "contact_guard", "label": "Contact guard"},
+        {"value": "minimal_assist", "label": "Minimal assist"},
+        {"value": "moderate_assist", "label": "Moderate assist"},
+        {"value": "maximal_assist", "label": "Maximal assist"},
+        {"value": "dependent", "label": "Dependent"},
+        {"value": "not_tested", "label": "Not tested"},
+    ],
+    "performance": [
+        {"value": "improved", "label": "Improved"},
+        {"value": "stable", "label": "Stable"},
+        {"value": "declined", "label": "Declined"},
+        {"value": "variable", "label": "Variable"},
+        {"value": "unable", "label": "Unable"},
+        {"value": "not_observed", "label": "Not observed"},
+    ],
+    "review_status": [
+        {"value": "unreviewed", "label": "Unreviewed"},
+        {"value": "reviewed", "label": "Reviewed"},
+        {"value": "corrected", "label": "Corrected"},
+        {"value": "approved", "label": "Approved"},
+        {"value": "rejected", "label": "Rejected"},
+    ],
+    "tolerance": [
+        {"value": "good", "label": "Good"},
+        {"value": "fair", "label": "Fair"},
+        {"value": "poor", "label": "Poor"},
+        {"value": "not_observed", "label": "Not observed"},
+    ],
+    "fatigue_level": [
+        {"value": "none", "label": "None"},
+        {"value": "mild", "label": "Mild"},
+        {"value": "moderate", "label": "Moderate"},
+        {"value": "severe", "label": "Severe"},
+        {"value": "uncertain", "label": "Uncertain"},
+    ],
+    "compensations": [
+        "right_weight_shift",
+        "left_weight_shift",
+        "trunk_lateral_flexion",
+        "excessive_extension",
+        "excessive_flexion",
+        "shoulder_elevation",
+        "pelvic_rotation",
+    ],
+    "flags": [
+        "fatigue",
+        "postural_sway",
+        "pain",
+        "caregiver_assist",
+        "safety_risk",
+        "low_attention",
+        "equipment_used",
+        "needs_review",
+    ],
+    "presets": [
+        {
+            "name": "Head Control",
+            "session_type": "neuromotor_training",
+            "core_task": "prone_head_control",
+            "custom_task": "",
+            "body_position": "prone",
+            "assist_level": "minimal_assist",
+            "performance_level": "stable",
+            "review_status": "reviewed",
+            "flags": ["fatigue"],
+            "notes": "Head/trunk control task reviewed by therapist.",
+        },
+        {
+            "name": "Sitting Balance",
+            "session_type": "balance_training",
+            "core_task": "sitting_balance",
+            "custom_task": "",
+            "body_position": "sitting",
+            "assist_level": "contact_guard",
+            "performance_level": "variable",
+            "review_status": "reviewed",
+            "flags": ["postural_sway"],
+            "notes": "Sitting balance quality and safety reviewed.",
+        },
+        {
+            "name": "Gait Practice",
+            "session_type": "gait_training",
+            "core_task": "gait_practice",
+            "custom_task": "",
+            "body_position": "walking",
+            "assist_level": "moderate_assist",
+            "performance_level": "stable",
+            "review_status": "reviewed",
+            "flags": ["caregiver_assist"],
+            "notes": "Gait practice reviewed; assist level confirmed.",
+        },
+        {
+            "name": "Supported Kneeling",
+            "session_type": "neuromotor_training",
+            "core_task": "other",
+            "custom_task": "supported_kneeling",
+            "body_position": "kneeling",
+            "assist_level": "minimal_assist",
+            "performance_level": "stable",
+            "review_status": "reviewed",
+            "flags": ["caregiver_assist", "needs_review"],
+            "notes": "Custom task candidate kept outside core_task until taxonomy review.",
+        },
+    ],
+}
 
 
 class ConsentPayload(BaseModel):
@@ -277,6 +463,7 @@ def _prune_async_results():
 
 
 def _ensure_runtime_schema(conn: sqlite3.Connection):
+    ensure_visit_session_schema(conn)
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS chart_reviews (
@@ -289,13 +476,56 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
             FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_chart_reviews_reviewed_at ON chart_reviews(reviewed_at);
+        CREATE TABLE IF NOT EXISTS moai_sync_jobs (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            trigger_reason TEXT NOT NULL,
+            operation_count INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            last_plan_summary TEXT NOT NULL DEFAULT '{}',
+            last_result_summary TEXT NOT NULL DEFAULT '{}',
+            last_attempted_at TEXT,
+            synced_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_moai_sync_jobs_status_updated_at ON moai_sync_jobs(status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_moai_sync_jobs_event_id ON moai_sync_jobs(event_id);
         """
+    )
+    label_columns = {row[1] for row in conn.execute("PRAGMA table_info(rehab_labels)").fetchall()}
+    label_column_specs = {
+        "custom_task": "TEXT NOT NULL DEFAULT ''",
+        "body_position": "TEXT NOT NULL DEFAULT ''",
+        "review_status": "TEXT NOT NULL DEFAULT 'reviewed'",
+        "reviewer_person_id": "TEXT NOT NULL DEFAULT ''",
+        "usable_for_training": "INTEGER NOT NULL DEFAULT 0",
+        "label_confidence": "REAL",
+        "repetition_count": "INTEGER",
+        "hold_duration_seconds": "REAL",
+        "tolerance": "TEXT NOT NULL DEFAULT ''",
+        "fatigue_level": "TEXT NOT NULL DEFAULT ''",
+        "compensations": "TEXT NOT NULL DEFAULT '[]'",
+        "caregiver_present": "INTEGER",
+    }
+    for column_name, column_spec in label_column_specs.items():
+        if column_name not in label_columns:
+            conn.execute(f"ALTER TABLE rehab_labels ADD COLUMN {column_name} {column_spec}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rehab_labels_review_status_updated_at "
+        "ON rehab_labels(review_status, updated_at)"
     )
     event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
     if "owner_org_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN owner_org_id TEXT")
     if "owner_provider_person_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN owner_provider_person_id TEXT")
+    if "subject_person_id" not in event_columns:
+        conn.execute("ALTER TABLE events ADD COLUMN subject_person_id TEXT")
     if "physio_client_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN physio_client_id TEXT")
     if "physio_session_id" not in event_columns:
@@ -304,6 +534,7 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         """
         CREATE INDEX IF NOT EXISTS idx_events_owner_org_created_at ON events(owner_org_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_owner_provider_created_at ON events(owner_provider_person_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_events_subject_created_at ON events(subject_person_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_physio_client_created_at ON events(physio_client_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_physio_session_created_at ON events(physio_session_id, created_at);
         """
@@ -353,29 +584,113 @@ def _require_patient_consent(event_type: str, patient_name: str) -> Optional[str
     return row[0]
 
 
+def _pilot_metadata_gaps(
+    *,
+    event_type: str,
+    patient_name: str,
+    owner_org_id: Optional[str],
+    owner_provider_person_id: Optional[str],
+    subject_person_id: Optional[str],
+    physio_client_id: Optional[str],
+    physio_session_id: Optional[str],
+) -> list[str]:
+    if event_type == "command":
+        return []
+    gaps: list[str] = []
+    if not _clean_scope_value(patient_name):
+        gaps.append("patient_name")
+    if not _clean_scope_value(owner_org_id):
+        gaps.append("owner_org_id")
+    if not _clean_scope_value(owner_provider_person_id):
+        gaps.append("owner_provider_person_id")
+    if not (_clean_scope_value(subject_person_id) or _clean_scope_value(physio_client_id)):
+        gaps.append("physio_client_id_or_subject_person_id")
+    if not _clean_scope_value(physio_session_id):
+        gaps.append("physio_session_id_or_encounter_id")
+    return gaps
+
+
+def _require_pilot_capture_metadata(
+    *,
+    event_type: str,
+    patient_name: str,
+    owner_org_id: Optional[str],
+    owner_provider_person_id: Optional[str],
+    subject_person_id: Optional[str],
+    physio_client_id: Optional[str],
+    physio_session_id: Optional[str],
+) -> None:
+    if not PILOT_CAPTURE_MODE:
+        return
+    gaps = _pilot_metadata_gaps(
+        event_type=event_type,
+        patient_name=patient_name,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+        subject_person_id=subject_person_id,
+        physio_client_id=physio_client_id,
+        physio_session_id=physio_session_id,
+    )
+    if gaps:
+        _error(
+            422,
+            "PILOT_METADATA_REQUIRED",
+            "Pilot capture requires canonical metadata: " + ", ".join(gaps),
+        )
+
+
+def _json_list(value: Optional[str]) -> list:
+    try:
+        parsed = json.loads(value or "[]")
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def _optional_bool_from_db(value) -> Optional[bool]:
+    if value is None:
+        return None
+    return bool(value)
+
+
 def _get_label_by_event_id(conn: sqlite3.Connection, event_id: str):
     row = conn.execute(
-        "SELECT event_id, session_type, core_task, assist_level, performance, flags, notes, updated_at FROM rehab_labels WHERE event_id = ?",
+        """
+        SELECT event_id, session_type, core_task, custom_task, body_position,
+               assist_level, performance, review_status, reviewer_person_id,
+               usable_for_training, label_confidence, repetition_count,
+               hold_duration_seconds, tolerance, fatigue_level, compensations,
+               caregiver_present, flags, notes, updated_at
+        FROM rehab_labels
+        WHERE event_id = ?
+        """,
         (event_id,),
     ).fetchone()
     if not row:
         return None
-    flags = []
-    try:
-        flags = json.loads(row[5] or "[]")
-        if not isinstance(flags, list):
-            flags = []
-    except Exception:
-        flags = []
     return {
         "event_id": row[0],
         "session_type": row[1],
         "core_task": row[2],
-        "assist_level": row[3],
-        "performance": row[4],
-        "flags": flags,
-        "notes": row[6] or "",
-        "updated_at": row[7],
+        "custom_task": row[3] or "",
+        "body_position": row[4] or "",
+        "assist_level": row[5],
+        "performance": row[6],
+        "performance_level": row[6],
+        "review_status": row[7] or "reviewed",
+        "reviewer_person_id": row[8] or "",
+        "usable_for_training": bool(row[9]),
+        "label_confidence": row[10],
+        "repetition_count": row[11],
+        "hold_duration_seconds": row[12],
+        "tolerance": row[13] or "",
+        "fatigue_level": row[14] or "",
+        "compensations": _json_list(row[15]),
+        "caregiver_present": _optional_bool_from_db(row[16]),
+        "flags": _json_list(row[17]),
+        "safety_flags": _json_list(row[17]),
+        "notes": row[18] or "",
+        "updated_at": row[19],
     }
 
 
@@ -442,6 +757,442 @@ def _list_event_artifacts(event_id: str) -> list[dict]:
     return artifacts
 
 
+def _get_event_snapshot(event_id: str) -> tuple[dict, Optional[dict], Optional[dict], Optional[dict], list[dict]]:
+    with _conn() as conn:
+        ev = conn.execute(
+            "SELECT id, source, event_type, raw_text, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id "
+            "FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+        if not ev:
+            raise HTTPException(status_code=404, detail="event not found")
+        soap_row = conn.execute(
+            "SELECT s, o, a, p, created_at FROM soap_notes WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
+            (event_id,),
+        ).fetchone()
+        label = _get_label_by_event_id(conn, event_id)
+        review = _get_chart_review_by_event_id(conn, event_id)
+
+    event_obj = {
+        "id": ev[0],
+        "source": ev[1],
+        "event_type": ev[2],
+        "raw_text": ev[3],
+        "intent": ev[4],
+        "status": ev[5],
+        "created_at": ev[6],
+        "patient_name": ev[7],
+        "owner_org_id": ev[8],
+        "owner_provider_person_id": ev[9],
+        "subject_person_id": ev[10],
+        "physio_client_id": ev[11],
+        "physio_session_id": ev[12],
+    }
+    soap = None
+    if soap_row:
+        soap = {"s": soap_row[0], "o": soap_row[1], "a": soap_row[2], "p": soap_row[3], "created_at": soap_row[4]}
+    return event_obj, soap, label, review, _list_event_artifacts(event_id)
+
+
+def _build_moai_bundle_for_event(
+    event_id: str,
+    *,
+    subject_person_id: Optional[str] = None,
+    provider_person_id: Optional[str] = None,
+    encounter_id: Optional[str] = None,
+    capture_device: str = "rayban",
+    resolve_identity: bool = False,
+) -> dict:
+    event_obj, soap_obj, label, review, artifacts = _get_event_snapshot(event_id)
+    identity_resolution = None
+    if resolve_identity:
+        identity_resolution = resolve_moai_identity(
+            event=event_obj,
+            subject_person_id=subject_person_id,
+            provider_person_id=provider_person_id,
+            encounter_id=encounter_id,
+        )
+        subject_person_id = identity_resolution.subject_person_id
+        provider_person_id = identity_resolution.provider_person_id
+        encounter_id = identity_resolution.encounter_id
+        event_obj["owner_org_id"] = identity_resolution.organization_id or event_obj.get("owner_org_id")
+        event_obj["subject_person_id"] = identity_resolution.subject_person_id or event_obj.get("subject_person_id")
+        event_obj["physio_client_id"] = identity_resolution.physio_client_id or event_obj.get("physio_client_id")
+
+    bundle = build_moai_export_bundle(
+        event=event_obj,
+        soap=soap_obj,
+        label=label,
+        review=review,
+        artifacts=artifacts,
+        subject_person_id=subject_person_id,
+        provider_person_id=provider_person_id,
+        encounter_id=encounter_id,
+        capture_device=capture_device,
+    )
+    if identity_resolution:
+        bundle.setdefault("context", {})["identity_resolution"] = identity_resolution.as_dict()
+    return bundle
+
+
+def _safe_json_loads(value: Optional[str], default):
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+def _summarize_moai_plan_for_job(plan: dict) -> dict:
+    context = dict(plan.get("context") or {})
+    if context.get("identity_hints"):
+        context["identity_hints_present"] = True
+        context.pop("identity_hints", None)
+    return {
+        "context": context,
+        "summary": plan.get("summary") or {},
+        "operations": [
+            {
+                "target_table": op.get("target_table"),
+                "action": op.get("action"),
+                "on_conflict": op.get("on_conflict"),
+                "warnings": op.get("warnings") or [],
+            }
+            for op in plan.get("operations") or []
+        ],
+        "skipped": plan.get("skipped") or [],
+    }
+
+
+def _summarize_moai_write_result_for_job(result: Optional[dict]) -> dict:
+    if not result:
+        return {}
+    return {
+        "summary": result.get("summary") or {},
+        "results": [
+            {
+                "target_table": item.get("target_table"),
+                "action": item.get("action"),
+                "status_code": item.get("status_code"),
+                "ok": item.get("ok"),
+            }
+            for item in result.get("results") or []
+        ],
+        "skipped": result.get("skipped") or [],
+    }
+
+
+def _moai_sync_job_from_row(row) -> dict:
+    return {
+        "id": row[0],
+        "event_id": row[1],
+        "status": row[2],
+        "trigger_reason": row[3],
+        "operation_count": row[4],
+        "skipped_count": row[5],
+        "attempts": row[6],
+        "last_error": row[7],
+        "last_plan_summary": _safe_json_loads(row[8], {}),
+        "last_result_summary": _safe_json_loads(row[9], {}),
+        "last_attempted_at": row[10],
+        "synced_at": row[11],
+        "created_at": row[12],
+        "updated_at": row[13],
+    }
+
+
+def _enqueue_moai_sync_job(conn: sqlite3.Connection, event_id: str, trigger_reason: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO moai_sync_jobs (id, event_id, status, trigger_reason, updated_at)
+        VALUES (?, ?, 'pending', ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(event_id) DO UPDATE SET
+          status='pending',
+          trigger_reason=excluded.trigger_reason,
+          last_error=NULL,
+          updated_at=CURRENT_TIMESTAMP
+        """,
+        (str(uuid.uuid4()), event_id, trigger_reason),
+    )
+
+
+def _record_moai_sync_job_attempt(
+    event_id: str,
+    *,
+    status: str,
+    plan: Optional[dict] = None,
+    result: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> dict:
+    plan_summary = _summarize_moai_plan_for_job(plan or {})
+    result_summary = _summarize_moai_write_result_for_job(result)
+    operation_count = int((plan or {}).get("summary", {}).get("operation_count") or 0)
+    skipped_count = int((plan or {}).get("summary", {}).get("skipped_count") or 0)
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO moai_sync_jobs (
+              id, event_id, status, trigger_reason, operation_count, skipped_count,
+              attempts, last_error, last_plan_summary, last_result_summary,
+              last_attempted_at, synced_at, updated_at
+            )
+            VALUES (?, ?, ?, 'manual', ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP,
+                    CASE WHEN ? = 'synced' THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    CURRENT_TIMESTAMP)
+            ON CONFLICT(event_id) DO UPDATE SET
+              status=excluded.status,
+              operation_count=excluded.operation_count,
+              skipped_count=excluded.skipped_count,
+              attempts=moai_sync_jobs.attempts + 1,
+              last_error=excluded.last_error,
+              last_plan_summary=excluded.last_plan_summary,
+              last_result_summary=excluded.last_result_summary,
+              last_attempted_at=CURRENT_TIMESTAMP,
+              synced_at=CASE WHEN excluded.status = 'synced' THEN CURRENT_TIMESTAMP ELSE moai_sync_jobs.synced_at END,
+              updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                str(uuid.uuid4()),
+                event_id,
+                status,
+                operation_count,
+                skipped_count,
+                error,
+                json.dumps(plan_summary, ensure_ascii=False),
+                json.dumps(result_summary, ensure_ascii=False),
+                status,
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            """
+            SELECT id, event_id, status, trigger_reason, operation_count, skipped_count, attempts,
+                   last_error, last_plan_summary, last_result_summary, last_attempted_at,
+                   synced_at, created_at, updated_at
+            FROM moai_sync_jobs
+            WHERE event_id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+        return _moai_sync_job_from_row(row)
+
+
+def _list_moai_sync_jobs(status: str = "pending", limit: int = 20) -> list[dict]:
+    clean_status = (status or "").strip()
+    n = max(1, min(limit, 200))
+    clauses = []
+    params: list[object] = []
+    if clean_status and clean_status != "all":
+        clauses.append("status = ?")
+        params.append(clean_status)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(n)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, event_id, status, trigger_reason, operation_count, skipped_count, attempts,
+                   last_error, last_plan_summary, last_result_summary, last_attempted_at,
+                   synced_at, created_at, updated_at
+            FROM moai_sync_jobs
+            {where_sql}
+            ORDER BY updated_at ASC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return [_moai_sync_job_from_row(row) for row in rows]
+
+
+def _event_consent_status(event: dict) -> dict:
+    patient_name = str(event.get("patient_name") or "").strip()
+    if not patient_name:
+        return {"status": "unknown", "scope": "capture_analysis_storage", "active": False}
+    with _conn() as conn:
+        row = _latest_patient_consent(conn, patient_name)
+    if not row:
+        return {"status": "missing", "scope": "capture_analysis_storage", "active": False}
+    return {
+        "status": "granted",
+        "scope": row[2],
+        "active": True,
+        "consent_id": row[0],
+        "checked_at": row[5],
+    }
+
+
+def _build_pilot_manifest_for_event(event_id: str, *, resolve_identity: bool = True) -> dict:
+    event, soap, label, review, artifacts = _get_event_snapshot(event_id)
+    identity = resolve_moai_identity(event=event) if resolve_identity else None
+    subject_person_id = (identity.subject_person_id if identity else None) or event.get("subject_person_id")
+    organization_id = (identity.organization_id if identity else None) or event.get("owner_org_id")
+    provider_person_id = (identity.provider_person_id if identity else None) or event.get("owner_provider_person_id")
+    encounter_id = (identity.encounter_id if identity else None) or event.get("physio_session_id")
+    physio_client_id = (identity.physio_client_id if identity else None) or event.get("physio_client_id")
+    event_type = str(event.get("event_type") or "")
+    has_artifact = bool(artifacts)
+    has_note = bool(soap or event.get("raw_text"))
+    consent = _event_consent_status(event)
+    sync_jobs = [job for job in _list_moai_sync_jobs(status="all", limit=200) if job["event_id"] == event_id]
+    latest_sync = sync_jobs[0] if sync_jobs else None
+
+    manifest = {
+        "schema_version": "rayban_pt_pilot_session_manifest/v0",
+        "operating_mode": "design/dry_run",
+        "session": {
+            "pilot_session_id": event_id,
+            "captured_at": event.get("created_at"),
+            "capture_device": "rayban",
+            "capture_context": "internal_non_production",
+            "event_type": event_type,
+            "source": event.get("source"),
+            "notes": "",
+        },
+        "identity": {
+            "organization_id": organization_id,
+            "provider_person_id": provider_person_id,
+            "subject_person_id": subject_person_id,
+            "physio_client_id": physio_client_id,
+            "encounter_id": encounter_id,
+            "identity_resolution_status": identity.status if identity else "not_checked",
+            "identity_resolution_notes": "; ".join(identity.warnings) if identity else "",
+        },
+        "consent": {
+            "status": consent["status"],
+            "scope": consent["scope"],
+            "checked_by": "rayban-local-bridge",
+            "checked_at": consent.get("checked_at") or "",
+            "notes": "",
+        },
+        "modalities": {
+            "text_note": {
+                "captured": event_type in {"text", "combined"} and has_note,
+                "event_id": event_id if event_type in {"text", "combined"} else "",
+                "usable": bool(has_note),
+                "notes": "",
+            },
+            "audio": {
+                "captured": event_type == "audio",
+                "event_id": event_id if event_type == "audio" else "",
+                "transcript_available": bool(event.get("raw_text")) if event_type == "audio" else False,
+                "usable": bool(event.get("raw_text")) if event_type == "audio" else None,
+                "notes": "",
+            },
+            "image": {
+                "captured": event_type == "image",
+                "event_id": event_id if event_type == "image" else "",
+                "masked_artifact_available": has_artifact if event_type == "image" else False,
+                "usable_for_pose_context": has_artifact if event_type == "image" else None,
+                "notes": "",
+            },
+            "video": {
+                "captured": event_type == "video",
+                "event_id": event_id if event_type == "video" else "",
+                "masked_or_sampled_artifact_available": has_artifact if event_type == "video" else False,
+                "usable_for_temporal_context": has_artifact if event_type == "video" else None,
+                "notes": "",
+            },
+        },
+        "therapist_labels_v0": {
+            "session_type": label.get("session_type", "") if label else "",
+            "core_task": label.get("core_task", "") if label else "",
+            "custom_task": label.get("custom_task", "") if label else "",
+            "body_position": label.get("body_position", "") if label else "",
+            "assist_level": label.get("assist_level", "") if label else "",
+            "performance_level": label.get("performance_level", "") if label else "",
+            "review_status": label.get("review_status", "unreviewed") if label else "unreviewed",
+            "reviewer_person_id": label.get("reviewer_person_id", "") if label else "",
+            "usable_for_training": bool(label.get("usable_for_training")) if label else False,
+            "label_confidence": label.get("label_confidence") if label else None,
+            "repetition_count": label.get("repetition_count") if label else None,
+            "hold_duration_seconds": label.get("hold_duration_seconds") if label else None,
+            "tolerance": label.get("tolerance", "") if label else "",
+            "fatigue_level": label.get("fatigue_level", "") if label else "",
+            "compensations": label.get("compensations", []) if label else [],
+            "safety_flags": label.get("flags", []) if label else [],
+            "caregiver_present": label.get("caregiver_present") if label else None,
+            "notes": label.get("notes", "") if label else "",
+        },
+        "ai_outputs": {
+            "soap_draft_generated": bool(soap),
+            "label_draft_generated": bool(label),
+            "pose_or_visual_analysis_generated": event_type in {"image", "video"} and has_artifact,
+            "accepted_corrected_rejected": "corrected" if review else ("not_reviewed" if soap else "not_generated"),
+            "unsupported_detail_observed": False,
+            "notes": "",
+        },
+        "review": {
+            "reviewer_person_id": review.get("reviewer", "") if review else "",
+            "reviewed_at": review.get("reviewed_at", "") if review else "",
+            "chart_review_status": "reviewed" if review else "unreviewed",
+            "label_review_status": label.get("review_status", "unreviewed") if label else "unreviewed",
+            "media_quality": "unknown",
+            "corrections_summary": review.get("notes", "") if review else "",
+        },
+        "agent_dry_run": {
+            "moai_export_checked": False,
+            "moai_write_plan_checked": bool(latest_sync and latest_sync.get("last_plan_summary")),
+            "sync_job_enqueued": bool(latest_sync),
+            "operation_count": latest_sync.get("operation_count") if latest_sync else None,
+            "skipped_count": latest_sync.get("skipped_count") if latest_sync else None,
+            "blocked_reasons": latest_sync.get("last_plan_summary", {}).get("skipped", []) if latest_sync else [],
+            "phi_safe_log_confirmed": True,
+        },
+    }
+    manifest["readiness"] = _pilot_readiness_from_manifest(manifest)
+    return manifest
+
+
+def _pilot_readiness_from_manifest(manifest: dict) -> dict:
+    missing_schema: list[str] = []
+    missing_gold: list[str] = []
+    identity = manifest.get("identity") or {}
+    consent = manifest.get("consent") or {}
+    labels = manifest.get("therapist_labels_v0") or {}
+    review = manifest.get("review") or {}
+    modalities = manifest.get("modalities") or {}
+    reviewed_label_statuses = {"reviewed", "corrected", "approved"}
+
+    if not identity.get("organization_id"):
+        missing_schema.append("organization_id")
+    if not identity.get("provider_person_id"):
+        missing_schema.append("provider_person_id")
+    if not (identity.get("subject_person_id") or identity.get("physio_client_id")):
+        missing_schema.append("subject_person_id_or_physio_client_id")
+    if not identity.get("encounter_id"):
+        missing_schema.append("encounter_id")
+    if consent.get("status") != "granted":
+        missing_schema.append("consent_granted")
+    if not any((value or {}).get("captured") for value in modalities.values() if isinstance(value, dict)):
+        missing_schema.append("at_least_one_modality")
+    if not labels.get("session_type"):
+        missing_schema.append("session_type")
+    if not labels.get("core_task"):
+        missing_schema.append("core_task")
+    if labels.get("review_status") not in reviewed_label_statuses:
+        missing_schema.append("review_status")
+
+    missing_gold.extend(missing_schema)
+    if not identity.get("subject_person_id"):
+        missing_gold.append("resolved_subject_person_id")
+    if not labels.get("assist_level"):
+        missing_gold.append("assist_level")
+    if not labels.get("performance_level"):
+        missing_gold.append("performance_level")
+    if review.get("chart_review_status") != "reviewed" and labels.get("review_status") not in reviewed_label_statuses:
+        missing_gold.append("chart_reviewed")
+    if not labels.get("usable_for_training"):
+        missing_gold.append("usable_for_training")
+
+    return {
+        "usable_for_schema_eval": not missing_schema,
+        "eligible_for_gold_dataset": not missing_gold,
+        "gate": "gate_1_pilot",
+        "missing_requirements": sorted(set(missing_schema)),
+        "gold_missing_requirements": sorted(set(missing_gold)),
+    }
+
+
 def _first_non_empty(*values: object) -> str:
     for value in values:
         text = str(value or "").strip()
@@ -493,8 +1244,9 @@ def _build_physio_session_export_item(conn: sqlite3.Connection, event_row):
         "patient_name": event_row[6] or None,
         "owner_org_id": event_row[7] or None,
         "owner_provider_person_id": event_row[8] or None,
-        "physio_client_id": event_row[9] or None,
-        "physio_session_id": event_row[10] or None,
+        "subject_person_id": event_row[9] or None,
+        "physio_client_id": event_row[10] or None,
+        "physio_session_id": event_row[11] or None,
         "title": title,
         "summary": summary,
         "label": label,
@@ -919,7 +1671,7 @@ def _extract_patient_from_text(text: str) -> str:
 
 def _get_event_for_merge(conn: sqlite3.Connection, event_id: str) -> dict:
     row = conn.execute(
-        "SELECT id, source, event_type, raw_text, patient_name, created_at, owner_org_id, owner_provider_person_id "
+        "SELECT id, source, event_type, raw_text, patient_name, created_at, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id "
         "FROM events WHERE id = ?",
         (event_id,),
     ).fetchone()
@@ -934,6 +1686,9 @@ def _get_event_for_merge(conn: sqlite3.Connection, event_id: str) -> dict:
         "created_at": row[5],
         "owner_org_id": row[6] or "",
         "owner_provider_person_id": row[7] or "",
+        "subject_person_id": row[8] or "",
+        "physio_client_id": row[9] or "",
+        "physio_session_id": row[10] or "",
     }
 
 
@@ -959,6 +1714,14 @@ def _resolve_merged_physio_context(image_event: dict, audio_event: dict) -> tupl
     return values[0], values[1]
 
 
+def _resolve_merged_subject_person_id(image_event: dict, audio_event: dict) -> Optional[str]:
+    image_value = _clean_scope_value(image_event.get("subject_person_id"))
+    audio_value = _clean_scope_value(audio_event.get("subject_person_id"))
+    if image_value and audio_value and image_value != audio_value:
+        _error(400, "SUBJECT_PERSON_MISMATCH", "서로 다른 subject_person_id 이벤트는 통합할 수 없습니다.")
+    return image_value or audio_value
+
+
 def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str = "") -> dict:
     if image_event["event_type"] not in {"image", "video"}:
         _error(400, "INVALID_IMAGE_EVENT", "image_event_id는 image 또는 video 이벤트여야 합니다.")
@@ -979,6 +1742,7 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
         or None
     )
     owner_org_id, owner_provider_person_id = _resolve_merged_scope(image_event, audio_event)
+    subject_person_id = _resolve_merged_subject_person_id(image_event, audio_event)
     physio_client_id, physio_session_id = _resolve_merged_physio_context(image_event, audio_event)
     consent_id = _require_patient_consent("text", patient or "")
 
@@ -1024,8 +1788,8 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_id,
                 "merged",
@@ -1036,6 +1800,7 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
                 patient,
                 owner_org_id,
                 owner_provider_person_id,
+                subject_person_id,
                 physio_client_id,
                 physio_session_id,
             ),
@@ -1085,6 +1850,7 @@ def _process_event(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
     physio_client_id: Optional[str] = None,
     physio_session_id: Optional[str] = None,
 ):
@@ -1096,11 +1862,21 @@ def _process_event(
     masking_audit = ""
     owner_org_id = _clean_scope_value(owner_org_id)
     owner_provider_person_id = _clean_scope_value(owner_provider_person_id)
+    subject_person_id = _clean_scope_value(subject_person_id)
     physio_client_id = _clean_scope_value(physio_client_id)
     physio_session_id = _clean_scope_value(physio_session_id)
 
     if event_type not in {"audio", "text", "command", "image", "video"}:
         raise HTTPException(status_code=400, detail="event_type must be audio/text/command/image/video")
+    _require_pilot_capture_metadata(
+        event_type=event_type,
+        patient_name=patient_name,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+        subject_person_id=subject_person_id,
+        physio_client_id=physio_client_id,
+        physio_session_id=physio_session_id,
+    )
 
     event_id = str(uuid.uuid4())
     consent_id = _require_patient_consent(event_type, patient_name)
@@ -1206,8 +1982,8 @@ def _process_event(
 
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_id,
                 source,
@@ -1218,6 +1994,7 @@ def _process_event(
                 patient_name or None,
                 owner_org_id,
                 owner_provider_person_id,
+                subject_person_id,
                 physio_client_id,
                 physio_session_id,
             ),
@@ -1268,6 +2045,7 @@ def _process_event(
         "scope": {
             "owner_org_id": owner_org_id,
             "owner_provider_person_id": owner_provider_person_id,
+            "subject_person_id": subject_person_id,
             "physio_client_id": physio_client_id,
             "physio_session_id": physio_session_id,
         },
@@ -1281,7 +2059,7 @@ def _event_status_result(processed: dict) -> dict:
     if event_id:
         with _conn() as conn:
             row = conn.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id "
                 "FROM events WHERE id = ?",
                 (event_id,),
             ).fetchone()
@@ -1296,8 +2074,9 @@ def _event_status_result(processed: dict) -> dict:
                 "created_at": row[6],
                 "owner_org_id": row[7],
                 "owner_provider_person_id": row[8],
-                "physio_client_id": row[9],
-                "physio_session_id": row[10],
+                "subject_person_id": row[9],
+                "physio_client_id": row[10],
+                "physio_session_id": row[11],
             }
     result = {"event": event_obj, "soap": processed.get("soap")}
     if processed.get("media"):
@@ -1610,6 +2389,7 @@ def health():
             "allow_unmasked_image": ALLOW_UNMASKED_IMAGE,
             "patient_consent_required": REQUIRE_PATIENT_CONSENT,
             "video_store": VIDEO_STORE,
+            "pilot_capture_mode": PILOT_CAPTURE_MODE,
         },
         "recent_error_logs_60m": recent_error_logs,
     }
@@ -1715,6 +2495,7 @@ def ingest(payload: IngestPayload, request: Request):
         patient_name=payload.patient_name or "",
         owner_org_id=owner_org_id,
         owner_provider_person_id=owner_provider_person_id,
+        subject_person_id=payload.subject_person_id,
         physio_client_id=payload.physio_client_id or payload.client_id,
         physio_session_id=payload.physio_session_id or payload.session_id or payload.encounter_id,
     )
@@ -1747,6 +2528,7 @@ def _process_upload_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
     physio_client_id: Optional[str] = None,
     physio_session_id: Optional[str] = None,
 ):
@@ -1768,6 +2550,7 @@ def _process_upload_job(
                 patient_name=patient_name,
                 owner_org_id=owner_org_id,
                 owner_provider_person_id=owner_provider_person_id,
+                subject_person_id=subject_person_id,
                 physio_client_id=physio_client_id,
                 physio_session_id=physio_session_id,
             )
@@ -1806,6 +2589,7 @@ async def ingest_upload(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    subject_person_id: str = Form(""),
     physio_client_id: str = Form(""),
     physio_session_id: str = Form(""),
     audio: UploadFile = File(...),
@@ -1845,6 +2629,7 @@ async def ingest_upload(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        subject_person_id,
         physio_client_id,
         physio_session_id,
     )
@@ -1863,39 +2648,147 @@ def get_event(event_id: str):
     if row:
         return row
 
-    # fallback: DB에서 처리 완료 이벤트 조회
-    with _conn() as conn:
-        ev = conn.execute(
-            "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id FROM events WHERE id = ?",
-            (event_id,),
-        ).fetchone()
-        if not ev:
-            raise HTTPException(status_code=404, detail="event not found")
-        soap = conn.execute(
-            "SELECT s, o, a, p, created_at FROM soap_notes WHERE event_id = ? ORDER BY created_at DESC LIMIT 1",
-            (event_id,),
-        ).fetchone()
-        label = _get_label_by_event_id(conn, event_id)
-
-    event_obj = {
-        "id": ev[0],
-        "source": ev[1],
-        "event_type": ev[2],
-        "raw_text": ev[3],
-        "intent": ev[4],
-        "status": ev[5],
-        "created_at": ev[6],
-        "owner_org_id": ev[7],
-        "owner_provider_person_id": ev[8],
-        "physio_client_id": ev[9],
-        "physio_session_id": ev[10],
-    }
-    soap_obj = None
-    if soap:
-        soap_obj = {"s": soap[0], "o": soap[1], "a": soap[2], "p": soap[3], "created_at": soap[4]}
-
+    event_obj, soap_obj, label, _review, _artifacts = _get_event_snapshot(event_id)
     _audit_log(event_id, "info", "event viewed")
     return {"status": "done", "result": {"event": event_obj, "soap": soap_obj, "label": label}}
+
+
+@app.get("/events/{event_id}/moai-export")
+def get_event_moai_export(
+    event_id: str,
+    subject_person_id: str = "",
+    provider_person_id: str = "",
+    encounter_id: str = "",
+    capture_device: str = "rayban",
+    resolve_identity: bool = False,
+):
+    _prune_async_results()
+    row = ASYNC_RESULTS.get(event_id)
+    if row and row.get("status") not in {"done", "error"}:
+        return {
+            "status": row.get("status"),
+            "message": "event is not ready for moai export yet",
+            "event_id": event_id,
+        }
+
+    export_bundle = _build_moai_bundle_for_event(
+        event_id,
+        subject_person_id=(subject_person_id or "").strip() or None,
+        provider_person_id=(provider_person_id or "").strip() or None,
+        encounter_id=(encounter_id or "").strip() or None,
+        capture_device=(capture_device or "").strip() or "rayban",
+        resolve_identity=resolve_identity,
+    )
+    _audit_log(event_id, "info", "moai export viewed")
+    return {"status": "done", "result": export_bundle}
+
+
+@app.get("/events/{event_id}/moai-write-plan")
+def get_event_moai_write_plan(
+    event_id: str,
+    subject_person_id: str = "",
+    provider_person_id: str = "",
+    encounter_id: str = "",
+    capture_device: str = "rayban",
+    resolve_identity: bool = False,
+):
+    bundle = _build_moai_bundle_for_event(
+        event_id,
+        subject_person_id=(subject_person_id or "").strip() or None,
+        provider_person_id=(provider_person_id or "").strip() or None,
+        encounter_id=(encounter_id or "").strip() or None,
+        capture_device=(capture_device or "").strip() or "rayban",
+        resolve_identity=resolve_identity,
+    )
+    plan = build_moai_write_plan(bundle)
+    _audit_log(event_id, "info", "moai write plan viewed")
+    return {"status": "done", "result": plan}
+
+
+@app.post("/events/{event_id}/moai-write")
+def write_event_to_moai(
+    event_id: str,
+    subject_person_id: str = "",
+    provider_person_id: str = "",
+    encounter_id: str = "",
+    capture_device: str = "rayban",
+    dry_run: bool = True,
+    resolve_identity: bool = False,
+):
+    bundle = _build_moai_bundle_for_event(
+        event_id,
+        subject_person_id=(subject_person_id or "").strip() or None,
+        provider_person_id=(provider_person_id or "").strip() or None,
+        encounter_id=(encounter_id or "").strip() or None,
+        capture_device=(capture_device or "").strip() or "rayban",
+        resolve_identity=resolve_identity,
+    )
+    plan = build_moai_write_plan(bundle)
+    if dry_run:
+        _audit_log(event_id, "info", "moai dry-run write viewed")
+        return {"status": "dry_run", "result": plan}
+
+    config = load_moai_writer_config()
+    if config is None:
+        _error(
+            503,
+            "MOAI_WRITER_NOT_CONFIGURED",
+            "Set MOAI_WEB_SUPABASE_URL and MOAI_WEB_SUPABASE_SECRET_KEY or MOAI_WEB_SUPABASE_SERVICE_ROLE_KEY.",
+        )
+    try:
+        result = execute_moai_write_plan(plan, config=config)
+    except requests.HTTPError as exc:
+        response = exc.response
+        detail = response.text[:2000] if response is not None else str(exc)
+        _error(502, "MOAI_WRITE_FAILED", detail)
+    except Exception as exc:
+        _error(500, "MOAI_WRITE_FAILED", str(exc))
+
+    _audit_log(event_id, "info", "moai write completed")
+    return {"status": "done", "result": result}
+
+
+@app.get("/moai-sync/jobs")
+def get_moai_sync_jobs(status: str = "pending", limit: int = 20):
+    clean_status = (status or "").strip().lower()
+    if clean_status not in {"pending", "planned", "blocked", "synced", "error", "all"}:
+        _error(400, "INVALID_SYNC_STATUS", "status must be pending, planned, blocked, synced, error, or all")
+    return {"status": "done", "items": _list_moai_sync_jobs(status=clean_status, limit=limit)}
+
+
+@app.get("/moai-sync/jobs/{event_id}")
+def get_moai_sync_job(event_id: str):
+    with _conn() as conn:
+        row = conn.execute(
+            """
+            SELECT id, event_id, status, trigger_reason, operation_count, skipped_count, attempts,
+                   last_error, last_plan_summary, last_result_summary, last_attempted_at,
+                   synced_at, created_at, updated_at
+            FROM moai_sync_jobs
+            WHERE event_id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="moai sync job not found")
+    return {"status": "done", "job": _moai_sync_job_from_row(row)}
+
+
+@app.get("/events/{event_id}/pilot-manifest")
+def get_event_pilot_manifest(event_id: str, resolve_identity: bool = True):
+    return {"status": "done", "manifest": _build_pilot_manifest_for_event(event_id, resolve_identity=resolve_identity)}
+
+
+@app.get("/events/{event_id}/pilot-readiness")
+def get_event_pilot_readiness(event_id: str, resolve_identity: bool = True):
+    manifest = _build_pilot_manifest_for_event(event_id, resolve_identity=resolve_identity)
+    return {
+        "status": "done",
+        "event_id": event_id,
+        "readiness": manifest["readiness"],
+        "identity": manifest["identity"],
+        "agent_dry_run": manifest["agent_dry_run"],
+    }
 
 
 def _delete_event_artifacts(event_id: str) -> list[str]:
@@ -1968,6 +2861,7 @@ def _process_image_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
     physio_client_id: Optional[str] = None,
     physio_session_id: Optional[str] = None,
 ):
@@ -1988,6 +2882,7 @@ def _process_image_job(
             patient_name=patient_name,
             owner_org_id=owner_org_id,
             owner_provider_person_id=owner_provider_person_id,
+            subject_person_id=subject_person_id,
             physio_client_id=physio_client_id,
             physio_session_id=physio_session_id,
         )
@@ -2028,6 +2923,7 @@ async def ingest_image(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    subject_person_id: str = Form(""),
     physio_client_id: str = Form(""),
     physio_session_id: str = Form(""),
     image: UploadFile = File(...),
@@ -2065,6 +2961,7 @@ async def ingest_image(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        subject_person_id,
         physio_client_id,
         physio_session_id,
     )
@@ -2085,6 +2982,7 @@ def _process_video_job(
     patient_name: str = "",
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
     physio_client_id: Optional[str] = None,
     physio_session_id: Optional[str] = None,
 ):
@@ -2174,6 +3072,7 @@ def _process_video_job(
             patient_name=patient_name,
             owner_org_id=owner_org_id,
             owner_provider_person_id=owner_provider_person_id,
+            subject_person_id=subject_person_id,
             physio_client_id=physio_client_id,
             physio_session_id=physio_session_id,
         )
@@ -2193,7 +3092,7 @@ def _process_video_job(
         # iOS EventStatusResponse 구조에 맞게 래핑
         with _conn() as _c:
             ev_row = _c.execute(
-                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id "
+                "SELECT id, source, event_type, raw_text, intent, status, created_at, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id "
                 "FROM events WHERE id = ?",
                 (inner_id,),
             ).fetchone()
@@ -2205,8 +3104,9 @@ def _process_video_job(
                 "status": ev_row[5], "created_at": ev_row[6],
                 "owner_org_id": ev_row[7],
                 "owner_provider_person_id": ev_row[8],
-                "physio_client_id": ev_row[9],
-                "physio_session_id": ev_row[10],
+                "subject_person_id": ev_row[9],
+                "physio_client_id": ev_row[10],
+                "physio_session_id": ev_row[11],
             }
 
         _touch_async_result(event_id, {
@@ -2242,6 +3142,7 @@ async def ingest_video(
     patient_name: str = Form(""),
     owner_org_id: str = Form(""),
     owner_provider_person_id: str = Form(""),
+    subject_person_id: str = Form(""),
     physio_client_id: str = Form(""),
     physio_session_id: str = Form(""),
     video: UploadFile = File(...),
@@ -2278,6 +3179,7 @@ async def ingest_video(
         patient_name,
         scoped_org_id,
         scoped_provider_person_id,
+        subject_person_id,
         physio_client_id,
         physio_session_id,
     )
@@ -2348,6 +3250,7 @@ def update_chart(event_id: str, payload: ChartUpdatePayload):
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
             (str(uuid.uuid4()), event_id, "info", "chart updated manually"),
         )
+        _enqueue_moai_sync_job(conn, event_id, "chart_updated")
         conn.commit()
 
     saved = chart_path.read_text(encoding="utf-8")
@@ -2388,6 +3291,7 @@ def mark_chart_reviewed(event_id: str, payload: ChartReviewPayload):
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
             (str(uuid.uuid4()), event_id, "info", f"chart reviewed reviewer={reviewer} quality={quality.get('level')} score={quality.get('score')}"),
         )
+        _enqueue_moai_sync_job(conn, event_id, "chart_reviewed")
         conn.commit()
         review = _get_chart_review_by_event_id(conn, event_id)
 
@@ -2407,6 +3311,7 @@ def clear_chart_review(event_id: str):
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
             (str(uuid.uuid4()), event_id, "info", f"chart review cleared deleted={deleted}"),
         )
+        _enqueue_moai_sync_job(conn, event_id, "chart_review_cleared")
         conn.commit()
 
     quality = None
@@ -2520,13 +3425,34 @@ def recent_events(limit: int = 10):
     n = max(1, min(limit, 50))
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT id, source, event_type, intent, status, created_at, patient_name FROM events ORDER BY created_at DESC LIMIT ?",
+            """
+            SELECT id, source, event_type, intent, status, created_at, patient_name,
+                   owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id
+            FROM events
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
             (n,),
         ).fetchall()
     items = []
     with _conn() as conn:
         for r in rows:
             label = _get_label_by_event_id(conn, r[0])
+            identity_fields = {
+                "owner_org_id": r[7] or None,
+                "owner_provider_person_id": r[8] or None,
+                "subject_person_id": r[9] or None,
+                "physio_client_id": r[10] or None,
+                "physio_session_id": r[11] or None,
+            }
+            present_identity_count = sum(1 for value in identity_fields.values() if value)
+            missing_identity = [
+                key
+                for key in ("owner_org_id", "owner_provider_person_id", "physio_session_id")
+                if not identity_fields.get(key)
+            ]
+            if not (identity_fields.get("subject_person_id") or identity_fields.get("physio_client_id")):
+                missing_identity.append("subject_person_id_or_physio_client_id")
             items.append(
                 {
                     "id": r[0],
@@ -2537,6 +3463,13 @@ def recent_events(limit: int = 10):
                     "created_at": r[5],
                     "has_label": label is not None,
                     "patient_name": r[6] or None,
+                    **identity_fields,
+                    "identity_completeness": {
+                        "present": present_identity_count,
+                        "required": 4,
+                        "complete": not missing_identity,
+                        "missing": missing_identity,
+                    },
                 }
             )
     return {"items": items}
@@ -2548,6 +3481,7 @@ def physio_sessions(
     patient_name: str = "",
     org_id: str = "",
     provider_person_id: str = "",
+    subject_person_id: str = "",
     client_id: str = "",
     session_id: str = "",
     include_unscoped: bool = False,
@@ -2557,6 +3491,7 @@ def physio_sessions(
     clean_patient_name = patient_name.strip()
     clean_org_id = (org_id or "").strip()
     clean_provider_person_id = (provider_person_id or "").strip()
+    clean_subject_person_id = (subject_person_id or "").strip()
     clean_client_id = (client_id or "").strip()
     clean_session_id = (session_id or "").strip()
     clauses: list[str] = []
@@ -2577,6 +3512,9 @@ def physio_sessions(
         else:
             clauses.append("owner_provider_person_id = ?")
         params.append(clean_provider_person_id)
+    if clean_subject_person_id:
+        clauses.append("subject_person_id = ?")
+        params.append(clean_subject_person_id)
     if clean_client_id:
         clauses.append("physio_client_id = ?")
         params.append(clean_client_id)
@@ -2589,7 +3527,7 @@ def physio_sessions(
     with _conn() as conn:
         rows = conn.execute(
             f"""
-            SELECT id, source, event_type, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id, physio_client_id, physio_session_id
+            SELECT id, source, event_type, intent, status, created_at, patient_name, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id
             FROM events
             {where_sql}
             ORDER BY created_at DESC
@@ -2608,6 +3546,7 @@ def physio_sessions(
         "scope": {
             "org_id": clean_org_id or None,
             "provider_person_id": clean_provider_person_id or None,
+            "subject_person_id": clean_subject_person_id or None,
             "client_id": clean_client_id or None,
             "session_id": clean_session_id or None,
             "include_unscoped": include_unscoped,
@@ -2615,8 +3554,25 @@ def physio_sessions(
     }
 
 
+@app.get("/label-taxonomy")
+def get_label_taxonomy():
+    return {"status": "done", "taxonomy": LABEL_TAXONOMY_V0}
+
+
+def _label_performance_value(payload: RehabLabelPayload) -> str:
+    performance = (payload.performance_level or payload.performance or "").strip()
+    if not performance:
+        _error(422, "LABEL_PERFORMANCE_REQUIRED", "performance 또는 performance_level이 필요합니다.")
+    return performance
+
+
 @app.post("/labels/{event_id}")
 def upsert_label(event_id: str, payload: RehabLabelPayload):
+    performance = _label_performance_value(payload)
+    safety_flags = payload.safety_flags if payload.safety_flags is not None else payload.flags
+    label_confidence = payload.label_confidence
+    if label_confidence is not None and not (0 <= label_confidence <= 1):
+        _error(422, "INVALID_LABEL_CONFIDENCE", "label_confidence는 0과 1 사이여야 합니다.")
     with _conn() as conn:
         ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
         if not ev:
@@ -2624,13 +3580,31 @@ def upsert_label(event_id: str, payload: RehabLabelPayload):
 
         conn.execute(
             """
-            INSERT INTO rehab_labels (event_id, session_type, core_task, assist_level, performance, flags, notes, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO rehab_labels (
+              event_id, session_type, core_task, custom_task, body_position,
+              assist_level, performance, review_status, reviewer_person_id,
+              usable_for_training, label_confidence, repetition_count,
+              hold_duration_seconds, tolerance, fatigue_level, compensations,
+              caregiver_present, flags, notes, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(event_id) DO UPDATE SET
               session_type=excluded.session_type,
               core_task=excluded.core_task,
+              custom_task=excluded.custom_task,
+              body_position=excluded.body_position,
               assist_level=excluded.assist_level,
               performance=excluded.performance,
+              review_status=excluded.review_status,
+              reviewer_person_id=excluded.reviewer_person_id,
+              usable_for_training=excluded.usable_for_training,
+              label_confidence=excluded.label_confidence,
+              repetition_count=excluded.repetition_count,
+              hold_duration_seconds=excluded.hold_duration_seconds,
+              tolerance=excluded.tolerance,
+              fatigue_level=excluded.fatigue_level,
+              compensations=excluded.compensations,
+              caregiver_present=excluded.caregiver_present,
               flags=excluded.flags,
               notes=excluded.notes,
               updated_at=CURRENT_TIMESTAMP
@@ -2639,16 +3613,30 @@ def upsert_label(event_id: str, payload: RehabLabelPayload):
                 event_id,
                 payload.session_type,
                 payload.core_task,
+                payload.custom_task.strip(),
+                payload.body_position.strip(),
                 payload.assist_level,
-                payload.performance,
-                json.dumps(payload.flags, ensure_ascii=False),
+                performance,
+                payload.review_status.strip() or "reviewed",
+                payload.reviewer_person_id.strip(),
+                1 if payload.usable_for_training else 0,
+                label_confidence,
+                payload.repetition_count,
+                payload.hold_duration_seconds,
+                payload.tolerance.strip(),
+                payload.fatigue_level.strip(),
+                json.dumps(payload.compensations, ensure_ascii=False),
+                None if payload.caregiver_present is None else (1 if payload.caregiver_present else 0),
+                json.dumps(safety_flags, ensure_ascii=False),
                 payload.notes,
             ),
         )
+        _enqueue_moai_sync_job(conn, event_id, "label_upserted")
         conn.commit()
         label = _get_label_by_event_id(conn, event_id)
 
-    return {"ok": True, "label": label}
+    manifest = _build_pilot_manifest_for_event(event_id, resolve_identity=False)
+    return {"ok": True, "label": label, "readiness": manifest["readiness"]}
 
 
 @app.get("/labels/{event_id}")
@@ -2736,6 +3724,120 @@ class AgentCueDryRunRequest(BaseModel):
         extra = "forbid"
 
 
+class VisitSessionStartRequest(BaseModel):
+    organization_id: str
+    provider_person_id: str
+    subject_person_id: str
+    encounter_id: Optional[str] = None
+    patient_alias: str = "Patient"
+    history_summary: str = ""
+    update_glass: bool = True
+
+
+class VisitSessionPhaseRequest(BaseModel):
+    phase: str
+    cue: Optional[str] = None
+    update_glass: bool = True
+
+
+class VisitSessionRecordingRequest(BaseModel):
+    is_recording: bool
+    update_glass: bool = True
+
+
+class VisitSessionEventRequest(BaseModel):
+    event_id: str
+    update_glass: bool = True
+
+
+def _apply_visit_session_hud(session: dict) -> dict:
+    hud = visit_hud_state(session)
+    with _glass_lock:
+        _glass_state.update(hud)
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    return hud
+
+
+def _build_visit_session_write_plan(session: dict) -> dict:
+    draft = session.get("draft_progress_note") or {}
+    if not draft:
+        draft = {
+            "subjective": session.get("history_summary") or "방문 재활 세션 진행.",
+            "objective": f"phase={session.get('phase')}, linked_events={len(session.get('event_ids') or [])}",
+            "assessment": "AI 추출 결과는 clinician review 전 draft 상태.",
+            "plan": "진행 노트 초안을 검토 후 확정.",
+        }
+    bundle = build_moai_export_bundle(
+        event={
+            "id": session["id"],
+            "event_type": "text",
+            "created_at": session.get("started_at"),
+            "owner_org_id": session["organization_id"],
+            "owner_provider_person_id": session["provider_person_id"],
+            "subject_person_id": session["subject_person_id"],
+            "physio_session_id": session["encounter_id"],
+            "raw_text": session.get("history_summary") or "",
+        },
+        soap={
+            "s": draft.get("subjective"),
+            "o": draft.get("objective"),
+            "a": draft.get("assessment"),
+            "p": draft.get("plan"),
+        },
+        subject_person_id=session["subject_person_id"],
+        provider_person_id=session["provider_person_id"],
+        encounter_id=session["encounter_id"],
+        capture_device="rayban_visit_session",
+    )
+    if bundle.get("notes"):
+        bundle["notes"][0]["payload"]["note_format"] = "progress"
+        bundle["notes"][0]["payload"]["source_type"] = "visit_session_orchestrator"
+        bundle["notes"][0]["payload"]["note_content"] = "\n".join(
+            str(draft.get(key) or "") for key in ["subjective", "objective", "assessment", "plan"]
+        ).strip()
+        bundle["notes"][0]["payload"]["ai_draft_snapshot"] = {
+            "source_system": "rayban_pt",
+            "source_visit_session_id": session["id"],
+            "linked_event_ids": session.get("event_ids") or [],
+        }
+    return build_moai_write_plan(bundle)
+
+
+GLASS_COMMANDS = {
+    "toggle_recording",
+    "start_live",
+    "open_capture_history",
+    "primary_action",
+    "select_patient",
+    "show_recommendations",
+}
+NEURAL_BAND_GESTURE_MAP = {
+    "toggle_recording": "toggle_recording",
+    "tap": "toggle_recording",
+    "single_tap": "toggle_recording",
+    "double_tap": "toggle_recording",
+    "press": "toggle_recording",
+    "squeeze": "toggle_recording",
+    "down": "primary_action",
+    "swipe_down": "primary_action",
+    "downward": "primary_action",
+    "select": "primary_action",
+    "enter": "primary_action",
+    "confirm": "primary_action",
+    "open": "primary_action",
+    "primary_action": "primary_action",
+    "patient": "select_patient",
+    "select_patient": "select_patient",
+    "patient_select": "select_patient",
+    "history": "open_capture_history",
+    "records": "open_capture_history",
+    "open_history": "open_capture_history",
+    "recommend": "show_recommendations",
+    "recommendations": "show_recommendations",
+    "assessment": "show_recommendations",
+    "evaluation": "show_recommendations",
+    "show_recommendations": "show_recommendations",
+}
 AGENT_ALLOWED_TOOLS = {"generate_session_cue"}
 AGENT_BLOCKED_ACTIONS = [
     "production_supabase_write",
@@ -2814,43 +3916,6 @@ def _existing_event_id_for_audit(event_id: Optional[str]) -> Optional[str]:
         return None
 
 
-GLASS_COMMANDS = {
-    "toggle_recording",
-    "start_live",
-    "open_capture_history",
-    "primary_action",
-    "select_patient",
-    "show_recommendations",
-}
-NEURAL_BAND_GESTURE_MAP = {
-    "toggle_recording": "toggle_recording",
-    "tap": "toggle_recording",
-    "single_tap": "toggle_recording",
-    "double_tap": "toggle_recording",
-    "press": "toggle_recording",
-    "squeeze": "toggle_recording",
-    "down": "primary_action",
-    "swipe_down": "primary_action",
-    "downward": "primary_action",
-    "select": "primary_action",
-    "enter": "primary_action",
-    "confirm": "primary_action",
-    "open": "primary_action",
-    "primary_action": "primary_action",
-    "patient": "select_patient",
-    "select_patient": "select_patient",
-    "patient_select": "select_patient",
-    "history": "open_capture_history",
-    "records": "open_capture_history",
-    "open_history": "open_capture_history",
-    "recommend": "show_recommendations",
-    "recommendations": "show_recommendations",
-    "assessment": "show_recommendations",
-    "evaluation": "show_recommendations",
-    "show_recommendations": "show_recommendations",
-}
-
-
 def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
     if command != "show_recommendations":
         return None
@@ -2892,6 +3957,91 @@ def _queue_glass_command(command: str, source: str = "glass", metadata: Optional
     if cue:
         queued["cue_id"] = cue["id"]
     return queued
+
+
+@app.post("/visit-sessions/start")
+def visit_session_start(payload: VisitSessionStartRequest):
+    with _conn() as conn:
+        session = create_visit_session(
+            conn,
+            organization_id=payload.organization_id.strip(),
+            provider_person_id=payload.provider_person_id.strip(),
+            subject_person_id=payload.subject_person_id.strip(),
+            encounter_id=(payload.encounter_id or "").strip() or None,
+            patient_alias=payload.patient_alias,
+            history_summary=payload.history_summary,
+        )
+        conn.commit()
+    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    _audit_log(None, "info", f"visit session started id={session['id']}")
+    return {"status": "started", "session": session, "glass_state": hud}
+
+
+@app.get("/visit-sessions/{session_id}")
+def visit_session_get(session_id: str):
+    with _conn() as conn:
+        session = get_visit_session(conn, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="visit session not found")
+    return {"status": "done", "session": session}
+
+
+@app.post("/visit-sessions/{session_id}/phase")
+def visit_session_set_phase(session_id: str, payload: VisitSessionPhaseRequest):
+    try:
+        with _conn() as conn:
+            session = update_visit_phase(conn, session_id, payload.phase, payload.cue)
+            conn.commit()
+    except ValueError as exc:
+        _error(400, "INVALID_VISIT_PHASE", str(exc))
+    except KeyError:
+        raise HTTPException(status_code=404, detail="visit session not found")
+    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    _audit_log(None, "info", f"visit session phase id={session_id} phase={session['phase']}")
+    return {"status": "updated", "session": session, "glass_state": hud}
+
+
+@app.post("/visit-sessions/{session_id}/recording")
+def visit_session_set_recording(session_id: str, payload: VisitSessionRecordingRequest):
+    try:
+        with _conn() as conn:
+            session = set_visit_recording(conn, session_id, payload.is_recording)
+            conn.commit()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="visit session not found")
+    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    _audit_log(None, "info", f"visit session recording id={session_id} recording={payload.is_recording}")
+    return {"status": "updated", "session": session, "glass_state": hud}
+
+
+@app.post("/visit-sessions/{session_id}/events")
+def visit_session_attach_event(session_id: str, payload: VisitSessionEventRequest):
+    with _conn() as conn:
+        event_exists = conn.execute("SELECT id FROM events WHERE id = ?", (payload.event_id,)).fetchone()
+        if not event_exists:
+            raise HTTPException(status_code=404, detail="event not found")
+        try:
+            session = attach_visit_event(conn, session_id, payload.event_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="visit session not found")
+        conn.commit()
+    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    _audit_log(payload.event_id, "info", f"event attached to visit session id={session_id}")
+    return {"status": "attached", "session": session, "glass_state": hud}
+
+
+@app.post("/visit-sessions/{session_id}/end")
+def visit_session_end(session_id: str, update_glass: bool = True):
+    try:
+        with _conn() as conn:
+            session = end_visit_session(conn, session_id)
+            conn.commit()
+    except KeyError:
+        raise HTTPException(status_code=404, detail="visit session not found")
+    hud = _apply_visit_session_hud(session) if update_glass else None
+    plan = _build_visit_session_write_plan(session)
+    _audit_log(None, "info", f"visit session ended id={session_id}")
+    return {"status": "ended", "session": session, "glass_state": hud, "moai_write_plan": plan}
 
 
 @app.get("/glass/state")
