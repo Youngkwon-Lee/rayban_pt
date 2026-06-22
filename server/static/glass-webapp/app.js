@@ -200,7 +200,7 @@
     renderStatus();
     renderInsight();
     renderToggleButton();
-    renderNextButton();
+    renderMiddleButton();
     renderEndButton();
   }
 
@@ -385,17 +385,18 @@
     }
   }
 
-  function renderNextButton() {
+  function renderMiddleButton() {
     var btn = document.getElementById('next-btn');
     var label = document.getElementById('next-label');
     if (!btn || !label) return;
     if (!glassState.visit_session_id) {
       btn.dataset.action = 'next_phase';
       label.textContent = TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자';
+      btn.classList.remove('hidden');
       return;
     }
-    btn.dataset.action = 'primary_action';
-    label.textContent = '상태 새로고침';
+    btn.removeAttribute('data-action');
+    btn.classList.add('hidden');
   }
 
   function renderEndButton() {
@@ -412,8 +413,8 @@
       return;
     }
     if (readiness === 'sync_pending') {
-      label.textContent = '전송 상태';
-      btn.dataset.action = 'primary_action';
+      label.textContent = '완료';
+      btn.removeAttribute('data-action');
       btn.classList.add('disabled-look');
       return;
     }
@@ -478,7 +479,7 @@
       select_patient: '환자 선택',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
       end_visit_session: '세션 종료',
-      primary_action: '상태 새로고침',
+      primary_action: '상태',
     };
     return labels[command] || command;
   }
@@ -500,7 +501,9 @@
   }
 
   function focusables() {
-    return Array.prototype.slice.call(document.querySelectorAll('.focusable'));
+    return Array.prototype.slice.call(document.querySelectorAll('.focusable')).filter(function (el) {
+      return !el.classList.contains('hidden') && el.offsetParent !== null;
+    });
   }
 
   function moveFocus(delta) {
