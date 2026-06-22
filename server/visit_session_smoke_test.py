@@ -359,6 +359,11 @@ def main() -> None:
         candidate = next_visit.json()["candidate"]
         require(candidate["patient_alias"] == "P*", "HUD should expose only lens-safe patient alias")
         require(candidate["encounter_id"] == "44444444-4444-4444-8444-444444444444", "HUD candidate should keep encounter")
+        local_preview = candidate["record_preview"]
+        require(local_preview["source"] == "local.record_preview", "local HUD candidate should use local record preview")
+        require(any("visit candidate seed" in line for line in local_preview["lines"]), "local preview should include local event text")
+        require("원격 기록 연결 전" not in json.dumps(local_preview, ensure_ascii=False), "local preview should not show remote placeholder")
+        require("source_visit_session_id" not in json.dumps(local_preview, ensure_ascii=False), "local preview should hide internal visit marker ids")
 
         start = client.post(
             "/neural-band/event",

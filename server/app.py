@@ -4639,29 +4639,59 @@ def _record_preview_detail_lines(
     return lines[:3]
 
 
-def _attach_record_preview_to_candidate(candidate: Optional[dict]) -> Optional[dict]:
+def _build_local_candidate_record_preview(conn: sqlite3.Connection, candidate: dict) -> dict:
+    source_event_id = str(candidate.get("source_event_id") or "").strip()
+    encounter_id = str(candidate.get("encounter_id") or "").strip()
+    rows = conn.execute(
+        """
+        SELECT id, event_type, raw_text, intent, created_at
+        FROM events
+        WHERE id = ? OR physio_session_id = ?
+        ORDER BY created_at DESC
+        LIMIT 3
+        """,
+        (source_event_id, encounter_id),
+    ).fetchall()
+    lines: list[str] = []
+    for row in rows:
+        raw_text = str(row[2] or "")
+        if raw_text.startswith("Visit session ended; source_visit_session_id="):
+            text = "세션 종료 · 노트 초안 생성"
+        else:
+            text = _short_lens_text(raw_text or row[3] or row[1] or "방문 기록", limit=58)
+        if text:
+            label = "기록" if str(row[1] or "").lower() == "text" else (row[1] or "기록")
+            line = f"{label}: {text}"
+            if line not in lines:
+                lines.append(line)
+    if not lines:
+        lines = ["로컬 기록 없음", "physio_app 상세에서 전체 확인"]
+    return {
+        "title": "기록 요약",
+        "cue": "로컬 기록 " + str(len(rows)),
+        "lines": lines[:3],
+        "lens_safe": True,
+        "source": "local.record_preview",
+        "signals": {
+            "notes_count": len(rows),
+            "pending_notes_count": 0,
+            "observations_count": 0,
+            "activity_sessions_count": 0,
+            "media_summaries_count": 0,
+        },
+    }
+
+
+def _attach_record_preview_to_candidate(conn: sqlite3.Connection, candidate: Optional[dict]) -> Optional[dict]:
     if not candidate:
         return None
     hydrated = dict(candidate)
     subject_person_id = str(hydrated.get("subject_person_id") or "").strip()
     organization_id = str(hydrated.get("organization_id") or "").strip()
-    if subject_person_id and _looks_like_uuid(subject_person_id) and (not organization_id or _looks_like_uuid(organization_id)):
+    if hydrated.get("source") != "local_events" and subject_person_id and _looks_like_uuid(subject_person_id) and (not organization_id or _looks_like_uuid(organization_id)):
         hydrated["record_preview"] = _build_subject_record_preview(hydrated)
     else:
-        hydrated["record_preview"] = {
-            "title": "기록 요약",
-            "cue": "로컬 후보 기록",
-            "lines": ["원격 기록 연결 전", "physio_app 상세에서 전체 확인"],
-            "lens_safe": True,
-            "source": "local.record_preview",
-            "signals": {
-                "notes_count": 0,
-                "pending_notes_count": 0,
-                "observations_count": 0,
-                "activity_sessions_count": 0,
-                "media_summaries_count": 0,
-            },
-        }
+        hydrated["record_preview"] = _build_local_candidate_record_preview(conn, hydrated)
     return hydrated
 
 
@@ -5090,7 +5120,7 @@ def glass_visits_next(request: Request, offset: int = 0, candidate_id: Optional[
             offset=max(0, offset),
             scope=scope,
         )
-    candidate = _attach_record_preview_to_candidate(candidate)
+        candidate = _attach_record_preview_to_candidate(conn, candidate)
     if not candidate:
         return {
             "status": "empty",
