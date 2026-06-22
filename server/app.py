@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -2710,6 +2710,99 @@ class GlassCommandRequest(BaseModel):
     command: str
 
 
+class AgentCueDryRunRequest(BaseModel):
+    requested_tool: str = "generate_session_cue"
+    event_id: Optional[str] = None
+    session_id: Optional[str] = None
+    mode: str = "ready"
+    patient_alias: Optional[str] = None
+    observed_phase: Optional[str] = Field(default=None, max_length=80)
+    context_summary: Optional[str] = Field(default=None, max_length=240)
+    risk_flags: list[str] = Field(default_factory=list, max_length=5)
+    update_glass: bool = False
+
+    class Config:
+        extra = "forbid"
+
+
+AGENT_ALLOWED_TOOLS = {"generate_session_cue"}
+AGENT_BLOCKED_ACTIONS = [
+    "production_supabase_write",
+    "patient_message",
+    "billing",
+    "delete_data",
+    "model_training",
+    "model_promotion",
+]
+
+
+def _short_lens_text(text: str, limit: int = 80) -> str:
+    clean = re.sub(r"\s+", " ", redact_phi(text or "")).strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _build_dry_run_session_cue(payload: AgentCueDryRunRequest) -> dict:
+    mode = (payload.mode or "ready").strip().lower()
+    flags = [str(flag).strip().lower() for flag in payload.risk_flags if str(flag).strip()]
+    phase = _short_lens_text(payload.observed_phase or "", limit=36)
+    summary = _short_lens_text(payload.context_summary or "", limit=54)
+
+    severity = "info"
+    title = "세션 준비"
+    body = "환자 선택과 동의를 확인하세요."
+
+    if mode == "recording":
+        title = "관찰 유지"
+        body = "자세와 피로 신호를 짧게 확인하세요."
+    elif mode in {"uploading", "analyzing"}:
+        title = "처리 중"
+        body = "완료 후 iPhone에서 초안을 검토하세요."
+    elif mode == "success":
+        title = "검토 필요"
+        body = "차트와 라벨을 승인 전 확인하세요."
+    elif mode == "error":
+        title = "앱 확인"
+        body = "상세 오류는 iPhone에서 확인하세요."
+        severity = "warning"
+
+    if "fall" in flags or "pain" in flags or "safety" in flags:
+        title = "안전 확인"
+        body = "중단 여부를 확인하고 도움을 요청하세요."
+        severity = "warning"
+    elif "fatigue" in flags:
+        title = "피로 관찰"
+        body = "휴식 필요 여부를 확인하세요."
+        severity = "info"
+
+    if phase and mode == "recording":
+        body = _short_lens_text(f"{phase}: {body}", limit=80)
+    elif summary and mode == "ready":
+        body = _short_lens_text(summary, limit=80)
+
+    return {
+        "id": str(uuid.uuid4()),
+        "title": _short_lens_text(title, limit=32),
+        "body": _short_lens_text(body, limit=80),
+        "severity": severity,
+        "lens_safe": True,
+        "source": "agent_gateway_dry_run",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+
+def _existing_event_id_for_audit(event_id: Optional[str]) -> Optional[str]:
+    if not event_id:
+        return None
+    try:
+        with _conn() as conn:
+            row = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
+        return event_id if row else None
+    except Exception:
+        return None
+
+
 @app.get("/glass/state")
 def glass_state_get():
     with _glass_lock:
@@ -2745,6 +2838,40 @@ def glass_command_post(cmd: GlassCommandRequest):
             "created_at": datetime.utcnow().isoformat() + "Z",
         }
     return {"ok": True, "command": cmd.command}
+
+
+@app.post("/agent/cue-dry-run")
+def agent_cue_dry_run(payload: AgentCueDryRunRequest):
+    requested_tool = (payload.requested_tool or "").strip()
+    audit_event_id = _existing_event_id_for_audit(payload.event_id)
+    if requested_tool not in AGENT_ALLOWED_TOOLS:
+        _audit_log(audit_event_id, "warning", f"agent blocked tool={requested_tool or '-'}")
+        _error(403, "AGENT_TOOL_NOT_ALLOWED", "Only generate_session_cue is enabled in dry-run mode.")
+
+    cue = _build_dry_run_session_cue(payload)
+    glass_state_updated = False
+
+    if payload.update_glass:
+        with _glass_lock:
+            _glass_state["last_insight"] = cue
+            _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        glass_state_updated = True
+
+    _audit_log(
+        audit_event_id,
+        "info",
+        f"agent dry-run cue generated update_glass={str(glass_state_updated).lower()} mode={payload.mode}",
+    )
+    return {
+        "status": "dry_run",
+        "tool": requested_tool,
+        "cue": cue,
+        "glass_state_updated": glass_state_updated,
+        "allowed_actions": sorted(AGENT_ALLOWED_TOOLS),
+        "blocked_actions": AGENT_BLOCKED_ACTIONS,
+        "requires_clinician_review": True,
+        "writes_enabled": False,
+    }
 
 
 @app.get("/glass/command")

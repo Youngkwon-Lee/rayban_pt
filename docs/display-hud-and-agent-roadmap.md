@@ -67,6 +67,15 @@ glasses camera/audio
 
 For `rayban_pt`, an agent layer should be added only after pilot capture and review gates are stable.
 
+The first gateway is intentionally dry-run only:
+
+- `POST /agent/cue-dry-run`
+- allowlisted tool: `generate_session_cue`
+- optional HUD update: `update_glass=true`
+- rejects raw transcript/note fields through the request schema
+- redacts PHI-like text before creating lens output
+- never writes clinical records, messages patients, trains models, or promotes models
+
 Candidate architecture:
 
 ```text
