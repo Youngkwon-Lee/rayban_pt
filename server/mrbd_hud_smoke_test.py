@@ -27,13 +27,15 @@ def main() -> None:
     require('aria-label="HUD commands"' in glass_html, "HUD command rail missing")
     require('aria-label="Visit phase"' not in glass_html, "HUD should not duplicate encounter workflow phases")
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
-    require('id="capture-role-label"' in glass_html, "HUD capture role indicator missing")
-    require('id="role-counts-label"' in glass_html, "HUD role counts indicator missing")
+    require('id="capture-role-label"' not in glass_html, "HUD should not expose capture role controls")
+    require('id="role-counts-label"' not in glass_html, "HUD should not expose role counters")
     require("phase-chip" not in glass_html, "HUD should use capture labels instead of phase chips")
-    for command in ["toggle_recording", "next_phase", "next_role", "show_recommendations", "end_visit_session"]:
+    for command in ["toggle_recording", "next_phase", "end_visit_session"]:
         require(f'data-action="{command}"' in glass_html, f"HUD command missing: {command}")
+    for command in ["next_role", "show_recommendations"]:
+        require(f'data-action="{command}"' not in glass_html, f"HUD should not expose optional command: {command}")
     require('data-action="open_capture_history"' not in glass_html, "HUD should not expose full history navigation")
-    require(glass_html.count("focusable command-button") == 5, "HUD should expose five focusable commands")
+    require(glass_html.count("focusable command-button") == 3, "HUD should expose three focusable commands")
 
     glass_css = client.get("/glass-app/styles.css")
     require(glass_css.status_code == 200, "glass webapp CSS should load")
@@ -57,19 +59,15 @@ def main() -> None:
         "TARGET_CANDIDATE_ID",
         "commandResultLabel",
         "safePatientAlias",
-        "renderCaptureRole",
         "renderNextButton",
-        "normalizedCaptureRole",
-        "roleCountsLabel",
-        "capture_role",
-        "event_role_counts",
-        "next_role",
         "renderReadiness",
         "bridge_url",
         "normalizeBaseUrl",
         "BRIDGE_BASE_URL",
     ]:
         require(token in js_text, f"HUD JS should include {token}")
+    for token in ["renderCaptureRole", "normalizedCaptureRole", "roleCountsLabel", "next_role", "show_recommendations"]:
+        require(token not in js_text, f"HUD JS should not include optional workflow UI token: {token}")
     require("querySelectorAll('.focusable')" in js_text, "HUD JS should drive focusable D-pad navigation")
 
     webapp_root = Path(__file__).parent / "static" / "glass-webapp"
