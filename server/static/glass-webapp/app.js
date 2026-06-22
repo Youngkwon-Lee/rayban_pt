@@ -150,6 +150,7 @@
       })
       .then(function (data) {
         if (!data || !data.command) return;
+        if (handleNavigationCommand(data.command)) return;
         if (data.command === 'cycle_record_preview' || data.command === 'open_capture_history') {
           cycleRecordPreview();
           return;
@@ -780,6 +781,47 @@
     showToast('기록 ' + (recordPreviewLineIndex + 1) + '/' + preview.lines.length, 'success');
   }
 
+  function selectFocused() {
+    var focused = document.activeElement;
+    if (!focused || !focused.classList.contains('focusable')) {
+      focusCommand(0);
+      focused = document.activeElement;
+    }
+    if (focused && focused.classList.contains('focusable')) focused.click();
+  }
+
+  function handleNavigationCommand(command) {
+    if (command === 'nav_right') {
+      focusCommand(1);
+      return true;
+    }
+    if (command === 'nav_left') {
+      focusCommand(-1);
+      return true;
+    }
+    if (command === 'nav_up') {
+      if (document.activeElement && document.activeElement.classList.contains('command-button')) {
+        focusRecordCard();
+      } else {
+        focusCommand(0);
+      }
+      return true;
+    }
+    if (command === 'nav_down') {
+      if (document.activeElement && document.activeElement.id === 'status-card') {
+        scrollRecordCard(1);
+      } else {
+        focusCommand(0);
+      }
+      return true;
+    }
+    if (command === 'select_focused') {
+      selectFocused();
+      return true;
+    }
+    return false;
+  }
+
   function moveFocus(delta) {
     var items = focusables();
     if (!items.length) return;
@@ -826,8 +868,7 @@
         return;
       }
       if (e.key === 'Enter' || e.key === ' ') {
-        var focused = document.activeElement;
-        if (focused && focused.classList.contains('focusable')) focused.click();
+        selectFocused();
         e.preventDefault();
         return;
       }

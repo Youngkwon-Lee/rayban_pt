@@ -368,13 +368,13 @@ def main() -> None:
         start = client.post(
             "/neural-band/event",
             headers=headers(),
-            json={"gesture": "confirm", "device_id": "band-visit-start"},
+            json={"gesture": "start_visit", "device_id": "band-visit-start"},
         )
         require(start.status_code == 200, f"visit session start should succeed: {start.text}")
         body = start.json()["executed"]
         session = body["session"]
         session_id = session["id"]
-        require(body["executed"] is True, "neural band confirm should execute visit start")
+        require(body["executed"] is True, "neural band explicit start should execute visit start")
         require(session["phase"] == "pre_review", "initial phase should be pre_review")
         require(session["encounter_id"] == "44444444-4444-4444-8444-444444444444", "encounter should persist")
         require(body["glass_state"]["patient"] == "P*", "HUD should receive lens-safe patient alias")
@@ -387,12 +387,12 @@ def main() -> None:
         )
         require(record_gesture.status_code == 200, f"record preview gesture should succeed: {record_gesture.text}")
         require(
-            record_gesture.json()["mapped_command"] == "cycle_record_preview",
-            "neural band up gesture should map to record preview",
+            record_gesture.json()["mapped_command"] == "nav_up",
+            "neural band up gesture should map to HUD up navigation",
         )
         queued_record = client.get("/glass/command", headers=headers()).json()
-        require(queued_record["command"] == "cycle_record_preview", "record preview command should be queued for HUD")
-        require(queued_record["metadata"]["gesture"] == "swipe_up", "record preview command should preserve gesture")
+        require(queued_record["command"] == "nav_up", "up navigation command should be queued for HUD")
+        require(queued_record["metadata"]["gesture"] == "swipe_up", "up navigation command should preserve gesture")
 
         phase = client.post(
             f"/visit-sessions/{session_id}/phase",
@@ -561,11 +561,11 @@ def main() -> None:
         end = client.post(
             "/neural-band/event",
             headers=headers(),
-            json={"gesture": "confirm", "device_id": "band-visit-smoke"},
+            json={"gesture": "end_visit_session", "device_id": "band-visit-smoke"},
         )
         require(end.status_code == 200, f"visit end should succeed: {end.text}")
         ended = end.json()["executed"]
-        require(ended["executed"] is True, "neural band confirm should execute final end")
+        require(ended["executed"] is True, "neural band explicit end should execute final end")
         require(ended["session"]["status"] == "ended", "session should end")
         require(ended["session"]["phase"] == "summary", "ended phase should be summary")
         require(ended["glass_state"]["is_recording"] is False, "HUD should stop recording on end")
