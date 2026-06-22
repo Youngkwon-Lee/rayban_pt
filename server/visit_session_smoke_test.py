@@ -378,6 +378,12 @@ def main() -> None:
         require(ended["session"]["status"] == "ended", "session should end")
         require(ended["session"]["phase"] == "summary", "ended phase should be summary")
         require(ended["glass_state"]["is_recording"] is False, "HUD should stop recording on end")
+        require(ended["glass_state"]["readiness"] == "sync_pending", "HUD should show pending sync readiness")
+        require("전송 대기" in ended["glass_state"]["message"], "HUD should show PHI-safe pending sync cue")
+        sync_job = ended["moai_sync_job"]
+        require(sync_job["status"] == "pending", "visit end should enqueue pending moai sync job")
+        require(sync_job["trigger_reason"] == "visit_session_ended", "sync job should record visit trigger")
+        require(sync_job["operation_count"] >= 2, "sync job should include planned operations")
         plan = ended["moai_write_plan"]
         require(plan["summary"]["skipped_count"] == 0, f"visit plan should not skip: {plan['skipped']}")
         targets = [op["target_table"] for op in plan["operations"]]
@@ -396,6 +402,10 @@ def main() -> None:
             "home program assigned" in note_content,
             "progress note should summarize linked home program event",
         )
+        jobs = client.get("/moai-sync/jobs?status=pending&limit=10", headers=headers())
+        require(jobs.status_code == 200, "pending moai sync jobs should load")
+        queued = [job for job in jobs.json()["items"] if job["event_id"] == sync_job["event_id"]]
+        require(queued, "visit session sync job should be visible in pending queue")
 
     print("OK: visit session orchestration smoke test passed")
 

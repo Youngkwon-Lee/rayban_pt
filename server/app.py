@@ -3825,6 +3825,88 @@ def _build_visit_session_write_plan(session: dict) -> dict:
     return build_moai_write_plan(bundle)
 
 
+def _visit_sync_marker_event_id(session: dict) -> str:
+    return f"visit-sync-{session['id']}"
+
+
+def _enqueue_visit_session_sync_job(conn: sqlite3.Connection, session: dict, plan: dict) -> dict:
+    marker_event_id = _visit_sync_marker_event_id(session)
+    conn.execute(
+        """
+        INSERT INTO events (
+            id, source, event_type, raw_text, intent, status, patient_name,
+            owner_org_id, owner_provider_person_id, subject_person_id,
+            physio_client_id, physio_session_id
+        )
+        VALUES (?, 'visit_session_orchestrator', 'text', ?, 'note', 'processed', NULL, ?, ?, ?, NULL, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          raw_text=excluded.raw_text,
+          status='processed',
+          physio_session_id=excluded.physio_session_id
+        """,
+        (
+            marker_event_id,
+            f"Visit session ended; source_visit_session_id={session['id']}",
+            session["organization_id"],
+            session["provider_person_id"],
+            session["subject_person_id"],
+            session["encounter_id"],
+        ),
+    )
+    _enqueue_moai_sync_job(conn, marker_event_id, "visit_session_ended")
+    conn.execute(
+        """
+        UPDATE moai_sync_jobs
+        SET operation_count = ?,
+            skipped_count = ?,
+            last_plan_summary = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE event_id = ?
+        """,
+        (
+            int(plan.get("summary", {}).get("operation_count") or 0),
+            int(plan.get("summary", {}).get("skipped_count") or 0),
+            json.dumps(_summarize_moai_plan_for_job(plan), ensure_ascii=False),
+            marker_event_id,
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT id, event_id, status, trigger_reason, operation_count, skipped_count, attempts,
+               last_error, last_plan_summary, last_result_summary, last_attempted_at,
+               synced_at, created_at, updated_at
+        FROM moai_sync_jobs
+        WHERE event_id = ?
+        """,
+        (marker_event_id,),
+    ).fetchone()
+    return _moai_sync_job_from_row(row)
+
+
+def _apply_visit_sync_pending_hud(session: dict, sync_job: dict) -> dict:
+    hud = visit_hud_state(session)
+    hud.update(
+        {
+            "mode": "summary",
+            "message": f"노트 초안 준비 · 전송 대기 {sync_job.get('operation_count', 0)}건",
+            "readiness": "sync_pending",
+            "error_state": None,
+            "last_insight": {
+                "id": f"sync-pending:{sync_job['event_id']}",
+                "title": "전송 대기",
+                "body": "노트 초안 준비 · 서버 큐 대기",
+                "severity": "info",
+                "lens_safe": True,
+                "source": "moai_sync_queue",
+            },
+        }
+    )
+    with _glass_lock:
+        _glass_state.update(hud)
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    return hud
+
+
 def _trim_event_text(value: Optional[str], limit: int = 140) -> str:
     text = re.sub(r"\s+", " ", value or "").strip()
     if len(text) <= limit:
@@ -4463,6 +4545,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             with _conn() as conn:
                 pre_review = None
                 plan = None
+                sync_job = None
                 if session_id:
                     existing = get_visit_session(conn, session_id)
                     if existing and existing.get("status") == "active":
@@ -4471,6 +4554,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                             session = end_visit_session(conn, session_id)
                             session = _refresh_visit_progress_note_from_events(conn, session)
                             plan = _build_visit_session_write_plan(session)
+                            sync_job = _enqueue_visit_session_sync_job(conn, session, plan)
                         else:
                             session = existing
                     else:
@@ -4509,7 +4593,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                 "error_code": "NO_GLASS_VISIT_CANDIDATE",
                 "message": "No visit candidate with canonical identity is available.",
             }
-        hud = _apply_visit_session_hud(session, insight=pre_review)
+        hud = _apply_visit_sync_pending_hud(session, sync_job) if sync_job else _apply_visit_session_hud(session, insight=pre_review)
         _audit_log(None, "info", f"HUD command executed command={command} source={source} id={session['id']}")
         result = {
             "ok": True,
@@ -4525,6 +4609,8 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             result["candidate"] = candidate
         if plan:
             result["moai_write_plan"] = plan
+        if sync_job:
+            result["moai_sync_job"] = sync_job
         return result
 
     if not session_id:
@@ -4554,6 +4640,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             existing = get_visit_session(conn, session_id)
             if not existing:
                 raise KeyError(session_id)
+            sync_job = None
             if command == "toggle_recording":
                 session = set_visit_recording(
                     conn,
@@ -4585,6 +4672,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                     session = end_visit_session(conn, session_id)
                     session = _refresh_visit_progress_note_from_events(conn, session)
                     plan = _build_visit_session_write_plan(session)
+                    sync_job = _enqueue_visit_session_sync_job(conn, session, plan)
                 else:
                     session = update_visit_phase(conn, session_id, "summary", _build_visit_end_checkpoint_cue(existing))
                     plan = None
@@ -4609,7 +4697,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             "message": "visit session not found",
         }
 
-    hud = _apply_visit_session_hud(session)
+    hud = _apply_visit_sync_pending_hud(session, sync_job) if sync_job else _apply_visit_session_hud(session)
     _audit_log(None, "info", f"HUD command executed command={command} source={source} id={session_id}")
     result = {
         "ok": True,
@@ -4623,6 +4711,8 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
         result["metadata"] = metadata
     if plan:
         result["moai_write_plan"] = plan
+    if sync_job:
+        result["moai_sync_job"] = sync_job
     return result
 
 
@@ -4737,13 +4827,14 @@ def visit_session_end(session_id: str, update_glass: bool = True):
         with _conn() as conn:
             session = end_visit_session(conn, session_id)
             session = _refresh_visit_progress_note_from_events(conn, session)
+            plan = _build_visit_session_write_plan(session)
+            sync_job = _enqueue_visit_session_sync_job(conn, session, plan)
             conn.commit()
     except KeyError:
         raise HTTPException(status_code=404, detail="visit session not found")
-    hud = _apply_visit_session_hud(session) if update_glass else None
-    plan = _build_visit_session_write_plan(session)
+    hud = _apply_visit_sync_pending_hud(session, sync_job) if update_glass else None
     _audit_log(None, "info", f"visit session ended id={session_id}")
-    return {"status": "ended", "session": session, "glass_state": hud, "moai_write_plan": plan}
+    return {"status": "ended", "session": session, "glass_state": hud, "moai_write_plan": plan, "moai_sync_job": sync_job}
 
 
 @app.get("/glass/visits/next")
