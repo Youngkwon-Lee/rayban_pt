@@ -34,6 +34,7 @@
   var visitCandidate = null;
   var visitCandidateOffset = 0;
   var lastCandidateLoadAt = 0;
+  var recordPreviewLineIndex = 0;
 
   function apiHeaders() {
     var h = { 'Content-Type': 'application/json' };
@@ -98,6 +99,10 @@
       completeVisitHudSession();
       return;
     }
+    if (command === 'cycle_record_preview') {
+      cycleRecordPreview();
+      return;
+    }
     if (command === 'next_phase' && !glassState.visit_session_id) {
       if (TARGET_CANDIDATE_ID) {
         showToast('환자 고정됨', 'success');
@@ -145,11 +150,13 @@
       })
       .then(function (data) {
         visitCandidate = data.candidate || null;
+        recordPreviewLineIndex = 0;
         lastCandidateLoadAt = Date.now();
         render();
       })
       .catch(function () {
         visitCandidate = null;
+        recordPreviewLineIndex = 0;
         lastCandidateLoadAt = Date.now();
         render();
       });
@@ -195,6 +202,7 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         visitCandidate = null;
         visitCandidateOffset = 0;
+        recordPreviewLineIndex = 0;
         lastCandidateLoadAt = 0;
         glassState = {
           patient: null,
@@ -239,6 +247,7 @@
         if (data.glass_state) {
           glassState = data.glass_state;
           visitCandidate = null;
+          recordPreviewLineIndex = 0;
           render();
         }
         showToast('세션 시작됨', 'success');
@@ -301,6 +310,17 @@
     setText('status-caption', copy.caption);
   }
 
+  function cycleRecordPreview() {
+    var preview = recordPreview();
+    if (!preview || !preview.lines || !preview.lines.length) {
+      showToast('표시할 기록 없음', 'error');
+      return;
+    }
+    recordPreviewLineIndex = (recordPreviewLineIndex + 1) % preview.lines.length;
+    renderStatus();
+    showToast('기록 ' + (recordPreviewLineIndex + 1) + '/' + preview.lines.length, 'success');
+  }
+
   function normalizedMode() {
     if (glassState.is_recording) return 'recording';
     return glassState.mode || 'standby';
@@ -316,7 +336,7 @@
       return {
         kicker: TARGET_CANDIDATE_ID ? 'SELECTED' : 'CONFIRM',
         title: preview ? '기록 확인' : '환자 확인',
-        meta: preview ? preview.cue : selectedAlias + ' 방문을 시작할까요?',
+        meta: preview ? activePreviewLine(preview) : selectedAlias + ' 방문을 시작할까요?',
         caption: preview ? previewCaption(preview) : (TARGET_CANDIDATE_ID ? '선택된 오늘 방문입니다. 시작을 눌러 세션을 엽니다.' : '다른 환자면 다음 환자를 누르세요.'),
       };
     }
@@ -332,7 +352,7 @@
       return {
         kicker: 'REVIEW',
         title: '기록 확인',
-        meta: preview ? preview.cue : (m || '녹화를 시작할 수 있습니다.'),
+        meta: preview ? activePreviewLine(preview) : (m || '녹화를 시작할 수 있습니다.'),
         caption: preview ? previewCaption(preview) : '상세 기록은 physio_app encounter에서 검토합니다.',
       };
     }
@@ -397,13 +417,26 @@
 
   function previewCaption(preview) {
     var lines = preview && preview.lines;
-    if (lines && lines.length) return lines.slice(0, 2).join(' · ');
+    if (lines && lines.length) return '기록 ' + (normalizedPreviewIndex(preview) + 1) + '/' + lines.length + ' · 선택하면 다음 기록';
     var signals = (preview && preview.signals) || {};
     var parts = [];
     if (signals.notes_count) parts.push('노트 ' + signals.notes_count);
     if (signals.observations_count) parts.push('평가 ' + signals.observations_count);
     if (signals.activity_sessions_count) parts.push('중재/과제 ' + signals.activity_sessions_count);
     return parts.length ? parts.join(' · ') : '요약만 렌즈에 표시합니다.';
+  }
+
+  function activePreviewLine(preview) {
+    var lines = preview && preview.lines;
+    if (lines && lines.length) return lines[normalizedPreviewIndex(preview)];
+    return (preview && preview.cue) || '기록 요약 없음';
+  }
+
+  function normalizedPreviewIndex(preview) {
+    var lines = preview && preview.lines;
+    if (!lines || !lines.length) return 0;
+    if (recordPreviewLineIndex >= lines.length) recordPreviewLineIndex = 0;
+    return Math.max(0, recordPreviewLineIndex);
   }
 
   function renderInsight() {
@@ -483,6 +516,12 @@
     if (!glassState.visit_session_id) {
       btn.dataset.action = 'next_phase';
       label.textContent = TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자';
+      btn.classList.remove('hidden');
+      return;
+    }
+    if (normalizedMode() === 'pre_review' && recordPreview()) {
+      btn.dataset.action = 'cycle_record_preview';
+      label.textContent = '기록 보기';
       btn.classList.remove('hidden');
       return;
     }
@@ -569,6 +608,7 @@
       start_visit: '시작 확인',
       select_patient: '환자 선택',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
+      cycle_record_preview: '기록 보기',
       end_visit_session: '세션 종료',
       complete_visit_hud: '완료',
       primary_action: '상태',
