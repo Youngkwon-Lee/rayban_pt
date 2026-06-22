@@ -259,18 +259,26 @@ def attach_visit_event(
         event_ids.append(event_id)
     ref_role = normalize_event_role(role, phase or existing.get("phase"))
     ref_phase = (phase or existing.get("phase") or "").strip()
-    event_refs = [ref for ref in existing.get("event_refs") or [] if ref.get("event_id") != event_id]
-    event_refs.append(
-        {
-            "event_id": event_id,
-            "role": ref_role,
-            "phase": ref_phase,
-            "attached_at": utc_now(),
-        }
-    )
+    now = utc_now()
+    next_ref = {
+        "event_id": event_id,
+        "role": ref_role,
+        "phase": ref_phase,
+        "attached_at": now,
+    }
+    event_refs = []
+    updated_ref = False
+    for ref in existing.get("event_refs") or []:
+        if ref.get("event_id") == event_id:
+            event_refs.append({**ref, **next_ref})
+            updated_ref = True
+        else:
+            event_refs.append(ref)
+    if not updated_ref:
+        event_refs.append(next_ref)
     conn.execute(
         "UPDATE visit_sessions SET event_ids = ?, event_refs = ?, updated_at = ? WHERE id = ?",
-        (_as_json(event_ids), _as_json(event_refs), utc_now(), session_id),
+        (_as_json(event_ids), _as_json(event_refs), now, session_id),
     )
     return get_visit_session(conn, session_id) or {}
 

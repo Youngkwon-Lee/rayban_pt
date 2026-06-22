@@ -246,6 +246,10 @@ def main() -> None:
         )
         require(hud_next.status_code == 200, "HUD next phase command should succeed")
         require(hud_next.json()["executed"]["session"]["phase"] == "intervention", "HUD next phase should advance workflow")
+        require(
+            hud_next.json()["executed"]["glass_state"]["capture_role"] == "intervention",
+            "intervention phase should set active capture role",
+        )
 
         ingest = client.post(
             "/ingest",
@@ -263,6 +267,25 @@ def main() -> None:
         )
         require(ingest.status_code == 200, f"ingest should succeed: {ingest.text}")
         event_id = ingest.json()["event_id"]
+        require(
+            ingest.json()["visit_auto_attach"]["role"] == "intervention",
+            "active visit should auto-attach ingest with intervention role",
+        )
+        require(
+            ingest.json()["visit_auto_attach"]["session"]["event_ids"] == [event_id],
+            "auto-attached event should persist in active visit",
+        )
+
+        next_role = client.post(
+            "/glass/command",
+            headers=headers(),
+            json={"command": "next_role"},
+        )
+        require(next_role.status_code == 200, "HUD next role command should succeed")
+        require(
+            next_role.json()["executed"]["glass_state"]["capture_role"] == "home_program",
+            "next_role should cycle intervention to home program",
+        )
 
         home_program = client.post(
             "/ingest",
@@ -280,6 +303,14 @@ def main() -> None:
         )
         require(home_program.status_code == 200, f"home program ingest should succeed: {home_program.text}")
         home_program_event_id = home_program.json()["event_id"]
+        require(
+            home_program.json()["visit_auto_attach"]["role"] == "home_program",
+            "active visit should auto-attach ingest with home program role",
+        )
+        require(
+            home_program.json()["visit_auto_attach"]["session"]["event_ids"] == [event_id, home_program_event_id],
+            "auto-attached home program event should persist in active visit",
+        )
 
         attach = client.post(
             f"/visit-sessions/{session_id}/events",
@@ -287,12 +318,15 @@ def main() -> None:
             json={"event_id": event_id, "role": "intervention"},
         )
         require(attach.status_code == 200, "event attach should succeed")
-        require(attach.json()["session"]["event_ids"] == [event_id], "attached event should persist")
+        require(
+            attach.json()["session"]["event_ids"] == [event_id, home_program_event_id],
+            "reattached event should not duplicate or drop existing events",
+        )
         require(
             attach.json()["session"]["event_refs"][0]["role"] == "intervention",
             "attached event should persist explicit role",
         )
-        require(attach.json()["glass_state"]["session_count"] == 1, "HUD count should reflect event count")
+        require(attach.json()["glass_state"]["session_count"] == 2, "HUD count should reflect event count")
         require(
             attach.json()["glass_state"]["event_role_counts"]["intervention"] == 1,
             "HUD should count intervention events",

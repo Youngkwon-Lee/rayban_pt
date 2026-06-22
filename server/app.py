@@ -1980,6 +1980,7 @@ def _process_event(
         soap_id = str(uuid.uuid4())
         soap = {"s": s, "o": o, "a": a, "p": p}
 
+    visit_auto_attach = None
     with _conn() as conn:
         conn.execute(
             "INSERT INTO events (id, source, event_type, raw_text, intent, status, patient_name, owner_org_id, owner_provider_person_id, subject_person_id, physio_client_id, physio_session_id) "
@@ -2013,6 +2014,7 @@ def _process_event(
                 "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
                 (str(uuid.uuid4()), event_id, "info", masking_audit),
             )
+        visit_auto_attach = _auto_attach_event_to_active_visit(conn, event_id)
         conn.commit()
 
     ack = {"note": "기록 완료", "question": "질문 접수 완료", "command": "명령 접수 완료"}[intent]
@@ -2049,6 +2051,7 @@ def _process_event(
             "physio_client_id": physio_client_id,
             "physio_session_id": physio_session_id,
         },
+        "visit_auto_attach": visit_auto_attach,
     }
 
 
@@ -3684,6 +3687,7 @@ _glass_state: dict = {
     "recording_start": None,
     "session_count": 0,
     "event_role_counts": {},
+    "capture_role": "observation",
     "last_insight": None,
     "updated_at": None,
 }
@@ -3698,6 +3702,7 @@ class GlassStateUpdate(BaseModel):
     recording_start: Optional[str] = None
     session_count: Optional[int] = None
     event_role_counts: Optional[dict] = None
+    capture_role: Optional[str] = None
     visit_session_id: Optional[str] = None
     phase: Optional[str] = None
     readiness: Optional[str] = None
@@ -3769,6 +3774,7 @@ def _apply_visit_session_hud(session: dict, insight: Optional[dict] = None) -> d
     if insight:
         hud["last_insight"] = insight
     with _glass_lock:
+        hud["capture_role"] = _glass_state.get("capture_role") or _role_for_visit_phase(hud.get("phase"))
         _glass_state.update(hud)
         _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
     return hud
@@ -3924,10 +3930,55 @@ def _refresh_visit_progress_note_from_events(conn: sqlite3.Connection, session: 
     return refreshed or session
 
 
+VISIT_EVENT_ROLE_ORDER = ["observation", "assessment", "intervention", "home_program"]
+
+
+def _role_for_visit_phase(phase: Optional[str]) -> str:
+    clean = (phase or "").strip()
+    if clean in {"assessment", "intervention", "home_program"}:
+        return clean
+    return "observation"
+
+
+def _next_visit_event_role(current: Optional[str]) -> str:
+    clean = (current or "").strip()
+    try:
+        index = VISIT_EVENT_ROLE_ORDER.index(clean)
+    except ValueError:
+        return VISIT_EVENT_ROLE_ORDER[0]
+    return VISIT_EVENT_ROLE_ORDER[(index + 1) % len(VISIT_EVENT_ROLE_ORDER)]
+
+
+def _set_hud_capture_role(role: str) -> None:
+    with _glass_lock:
+        _glass_state["capture_role"] = role
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+
+def _active_capture_role_from_hud(default_phase: Optional[str] = None) -> str:
+    with _glass_lock:
+        role = str(_glass_state.get("capture_role") or "").strip()
+    return role if role in VISIT_EVENT_ROLE_ORDER else _role_for_visit_phase(default_phase)
+
+
+def _auto_attach_event_to_active_visit(conn: sqlite3.Connection, event_id: str) -> Optional[dict]:
+    session_id = _active_visit_session_id_from_hud()
+    if not session_id:
+        return None
+    session = get_visit_session(conn, session_id)
+    if not session or session.get("status") != "active":
+        return None
+    role = _active_capture_role_from_hud(str(session.get("phase") or ""))
+    attached = attach_visit_event(conn, session_id, event_id, role=role, phase=session.get("phase"))
+    hud = _apply_visit_session_hud(attached)
+    return {"session": attached, "role": role, "glass_state": hud}
+
+
 GLASS_COMMANDS = {
     "start_visit",
     "toggle_recording",
     "next_phase",
+    "next_role",
     "end_visit_session",
     "start_live",
     "open_capture_history",
@@ -3960,6 +4011,10 @@ NEURAL_BAND_GESTURE_MAP = {
     "right": "next_phase",
     "forward": "next_phase",
     "phase": "next_phase",
+    "role": "next_role",
+    "next_role": "next_role",
+    "swipe_left": "next_role",
+    "left": "next_role",
     "patient": "select_patient",
     "select_patient": "select_patient",
     "patient_select": "select_patient",
@@ -4381,7 +4436,7 @@ def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]
 
 
 VISIT_PHASE_ORDER = ["pre_review", "assessment", "intervention", "home_program", "summary"]
-SERVER_EXECUTED_GLASS_COMMANDS = {"start_visit", "toggle_recording", "next_phase", "end_visit_session"}
+SERVER_EXECUTED_GLASS_COMMANDS = {"start_visit", "toggle_recording", "next_phase", "next_role", "end_visit_session"}
 
 
 def _active_visit_session_id_from_hud() -> Optional[str]:
@@ -4507,10 +4562,22 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                 )
                 plan = None
             elif command == "next_phase":
+                next_phase = _next_visit_phase(str(existing.get("phase") or "pre_review"))
                 session = update_visit_phase(
                     conn,
                     session_id,
-                    _next_visit_phase(str(existing.get("phase") or "pre_review")),
+                    next_phase,
+                )
+                _set_hud_capture_role(_role_for_visit_phase(next_phase))
+                plan = None
+            elif command == "next_role":
+                next_role = _next_visit_event_role(_active_capture_role_from_hud(str(existing.get("phase") or "")))
+                _set_hud_capture_role(next_role)
+                session = update_visit_phase(
+                    conn,
+                    session_id,
+                    str(existing.get("phase") or "pre_review"),
+                    f"기록 모드 {next_role}",
                 )
                 plan = None
             else:
