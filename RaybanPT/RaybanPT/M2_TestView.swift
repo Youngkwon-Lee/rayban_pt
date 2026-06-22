@@ -32,6 +32,10 @@ struct M2_TestView: View {
     @State private var glassExperience = GlassExperienceCoordinator.shared
     @State private var selectedTab: Tab = .camera
     @State private var showServerSetup = false
+    @State private var showLaunchIntro = true
+    @State private var showReadyPanel = false
+    @State private var didRunLaunchIntro = false
+    @AppStorage("smart_glass_live.has_seen_ready_panel") private var hasSeenReadyPanel = false
 
     // 업로드 완료 액션
     @State private var showPostUploadDialog = false
@@ -41,7 +45,45 @@ struct M2_TestView: View {
     // 미라벨 뱃지
     @State private var unlabeledBadge = 0
 
-    enum Tab { case audio, text, camera, charts }
+    enum Tab: CaseIterable {
+        case camera, audio, text, charts
+
+        var title: String {
+            switch self {
+            case .camera: return "카메라"
+            case .audio: return "음성"
+            case .text: return "텍스트"
+            case .charts: return "차트"
+            }
+        }
+
+        var iconName: String {
+            switch self {
+            case .camera: return "camera.viewfinder"
+            case .audio: return "waveform"
+            case .text: return "text.bubble.fill"
+            case .charts: return "doc.text.fill"
+            }
+        }
+
+        var shortHint: String {
+            switch self {
+            case .camera: return "촬영"
+            case .audio: return "STT"
+            case .text: return "메모"
+            case .charts: return "기록"
+            }
+        }
+
+        var accent: Color {
+            switch self {
+            case .camera: return DS.ColorToken.electric
+            case .audio: return DS.ColorToken.success
+            case .text: return DS.ColorToken.violet
+            case .charts: return DS.ColorToken.primaryAlt
+            }
+        }
+    }
 
     static var defaultBridgeURL: URL {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
@@ -67,36 +109,19 @@ struct M2_TestView: View {
     }
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            // 카메라 탭
-            NavigationStack {
-                StreamView(client: vm.client)
-            }
-            .tabItem { Label("카메라", systemImage: "video.fill") }
-            .tag(Tab.camera)
-
-            // 음성 탭
-            NavigationStack {
-                AudioTab(vm: vm)
-            }
-            .tabItem { Label("음성", systemImage: "mic.fill") }
-            .tag(Tab.audio)
-
-            // 텍스트 탭
-            NavigationStack {
-                TextTab(vm: vm)
-            }
-            .tabItem { Label("텍스트", systemImage: "text.bubble.fill") }
-            .tag(Tab.text)
-
-            // 차트 탭
-            ChartListView(client: vm.client)
-            .tabItem { Label("차트", systemImage: "doc.text.fill") }
-            .tag(Tab.charts)
-            .badge(unlabeledBadge > 0 ? unlabeledBadge : 0)
+        ZStack {
+            selectedTabContent
         }
         .tint(DS.ColorToken.primary)
-        .toolbar(isGuidedModeActive ? .hidden : .visible, for: .tabBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if showsBottomTabDock {
+                SmartGlassTabDock(selectedTab: $selectedTab)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
         .overlay(alignment: .top) {
             if selectedTab == .camera {
                 DeviceStatusBanner(deviceManager: deviceManager)
@@ -112,15 +137,45 @@ struct M2_TestView: View {
             }
         }
         .overlay(alignment: .bottomTrailing) {
-            if !isGuidedModeActive {
+            if !isGuidedModeActive && !showLaunchIntro && !showReadyPanel && selectedTab != .camera {
                 Button {
                     showServerSetup = true
                 } label: {
                     ServerSettingsButton(needsSetup: needsServerSetup)
                 }
                 .accessibilityIdentifier("serverSettingsButton")
-                .padding(.bottom, 68)
+                .padding(.bottom, showsBottomTabDock ? 104 : 22)
                 .padding(.trailing, 16)
+            }
+        }
+        .overlay {
+            if showLaunchIntro {
+                SmartGlassLaunchIntro()
+                    .transition(.opacity.combined(with: .scale(scale: 1.04)))
+                    .zIndex(10)
+            }
+        }
+        .overlay {
+            if showReadyPanel {
+                SmartGlassReadyPanel(
+                    isServerReady: !needsServerSetup,
+                    isGlassConnected: deviceManager.linkState == .connected,
+                    onStart: {
+                        completeReadyPanel(tab: .camera)
+                    },
+                    onOpenServer: {
+                        hasSeenReadyPanel = true
+                        withAnimation(.spring(response: 0.42, dampingFraction: 0.88)) {
+                            showReadyPanel = false
+                        }
+                        showServerSetup = true
+                    },
+                    onSelectTab: { tab in
+                        completeReadyPanel(tab: tab)
+                    }
+                )
+                .transition(.opacity.combined(with: .scale(scale: 1.02)))
+                .zIndex(9)
             }
         }
         // MARK: 업로드 완료 다이얼로그
@@ -156,14 +211,20 @@ struct M2_TestView: View {
             if oldTab == .charts { Task { await refreshBadge() } }
         }
         .sheet(isPresented: $showServerSetup) {
-            ServerSetupSheet(client: vm.client) { newURL, newAPIKey, newOrgId, newProviderPersonId in
+            ServerSetupSheet(client: vm.client) { newURL, newAPIKey, newOrgId, newProviderPersonId, newSubjectPersonId in
                 UserDefaults.standard.set(newURL, forKey: "bridge_base_url")
                 UserDefaults.standard.set(newAPIKey, forKey: "bridge_api_key")
                 UserDefaults.standard.set(newOrgId, forKey: "glasspt_owner_org_id")
                 UserDefaults.standard.set(newProviderPersonId, forKey: "glasspt_owner_provider_person_id")
+                UserDefaults.standard.set(newSubjectPersonId, forKey: "glasspt_subject_person_id")
                 vm.client.updateBaseURL(URL(string: newURL)!)
                 vm.client.updateAPIKey(newAPIKey)
                 vm.client.updateOwnerScope(orgId: newOrgId, providerPersonId: newProviderPersonId)
+                vm.client.updatePhysioContext(
+                    clientId: UserDefaults.standard.string(forKey: "glasspt_physio_client_id") ?? "",
+                    sessionId: UserDefaults.standard.string(forKey: "glasspt_physio_session_id") ?? "",
+                    subjectPersonId: newSubjectPersonId
+                )
                 NotificationCenter.default.post(name: Notification.Name("bridgeSettingsDidChange"), object: nil)
                 Task { await refreshBadge() }
             }
@@ -171,14 +232,81 @@ struct M2_TestView: View {
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("bridgeSettingsDidChange"))) { _ in
             let orgId = UserDefaults.standard.string(forKey: "glasspt_owner_org_id") ?? ""
             let providerPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id") ?? ""
+            let subjectPersonId = UserDefaults.standard.string(forKey: "glasspt_subject_person_id") ?? ""
             vm.client.updateOwnerScope(orgId: orgId, providerPersonId: providerPersonId)
+            vm.client.updatePhysioContext(
+                clientId: UserDefaults.standard.string(forKey: "glasspt_physio_client_id") ?? "",
+                sessionId: UserDefaults.standard.string(forKey: "glasspt_physio_session_id") ?? "",
+                subjectPersonId: subjectPersonId
+            )
         }
         .onReceive(NotificationCenter.default.publisher(for: .glassExperienceLaunchRequested)) { _ in
             selectedTab = .camera
+            showReadyPanel = false
+            hasSeenReadyPanel = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openServerSetupRequested)) { _ in
+            showServerSetup = true
         }
         .task { await refreshBadge() }
         .onAppear {
-            if needsServerSetup { showServerSetup = true }
+            runLaunchIntroIfNeeded()
+        }
+    }
+
+    private var showsBottomTabDock: Bool {
+        !isGuidedModeActive && !showLaunchIntro && !showReadyPanel
+    }
+
+    @ViewBuilder
+    private var selectedTabContent: some View {
+        switch selectedTab {
+        case .camera:
+            NavigationStack {
+                StreamView(client: vm.client)
+            }
+        case .audio:
+            NavigationStack {
+                AudioTab(vm: vm)
+            }
+        case .text:
+            NavigationStack {
+                TextTab(vm: vm)
+            }
+        case .charts:
+            ChartListView(client: vm.client)
+        }
+    }
+
+    private func runLaunchIntroIfNeeded() {
+        guard !didRunLaunchIntro else { return }
+        didRunLaunchIntro = true
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_650_000_000)
+            withAnimation(.spring(response: 0.62, dampingFraction: 0.88)) {
+                showLaunchIntro = false
+            }
+
+            if !hasSeenReadyPanel {
+                try? await Task.sleep(nanoseconds: 220_000_000)
+                withAnimation(.spring(response: 0.48, dampingFraction: 0.88)) {
+                    showReadyPanel = true
+                }
+                return
+            }
+
+            guard needsServerSetup else { return }
+            try? await Task.sleep(nanoseconds: 260_000_000)
+            showServerSetup = true
+        }
+    }
+
+    private func completeReadyPanel(tab: Tab) {
+        hasSeenReadyPanel = true
+        selectedTab = tab
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.88)) {
+            showReadyPanel = false
         }
     }
 
@@ -202,7 +330,7 @@ struct M2_TestView: View {
             }
             .shadow(color: .black.opacity(0.18), radius: 8, y: 3)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TactileScaleButtonStyle())
         .accessibilityLabel("일반 화면으로 전환")
     }
 
@@ -210,6 +338,459 @@ struct M2_TestView: View {
     private func refreshBadge() async {
         guard let events = try? await vm.client.recentEvents(limit: 50) else { return }
         unlabeledBadge = events.filter { !$0.has_label }.count
+    }
+}
+
+// MARK: - 첫 진입 준비 화면
+
+private struct SmartGlassReadyPanel: View {
+    let isServerReady: Bool
+    let isGlassConnected: Bool
+    let onStart: () -> Void
+    let onOpenServer: () -> Void
+    let onSelectTab: (M2_TestView.Tab) -> Void
+
+    var body: some View {
+        ZStack {
+            LaunchBackdrop(time: Date().timeIntervalSinceReferenceDate)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Spacer(minLength: 18)
+
+                VStack(spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.white.opacity(0.08))
+                            .frame(width: 92, height: 92)
+                            .rotationEffect(.degrees(45))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(DS.ColorToken.electric.opacity(0.32), lineWidth: 1)
+                                    .rotationEffect(.degrees(45))
+                            }
+
+                        Image(systemName: "eyeglasses")
+                            .font(.system(size: 40, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+
+                    VStack(spacing: 7) {
+                        Text("Kinelo AR")
+                            .font(.system(size: 30, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+
+                        Text("현장 입력 준비")
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.68))
+                    }
+                }
+
+                VStack(spacing: 10) {
+                    ReadyStatusRow(
+                        title: "서버",
+                        detail: isServerReady ? "저장 준비됨" : "설정 필요",
+                        iconName: "server.rack",
+                        isReady: isServerReady,
+                        actionTitle: isServerReady ? nil : "설정",
+                        action: onOpenServer
+                    )
+
+                    ReadyStatusRow(
+                        title: "글래스",
+                        detail: isGlassConnected ? "연결됨" : "앱에서 연결 후 시작",
+                        iconName: "eyeglasses",
+                        isReady: isGlassConnected,
+                        actionTitle: nil,
+                        action: {}
+                    )
+                }
+                .padding(14)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                }
+
+                Button(action: onStart) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "camera.viewfinder")
+                            .font(.system(size: 15, weight: .bold))
+                        Text("현장 입력 시작")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.black)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(
+                        LinearGradient(
+                            colors: [DS.ColorToken.electric, DS.ColorToken.success],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                }
+                .buttonStyle(TactileScaleButtonStyle())
+                .accessibilityIdentifier("startFieldInputButton")
+
+                HStack(spacing: 8) {
+                    ReadyQuickAction(tab: .audio) { onSelectTab(.audio) }
+                    ReadyQuickAction(tab: .text) { onSelectTab(.text) }
+                    ReadyQuickAction(tab: .charts) { onSelectTab(.charts) }
+                }
+
+                Spacer(minLength: 18)
+            }
+            .padding(.horizontal, 22)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct ReadyStatusRow: View {
+    let title: String
+    let detail: String
+    let iconName: String
+    let isReady: Bool
+    let actionTitle: String?
+    let action: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: iconName)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(isReady ? DS.ColorToken.success : DS.ColorToken.warning)
+                .frame(width: 26, height: 26)
+                .background((isReady ? DS.ColorToken.success : DS.ColorToken.warning).opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(detail)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.58))
+            }
+
+            Spacer()
+
+            if let actionTitle {
+                Button(actionTitle, action: action)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(DS.ColorToken.electric)
+                    .buttonStyle(TactileScaleButtonStyle())
+            } else {
+                Image(systemName: isReady ? "checkmark.circle.fill" : "circle.dotted")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(isReady ? DS.ColorToken.success : .white.opacity(0.36))
+            }
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+private struct ReadyQuickAction: View {
+    let tab: M2_TestView.Tab
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: tab.iconName)
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(tab.accent)
+                    .frame(width: 34, height: 34)
+                    .background(tab.accent.opacity(0.14), in: Circle())
+
+                Text(tab.title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.86))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            }
+        }
+        .buttonStyle(TactileScaleButtonStyle())
+    }
+}
+
+// MARK: - 하단 탭 독
+
+private struct CameraTabMenuButton: View {
+    @Binding var selectedTab: M2_TestView.Tab
+
+    var body: some View {
+        Menu {
+            ForEach(M2_TestView.Tab.allCases.filter { $0 != .camera }, id: \.self) { tab in
+                Button {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        selectedTab = tab
+                    }
+                } label: {
+                    Label(tab.title, systemImage: tab.iconName)
+                }
+            }
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: "square.grid.2x2.fill")
+                    .font(.system(size: 12, weight: .bold))
+                Text("전환")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(DS.ColorToken.surface, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.22), radius: 12, y: 5)
+        }
+        .accessibilityLabel("음성 텍스트 차트로 전환")
+    }
+}
+
+private struct SmartGlassTabDock: View {
+    @Binding var selectedTab: M2_TestView.Tab
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(M2_TestView.Tab.allCases, id: \.self) { tab in
+                SmartGlassTabDockButton(
+                    tab: tab,
+                    isSelected: selectedTab == tab
+                ) {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        selectedTab = tab
+                    }
+                }
+            }
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.26), radius: 18, y: 8)
+    }
+}
+
+private struct SmartGlassTabDockButton: View {
+    let tab: M2_TestView.Tab
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 4) {
+                Image(systemName: tab.iconName)
+                    .font(.system(size: 16, weight: .bold))
+                    .symbolEffect(.bounce, value: isSelected)
+
+                Text(tab.title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .foregroundStyle(isSelected ? .black : .white.opacity(0.78))
+            .frame(maxWidth: .infinity)
+            .frame(height: 54)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(tab.accent)
+                        .overlay(alignment: .topTrailing) {
+                            Text(tab.shortHint)
+                                .font(.system(size: 8, weight: .black, design: .rounded))
+                                .foregroundStyle(.black.opacity(0.64))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(.black.opacity(0.08), in: Capsule())
+                                .padding(5)
+                        }
+                }
+            }
+        }
+        .buttonStyle(TactileScaleButtonStyle())
+        .accessibilityLabel("\(tab.title) 탭")
+    }
+}
+
+// MARK: - 브랜드 인트로
+
+private struct SmartGlassLaunchIntro: View {
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let pulse = 1 + 0.04 * CGFloat(sin(time * 2.4))
+            let drift = CGFloat(sin(time * 0.8)) * 8
+
+            ZStack {
+                LaunchBackdrop(time: time)
+
+                VStack(spacing: 22) {
+                    ZStack {
+                        Circle()
+                            .fill(DS.ColorToken.electric.opacity(0.16))
+                            .frame(width: 190, height: 190)
+                            .blur(radius: 18)
+                            .scaleEffect(pulse)
+
+                        Circle()
+                            .stroke(DS.ColorToken.electric.opacity(0.24), lineWidth: 1)
+                            .frame(width: 154, height: 154)
+                            .rotationEffect(.degrees(time * 18))
+
+                        Circle()
+                            .stroke(DS.ColorToken.violet.opacity(0.20), lineWidth: 1)
+                            .frame(width: 128, height: 128)
+                            .rotationEffect(.degrees(-time * 14))
+
+                        Image(systemName: "eyeglasses")
+                            .font(.system(size: 62, weight: .semibold))
+                            .foregroundStyle(
+                                LinearGradient(
+                                    colors: [.white, DS.ColorToken.electric, DS.ColorToken.violet],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .offset(y: drift * 0.12)
+                    }
+                    .frame(width: 210, height: 210)
+
+                    VStack(spacing: 9) {
+                        Text("Kinelo AR")
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+
+                        Text("현장 입력을 바로 기록으로")
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.64))
+                    }
+
+                    HStack(spacing: 10) {
+                        LaunchStatusChip(title: "Glass", iconName: "eyeglasses")
+                        LaunchStatusChip(title: "Voice", iconName: "waveform")
+                        LaunchStatusChip(title: "Chart", iconName: "doc.text")
+                    }
+                    .padding(.top, 2)
+                }
+                .offset(y: -16 + drift * 0.18)
+                .padding(.horizontal, 28)
+            }
+            .ignoresSafeArea()
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Kinelo AR 시작 화면")
+    }
+}
+
+private struct LaunchBackdrop: View {
+    let time: TimeInterval
+
+    var body: some View {
+        Canvas { context, size in
+            let rect = CGRect(origin: .zero, size: size)
+            context.fill(
+                Path(rect),
+                with: .linearGradient(
+                    Gradient(colors: [
+                        DS.ColorToken.midnight,
+                        Color(red: 0.03, green: 0.05, blue: 0.11),
+                        Color(red: 0.015, green: 0.02, blue: 0.045)
+                    ]),
+                    startPoint: .zero,
+                    endPoint: CGPoint(x: size.width, y: size.height)
+                )
+            )
+
+            drawOrb(
+                context: &context,
+                size: size,
+                x: 0.76 + 0.06 * CGFloat(sin(time * 0.22)),
+                y: 0.24 + 0.05 * CGFloat(cos(time * 0.18)),
+                radius: 0.44,
+                color: DS.ColorToken.electric.opacity(0.24)
+            )
+            drawOrb(
+                context: &context,
+                size: size,
+                x: 0.24 + 0.05 * CGFloat(cos(time * 0.20)),
+                y: 0.78 + 0.04 * CGFloat(sin(time * 0.16)),
+                radius: 0.48,
+                color: DS.ColorToken.violet.opacity(0.22)
+            )
+        }
+        .overlay {
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.04),
+                    Color.black.opacity(0.22),
+                    Color.black.opacity(0.42)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        }
+    }
+
+    private func drawOrb(
+        context: inout GraphicsContext,
+        size: CGSize,
+        x: CGFloat,
+        y: CGFloat,
+        radius: CGFloat,
+        color: Color
+    ) {
+        let point = CGPoint(x: size.width * x, y: size.height * y)
+        let r = max(size.width, size.height) * radius
+        let rect = CGRect(x: point.x - r, y: point.y - r, width: r * 2, height: r * 2)
+
+        context.addFilter(.blur(radius: 42))
+        context.fill(
+            Path(ellipseIn: rect),
+            with: .radialGradient(
+                Gradient(colors: [color, .clear]),
+                center: point,
+                startRadius: 0,
+                endRadius: r
+            )
+        )
+    }
+}
+
+private struct LaunchStatusChip: View {
+    let title: String
+    let iconName: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: iconName)
+                .font(.system(size: 10, weight: .bold))
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(.white.opacity(0.86))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        }
     }
 }
 
@@ -685,12 +1266,13 @@ private struct HealthLine: View {
 
 private struct ServerSetupSheet: View {
     let client: BridgeClient
-    let onSave: (String, String, String, String) -> Void
+    let onSave: (String, String, String, String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var urlText: String = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
     @State private var apiKeyText: String = UserDefaults.standard.string(forKey: "bridge_api_key") ?? ""
     @State private var ownerOrgIdText: String = UserDefaults.standard.string(forKey: "glasspt_owner_org_id") ?? ""
     @State private var ownerProviderPersonIdText: String = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id") ?? ""
+    @State private var subjectPersonIdText: String = UserDefaults.standard.string(forKey: "glasspt_subject_person_id") ?? ""
     @State private var isCheckingConnection = false
     @State private var connectionMessage = ""
     @State private var connectionOK = false
@@ -772,10 +1354,13 @@ private struct ServerSetupSheet: View {
                     TextField("physio_app expert person id", text: $ownerProviderPersonIdText)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
+                    TextField("patient subject_person_id", text: $subjectPersonIdText)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
                 } header: {
                     Text("Physio App 연동")
                 } footer: {
-                    Text("physio_app의 Care Live 기록함 화면에 표시되는 조직 ID와 전문가 ID를 입력하면, 새 촬영/음성/텍스트 기록이 해당 로그인 전문가의 기록만 보이도록 정렬됩니다.")
+                    Text("조직/전문가 ID는 현장 기록 정렬에 쓰이고, subject_person_id는 moai_web gold/readiness 매핑에 쓰입니다. physio_client_id가 있어도 subject_person_id가 있으면 더 안정적입니다.")
                         .font(.caption)
                 }
 
@@ -890,7 +1475,8 @@ private struct ServerSetupSheet: View {
         let key = apiKey ?? apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines)
         let orgId = ownerOrgIdText.trimmingCharacters(in: .whitespacesAndNewlines)
         let providerPersonId = ownerProviderPersonIdText.trimmingCharacters(in: .whitespacesAndNewlines)
-        onSave(url, key, orgId, providerPersonId)
+        let subjectPersonId = subjectPersonIdText.trimmingCharacters(in: .whitespacesAndNewlines)
+        onSave(url, key, orgId, providerPersonId, subjectPersonId)
     }
 }
 
@@ -965,13 +1551,13 @@ private struct AudioTab: View {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(TactileScaleButtonStyle())
                         }
                     }
                     .padding(12)
                     .background(DS.ColorToken.panel, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 .sheet(isPresented: $showPatientPicker) {
                     PatientPickerView(selectedPatient: $selectedPatient, store: store)
                 }
@@ -1017,7 +1603,7 @@ private struct AudioTab: View {
                             .fill(audioRecorder.isRecording ? DS.ColorToken.danger.opacity(0.06) : DS.ColorToken.primary.opacity(0.06))
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
 
                 Text(audioRecorder.statusMessage)
                     .font(.caption)
@@ -1055,7 +1641,7 @@ private struct AudioTab: View {
             }
             .padding(20)
         }
-        .navigationTitle("음성 녹음")
+        .navigationTitle("음성")
         .navigationBarTitleDisplayMode(.large)
         .fileImporter(
             isPresented: $showImporter,
@@ -1148,13 +1734,13 @@ private struct TextTab: View {
                                 Image(systemName: "xmark.circle.fill")
                                     .foregroundStyle(.secondary)
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(TactileScaleButtonStyle())
                         }
                     }
                     .padding(12)
                     .background(DS.ColorToken.panel, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 .sheet(isPresented: $showPatientPicker) {
                     PatientPickerView(selectedPatient: $selectedPatient, store: store)
                 }
@@ -1188,7 +1774,7 @@ private struct TextTab: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .keyboardDoneToolbar()
-        .navigationTitle("텍스트 전송")
+        .navigationTitle("텍스트")
         .navigationBarTitleDisplayMode(.large)
         .alert("환자 동의 확인", isPresented: $showConsentAlert) {
             Button("동의 기록 후 전송") {

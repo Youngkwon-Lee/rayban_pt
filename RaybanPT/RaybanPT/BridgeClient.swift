@@ -18,6 +18,7 @@ struct IngestRequest: Codable {
     let patient_name: String?
     let owner_org_id: String?
     let owner_provider_person_id: String?
+    let subject_person_id: String?
     let physio_client_id: String?
     let physio_session_id: String?
 }
@@ -51,6 +52,7 @@ struct EventDetail: Codable {
     let intent: String?
     let status: String?
     let created_at: String?
+    let subject_person_id: String?
     let physio_client_id: String?
     let physio_session_id: String?
 }
@@ -221,6 +223,7 @@ final class BridgeClient {
     private(set) var apiKey: String
     private(set) var ownerOrgId: String
     private(set) var ownerProviderPersonId: String
+    private(set) var subjectPersonId: String
     private(set) var physioClientId: String
     private(set) var physioSessionId: String
     private let session: URLSession
@@ -232,6 +235,7 @@ final class BridgeClient {
         self.apiKey = !apiKey.isEmpty ? apiKey : (stored ?? "")
         self.ownerOrgId = UserDefaults.standard.string(forKey: "glasspt_owner_org_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.ownerProviderPersonId = UserDefaults.standard.string(forKey: "glasspt_owner_provider_person_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.subjectPersonId = UserDefaults.standard.string(forKey: "glasspt_subject_person_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.physioClientId = UserDefaults.standard.string(forKey: "glasspt_physio_client_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.physioSessionId = UserDefaults.standard.string(forKey: "glasspt_physio_session_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
@@ -250,7 +254,13 @@ final class BridgeClient {
         self.ownerProviderPersonId = providerPersonId.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func updatePhysioContext(clientId: String, sessionId: String) {
+    func updatePhysioContext(clientId: String, sessionId: String, subjectPersonId: String? = nil) {
+        if let subjectPersonId {
+            self.subjectPersonId = subjectPersonId.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(self.subjectPersonId, forKey: "glasspt_subject_person_id")
+        } else {
+            self.subjectPersonId = UserDefaults.standard.string(forKey: "glasspt_subject_person_id")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
         self.physioClientId = clientId.trimmingCharacters(in: .whitespacesAndNewlines)
         self.physioSessionId = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(self.physioClientId, forKey: "glasspt_physio_client_id")
@@ -357,6 +367,7 @@ final class BridgeClient {
             patient_name: patientName,
             owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
             owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId,
             physio_client_id: physioClientId.isEmpty ? nil : physioClientId,
             physio_session_id: physioSessionId.isEmpty ? nil : physioSessionId
         )
@@ -422,6 +433,12 @@ final class BridgeClient {
             body.appendString("\(ownerProviderPersonId)\r\n")
         }
 
+        if !subjectPersonId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"subject_person_id\"\r\n\r\n")
+            body.appendString("\(subjectPersonId)\r\n")
+        }
+
         if !physioClientId.isEmpty {
             body.appendString("--\(boundary)\r\n")
             body.appendString("Content-Disposition: form-data; name=\"physio_client_id\"\r\n\r\n")
@@ -478,6 +495,7 @@ final class BridgeClient {
             patient_name: patientName,
             owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
             owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId,
             physio_client_id: physioClientId.isEmpty ? nil : physioClientId,
             physio_session_id: physioSessionId.isEmpty ? nil : physioSessionId
         )
@@ -533,6 +551,12 @@ final class BridgeClient {
             body.appendString("--\(boundary)\r\n")
             body.appendString("Content-Disposition: form-data; name=\"owner_provider_person_id\"\r\n\r\n")
             body.appendString("\(ownerProviderPersonId)\r\n")
+        }
+
+        if !subjectPersonId.isEmpty {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"subject_person_id\"\r\n\r\n")
+            body.appendString("\(subjectPersonId)\r\n")
         }
 
         if !physioClientId.isEmpty {
@@ -661,8 +685,22 @@ final class BridgeClient {
         let event_id: String
         let session_type: String
         let core_task: String
+        let custom_task: String?
+        let body_position: String?
         let assist_level: String
         let performance: String
+        let performance_level: String?
+        let review_status: String?
+        let reviewer_person_id: String?
+        let usable_for_training: Bool?
+        let label_confidence: Double?
+        let repetition_count: Int?
+        let hold_duration_seconds: Double?
+        let tolerance: String?
+        let fatigue_level: String?
+        let compensations: [String]?
+        let caregiver_present: Bool?
+        let safety_flags: [String]?
         let flags: [String]
         let notes: String
         let updated_at: String?
@@ -678,6 +716,45 @@ final class BridgeClient {
         let label: RehabLabel?
     }
 
+    struct PilotReadiness: Codable {
+        let usable_for_schema_eval: Bool
+        let eligible_for_gold_dataset: Bool
+        let gate: String?
+        let missing_requirements: [String]
+        let gold_missing_requirements: [String]
+    }
+
+    struct PilotIdentity: Codable {
+        let organization_id: String?
+        let provider_person_id: String?
+        let subject_person_id: String?
+        let physio_client_id: String?
+        let encounter_id: String?
+        let identity_resolution_status: String?
+        let identity_resolution_notes: String?
+    }
+
+    struct PilotReadinessResponse: Codable {
+        let status: String
+        let event_id: String
+        let readiness: PilotReadiness
+        let identity: PilotIdentity?
+    }
+
+    struct MoaiWritePlanSummary: Codable {
+        let operation_count: Int
+        let skipped_count: Int
+    }
+
+    struct MoaiWritePlanResult: Codable {
+        let summary: MoaiWritePlanSummary
+    }
+
+    struct MoaiWritePlanResponse: Codable {
+        let status: String
+        let result: MoaiWritePlanResult
+    }
+
     func fetchLabel(eventId: String) async throws -> RehabLabel? {
         guard let url = URL(string: "/labels/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)
@@ -691,22 +768,73 @@ final class BridgeClient {
         return (try JSONDecoder().decode(LabelResponse.self, from: data)).label
     }
 
+    func pilotReadiness(eventId: String, resolveIdentity: Bool = false) async throws -> PilotReadinessResponse {
+        guard let url = URL(string: "/events/\(eventId)/pilot-readiness?resolve_identity=\(resolveIdentity ? "true" : "false")", relativeTo: baseURL) else {
+            throw BridgeError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                        body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return try JSONDecoder().decode(PilotReadinessResponse.self, from: data)
+    }
+
+    func moaiWritePlan(eventId: String, resolveIdentity: Bool = false) async throws -> MoaiWritePlanResponse {
+        guard let url = URL(string: "/events/\(eventId)/moai-write-plan?resolve_identity=\(resolveIdentity ? "true" : "false")", relativeTo: baseURL) else {
+            throw BridgeError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        addAuth(&req)
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw BridgeError.badStatus((resp as? HTTPURLResponse)?.statusCode ?? 0,
+                                        body: String(data: data, encoding: .utf8) ?? "")
+        }
+        return try JSONDecoder().decode(MoaiWritePlanResponse.self, from: data)
+    }
+
     func saveLabel(eventId: String, sessionType: String, coreTask: String,
+                   customTask: String = "", bodyPosition: String = "",
                    assistLevel: String, performance: String,
+                   reviewStatus: String = "reviewed",
+                   reviewerPersonId: String = "",
+                   usableForTraining: Bool = false,
+                   labelConfidence: Double? = nil,
+                   repetitionCount: Int? = nil,
+                   holdDurationSeconds: Double? = nil,
+                   tolerance: String = "",
+                   fatigueLevel: String = "",
+                   compensations: [String] = [],
+                   caregiverPresent: Bool? = nil,
                    flags: [String], notes: String) async throws -> RehabLabel? {
         guard let url = URL(string: "/labels/\(eventId)", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         addAuth(&req)
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "session_type": sessionType,
             "core_task": coreTask,
+            "custom_task": customTask,
+            "body_position": bodyPosition,
             "assist_level": assistLevel,
-            "performance": performance,
-            "flags": flags,
+            "performance_level": performance,
+            "review_status": reviewStatus,
+            "reviewer_person_id": reviewerPersonId,
+            "usable_for_training": usableForTraining,
+            "tolerance": tolerance,
+            "fatigue_level": fatigueLevel,
+            "compensations": compensations,
+            "safety_flags": flags,
             "notes": notes
         ]
+        if let labelConfidence { body["label_confidence"] = labelConfidence }
+        if let repetitionCount { body["repetition_count"] = repetitionCount }
+        if let holdDurationSeconds { body["hold_duration_seconds"] = holdDurationSeconds }
+        if let caregiverPresent { body["caregiver_present"] = caregiverPresent }
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -921,18 +1049,246 @@ final class BridgeClient {
 
     // MARK: - Glass Relay (phone-free PT HUD)
 
+    struct VisitSession: Codable, Identifiable {
+        let id: String
+        let organization_id: String
+        let provider_person_id: String
+        let subject_person_id: String
+        let encounter_id: String
+        let patient_alias: String
+        let phase: String
+        let status: String
+        let recording_status: String
+        let selected_at: String?
+        let started_at: String?
+        let ended_at: String?
+        let session_timer_started_at: String?
+        let history_summary: String?
+        let readiness: String?
+        let error_state: String?
+        let cue: String?
+        let event_ids: [String]
+        let draft_progress_note: DraftProgressNote?
+        let created_at: String?
+        let updated_at: String?
+    }
+
+    struct DraftProgressNote: Codable {
+        let note_format: String?
+        let status: String?
+        let requires_approval: Bool?
+        let subjective: String?
+        let objective: String?
+        let assessment: String?
+        let plan: String?
+    }
+
+    struct VisitGlassState: Codable {
+        let patient: String?
+        let mode: String?
+        let message: String?
+        let is_recording: Bool?
+        let recording_start: String?
+        let session_count: Int?
+        let last_insight: GlassInsight?
+    }
+
+    private struct VisitSessionStartPayload: Encodable {
+        let organization_id: String
+        let provider_person_id: String
+        let subject_person_id: String
+        let encounter_id: String?
+        let patient_alias: String
+        let history_summary: String
+        let update_glass: Bool
+    }
+
+    private struct VisitSessionPhasePayload: Encodable {
+        let phase: String
+        let cue: String?
+        let update_glass: Bool
+    }
+
+    private struct VisitSessionRecordingPayload: Encodable {
+        let is_recording: Bool
+        let update_glass: Bool
+    }
+
+    private struct VisitSessionEventPayload: Encodable {
+        let event_id: String
+        let update_glass: Bool
+    }
+
+    struct VisitSessionResponse: Codable {
+        let status: String
+        let session: VisitSession
+        let glass_state: VisitGlassState?
+    }
+
+    struct VisitSessionWritePlan: Codable {
+        let summary: MoaiWritePlanSummary?
+    }
+
+    struct VisitSessionEndResponse: Codable {
+        let status: String
+        let session: VisitSession
+        let glass_state: VisitGlassState?
+        let moai_write_plan: VisitSessionWritePlan?
+    }
+
+    @discardableResult
+    func startVisitSession(
+        organizationId: String? = nil,
+        providerPersonId: String? = nil,
+        subjectPersonId: String? = nil,
+        encounterId: String? = nil,
+        patientAlias: String,
+        historySummary: String = "",
+        updateGlass: Bool = true
+    ) async throws -> VisitSessionResponse {
+        let orgId = (organizationId ?? ownerOrgId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let providerId = (providerPersonId ?? ownerProviderPersonId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let subjectId = (subjectPersonId ?? self.subjectPersonId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let encounter = (encounterId ?? physioSessionId).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !orgId.isEmpty, !providerId.isEmpty, !subjectId.isEmpty else {
+            throw BridgeError.network("Visit session requires organization, provider, and subject person IDs.")
+        }
+
+        let payload = VisitSessionStartPayload(
+            organization_id: orgId,
+            provider_person_id: providerId,
+            subject_person_id: subjectId,
+            encounter_id: encounter.isEmpty ? nil : encounter,
+            patient_alias: patientAlias.trimmingCharacters(in: .whitespacesAndNewlines),
+            history_summary: historySummary,
+            update_glass: updateGlass
+        )
+        return try await postJSON(path: "/visit-sessions/start", body: payload)
+    }
+
+    func getVisitSession(sessionId: String) async throws -> VisitSessionResponse {
+        guard let url = URL(string: "/visit-sessions/\(sessionId)", relativeTo: baseURL) else {
+            throw BridgeError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+        return try await decodeResponse(req)
+    }
+
+    @discardableResult
+    func updateVisitPhase(sessionId: String, phase: String, cue: String? = nil, updateGlass: Bool = true) async throws -> VisitSessionResponse {
+        let payload = VisitSessionPhasePayload(phase: phase, cue: cue, update_glass: updateGlass)
+        return try await postJSON(path: "/visit-sessions/\(sessionId)/phase", body: payload)
+    }
+
+    @discardableResult
+    func setVisitRecording(sessionId: String, isRecording: Bool, updateGlass: Bool = true) async throws -> VisitSessionResponse {
+        let payload = VisitSessionRecordingPayload(is_recording: isRecording, update_glass: updateGlass)
+        return try await postJSON(path: "/visit-sessions/\(sessionId)/recording", body: payload)
+    }
+
+    @discardableResult
+    func attachVisitEvent(sessionId: String, eventId: String, updateGlass: Bool = true) async throws -> VisitSessionResponse {
+        let payload = VisitSessionEventPayload(event_id: eventId, update_glass: updateGlass)
+        return try await postJSON(path: "/visit-sessions/\(sessionId)/events", body: payload)
+    }
+
+    @discardableResult
+    func endVisitSession(sessionId: String, updateGlass: Bool = true) async throws -> VisitSessionEndResponse {
+        return try await postJSON(path: "/visit-sessions/\(sessionId)/end?update_glass=\(updateGlass ? "true" : "false")", body: EmptyPayload())
+    }
+
+    private struct EmptyPayload: Encodable {}
+
+    private func postJSON<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
+        guard let url = URL(string: path, relativeTo: baseURL) else { throw BridgeError.invalidURL }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(body)
+        addAuth(&req)
+        return try await decodeResponse(req)
+    }
+
+    private func decodeResponse<Response: Decodable>(_ req: URLRequest) async throws -> Response {
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? "(empty)"
+            throw BridgeError.badStatus(http.statusCode, body: body)
+        }
+        do {
+            return try JSONDecoder().decode(Response.self, from: data)
+        } catch {
+            throw BridgeError.decode(error.localizedDescription)
+        }
+    }
+
     struct GlassInsight: Codable {
         let id: String
         let title: String
         let body: String
     }
 
-    struct GlassStatePayload: Codable {
+    struct GlassStatePayload: Encodable {
         let patient: String?
+        let mode: String?
+        let message: String?
         let is_recording: Bool?
         let recording_start: String?
         let session_count: Int?
         let last_insight: GlassInsight?
+
+        enum CodingKeys: String, CodingKey {
+            case patient
+            case mode
+            case message
+            case is_recording
+            case recording_start
+            case session_count
+            case last_insight
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            if let patient {
+                try container.encode(patient, forKey: .patient)
+            } else {
+                try container.encodeNil(forKey: .patient)
+            }
+            if let mode {
+                try container.encode(mode, forKey: .mode)
+            } else {
+                try container.encodeNil(forKey: .mode)
+            }
+            if let message {
+                try container.encode(message, forKey: .message)
+            } else {
+                try container.encodeNil(forKey: .message)
+            }
+            if let is_recording {
+                try container.encode(is_recording, forKey: .is_recording)
+            } else {
+                try container.encodeNil(forKey: .is_recording)
+            }
+            if let recording_start {
+                try container.encode(recording_start, forKey: .recording_start)
+            } else {
+                try container.encodeNil(forKey: .recording_start)
+            }
+            if let session_count {
+                try container.encode(session_count, forKey: .session_count)
+            } else {
+                try container.encodeNil(forKey: .session_count)
+            }
+            if let last_insight {
+                try container.encode(last_insight, forKey: .last_insight)
+            } else {
+                try container.encodeNil(forKey: .last_insight)
+            }
+        }
     }
 
     struct GlassCommandResponse: Codable {
@@ -943,6 +1299,8 @@ final class BridgeClient {
 
     func pushGlassState(
         patient: String?,
+        mode: String,
+        message: String,
         isRecording: Bool,
         recordingStart: Date?,
         sessionCount: Int,
@@ -963,6 +1321,8 @@ final class BridgeClient {
 
         let payload = GlassStatePayload(
             patient: patient,
+            mode: mode,
+            message: message,
             is_recording: isRecording,
             recording_start: isoStart,
             session_count: sessionCount,

@@ -150,7 +150,12 @@ final class StreamViewModel {
             return
         }
 
-        guard stream == nil, let selector = deviceSelector else { return }
+        guard stream == nil else { return }
+        guard let selector = deviceSelector else {
+            await GlassHUDManager.shared.attachSimulatedDisplay()
+            await GlassHUDManager.shared.showStandby(patient: patientName)
+            return
+        }
 
         do {
             let session = try await ensureStartedSession(selector: selector)
@@ -158,6 +163,8 @@ final class StreamViewModel {
             await GlassHUDManager.shared.showStandby(patient: patientName)
         } catch {
             print("[MWDAT] prepareStandbyDisplay failed: \(error)")
+            await GlassHUDManager.shared.attachSimulatedDisplay()
+            await GlassHUDManager.shared.showStandby(patient: patientName)
         }
     }
 
@@ -329,7 +336,7 @@ final class StreamViewModel {
                 try await wearables.openDATGlassesAppUpdate()
             } catch {
                 print("[MWDAT] openDATGlassesAppUpdate 실패: \(error)")
-                statusMessage = "Meta AI 수동으로 열기 → App Connections → Care Live → Update app on glasses"
+                statusMessage = "Meta AI 수동으로 열기 → App Connections → Kinelo AR → Update app on glasses"
             }
         case .noEligibleDevice:
             statusMessage = "연결된 글라스 없음"
@@ -420,7 +427,7 @@ final class StreamViewModel {
         hasActiveDevice = true
         isStreaming = true
         errorMessage = nil
-        statusMessage = "Care Live 수신 중"
+        statusMessage = "Kinelo AR 수신 중"
 
         guard demoFrameTask == nil else { return }
         currentFrame = makeCurrentDemoFrame(index: 0)
@@ -430,7 +437,7 @@ final class StreamViewModel {
                 try? await Task.sleep(nanoseconds: 650_000_000)
                 guard let self else { return }
                 self.currentFrame = self.makeCurrentDemoFrame(index: index)
-                self.statusMessage = "Care Live 수신 중 · \(index)f"
+                self.statusMessage = "Kinelo AR 수신 중 · \(index)f"
                 index += 1
             }
         }

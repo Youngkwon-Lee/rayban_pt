@@ -4,6 +4,7 @@ import Observation
 struct GlassExperienceLaunchContext: Equatable {
     let patientName: String?
     let sessionLabel: String?
+    let subjectPersonId: String?
     let physioClientId: String?
     let physioSessionId: String?
 }
@@ -63,12 +64,24 @@ final class GlassExperienceCoordinator {
         bannerMessage = nil
     }
 
+    func showTransientBanner(_ message: String, seconds: TimeInterval = 3.5) {
+        bannerTask?.cancel()
+        bannerMessage = message
+        bannerTask = Task { [weak self] in
+            let delay = max(0.5, seconds)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.bannerMessage = nil
+        }
+    }
+
     private static func parseContext(from urlString: String) -> GlassExperienceLaunchContext {
         guard let url = URL(string: urlString),
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return GlassExperienceLaunchContext(
                 patientName: nil,
                 sessionLabel: nil,
+                subjectPersonId: nil,
                 physioClientId: nil,
                 physioSessionId: nil
             )
@@ -90,6 +103,7 @@ final class GlassExperienceCoordinator {
         return GlassExperienceLaunchContext(
             patientName: value("patient_name", "patient", "patientName", "client_name", "clientName"),
             sessionLabel: value("session_type", "session", "sessionName", "session_name", "program"),
+            subjectPersonId: value("subject_person_id", "person_id", "patient_person_id"),
             physioClientId: value("physio_client_id", "client_id", "clientId"),
             physioSessionId: value("physio_session_id", "session_id", "encounter_id", "sessionId")
         )
@@ -105,6 +119,6 @@ final class GlassExperienceCoordinator {
         if let sessionLabel = context.sessionLabel {
             return "\(sessionLabel) 세션 시작"
         }
-        return "Care Live에서 세션 시작"
+        return "Kinelo AR에서 세션 시작"
     }
 }

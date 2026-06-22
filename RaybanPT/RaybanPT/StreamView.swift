@@ -4,6 +4,98 @@ import UIKit
 import AVKit
 
 struct StreamView: View {
+    private enum ProcessingPhase {
+        case none
+        case uploading
+        case analyzing
+    }
+
+    private enum LiveStage: Equatable {
+        case standby
+        case ready
+        case live
+        case recording(frameCount: Int)
+        case uploading
+        case analyzing
+        case completed
+
+        var title: String {
+            switch self {
+            case .standby:
+                return "대기"
+            case .ready:
+                return "준비 완료"
+            case .live:
+                return "라이브 연결됨"
+            case .recording(let frameCount):
+                return "녹화 중 · \(frameCount)f"
+            case .uploading:
+                return "업로드 중"
+            case .analyzing:
+                return "분석 중"
+            case .completed:
+                return "기록 완료"
+            }
+        }
+
+        var compactTitle: String {
+            switch self {
+            case .standby:
+                return "대기"
+            case .ready:
+                return "준비"
+            case .live:
+                return "라이브"
+            case .recording:
+                return "REC"
+            case .uploading:
+                return "업로드"
+            case .analyzing:
+                return "분석"
+            case .completed:
+                return "완료"
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .standby:
+                return .white.opacity(0.6)
+            case .ready, .uploading:
+                return DS.ColorToken.warning
+            case .live, .completed:
+                return DS.ColorToken.success
+            case .recording:
+                return DS.ColorToken.danger
+            case .analyzing:
+                return DS.ColorToken.primary
+            }
+        }
+
+        var iconName: String {
+            switch self {
+            case .standby:
+                return "pause.circle"
+            case .ready:
+                return "checkmark.circle"
+            case .live:
+                return "dot.radiowaves.left.and.right"
+            case .recording:
+                return "record.circle.fill"
+            case .uploading:
+                return "arrow.up.circle"
+            case .analyzing:
+                return "sparkles"
+            case .completed:
+                return "checkmark.circle.fill"
+            }
+        }
+
+        var showsPill: Bool {
+            self != .standby
+        }
+    }
+
     private enum PhotoSource {
         case rayban
         case phone
@@ -37,6 +129,38 @@ struct StreamView: View {
         let id = UUID()
         let patientName: String
         let kind: Kind
+    }
+
+    private enum RecordingTriggerSource {
+        case phoneUI
+        case glass(GlassRecordToggleSource)
+
+        var shouldAutoProcess: Bool {
+            switch self {
+            case .phoneUI:
+                return false
+            case .glass(let source):
+                return source.isHandsFreeGlassPath
+            }
+        }
+
+        var startToastMessage: String {
+            switch self {
+            case .phoneUI:
+                return "🔴 영상 녹화 시작"
+            case .glass(let source):
+                return "🔴 \(source.toastLabel) · 녹화 시작"
+            }
+        }
+
+        var completionToastMessage: String {
+            switch self {
+            case .phoneUI:
+                return "📼 영상 캡처 완료 — 업로드 또는 저장 가능"
+            case .glass(let source):
+                return "📼 \(source.toastLabel) · 녹화 종료"
+            }
+        }
     }
 
     enum SaveStatus: Equatable {
@@ -88,6 +212,7 @@ struct StreamView: View {
     @State private var lastEventId: String? = nil
     @State private var analysisText: String = ""
     @State private var isCapturing = false
+    @State private var processingPhase: ProcessingPhase = .none
     @State private var toastMessage: String? = nil
     @State private var saveStatus: SaveStatus = .idle
     @State private var showCaptureHistory = false
@@ -95,6 +220,9 @@ struct StreamView: View {
     @State private var photoPermissionMessage = "사진 보관함 접근 권한이 필요합니다."
     @State private var photoSource: PhotoSource = .rayban
     @State private var pendingConsentAction: PendingConsentAction?
+    @State private var handsFreeRecordingSession = false
+    @State private var shouldAutoProcessNextRecordedVideo = false
+    @State private var isEndingVisitSession = false
 
     // STT
     @State private var audioRecorder = AudioRecorder()
@@ -103,6 +231,39 @@ struct StreamView: View {
     @State private var toastTask: Task<Void, Never>? = nil
     @State private var handledLaunchToken: UUID? = nil
 
+    private static let captureHistoryTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ko_KR")
+        formatter.dateFormat = "M/d HH:mm"
+        return formatter
+    }()
+
+    private var needsServerSetup: Bool {
+        let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
+        return stored.isEmpty
+    }
+
+    private var serverSettingsToolbarButton: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            NotificationCenter.default.post(name: .openServerSetupRequested, object: nil)
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "server.rack")
+                    .foregroundStyle(.white)
+                    .font(.system(size: 16, weight: .semibold))
+                    .padding(4)
+                
+                if needsServerSetup {
+                    Circle()
+                        .fill(DS.ColorToken.warning)
+                        .frame(width: 8, height: 8)
+                        .offset(x: 2, y: -2)
+                }
+            }
+        }
+    }
+
     init(client: BridgeClient) {
         _bridgeVm = StateObject(wrappedValue: AdapterViewModel(client: client))
     }
@@ -110,12 +271,34 @@ struct StreamView: View {
     // MARK: - Body
 
     var body: some View {
+        streamViewBody
+    }
+
+    private var streamViewBody: some View {
+        applyAlerts(
+            to: applyCaptureHistorySheet(
+                to: applyGlassObservers(
+                    to: applyCaptureObservers(
+                        to: applyCaptureSheets(
+                            to: applyLifecycleHandlers(
+                                to: applyNavigationChrome(
+                                    to: mainScene
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    }
+
+    private var mainScene: some View {
         ZStack(alignment: .bottom) {
             DS.ColorToken.cameraBackground.ignoresSafeArea()
 
             // 카메라 피드
             cameraFeed
-                .ignoresSafeArea(edges: .top)
+                .ignoresSafeArea()
 
             topOverlay
                 .animation(.spring(response: 0.3), value: vm.isStreaming)
@@ -126,137 +309,217 @@ struct StreamView: View {
             // 하단 컨트롤바
             controlBar
         }
-        .navigationTitle(isGuidedModeActive ? "Care Live" : currentPatient.map { $0.name } ?? "스마트 글라스 카메라")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
-        .toolbarColorScheme(.dark, for: .navigationBar)
-        .toolbar(isGuidedModeActive ? .hidden : .visible, for: .navigationBar)
-        .toolbar {
-            if !isGuidedModeActive {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        showPatientPicker = true
-                    } label: {
-                        patientToolbarLabel
-                    }
+    }
+
+    private func applyNavigationChrome<Content: View>(to content: Content) -> some View {
+        content
+            .navigationTitle(isGuidedModeActive ? "Kinelo AR" : currentPatient.map { $0.name } ?? "스마트 글라스 카메라")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
+            .toolbar(isGuidedModeActive ? .hidden : .visible, for: .navigationBar)
+            .toolbar {
+                streamToolbar
+            }
+            .sheet(isPresented: $showPatientPicker) {
+                PatientPickerView(selectedPatient: $currentPatient, store: store)
+            }
+    }
+
+    @ToolbarContentBuilder
+    private var streamToolbar: some ToolbarContent {
+        if !isGuidedModeActive {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showPatientPicker = true
+                } label: {
+                    patientToolbarLabel
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                HStack(spacing: 16) {
+                    serverSettingsToolbarButton
                     captureOptionsMenu
                 }
             }
         }
-        .sheet(isPresented: $showPatientPicker) {
-            PatientPickerView(selectedPatient: $currentPatient, store: store)
-        }
-        .onChange(of: currentPatient?.id) { _, _ in
-            handlePatientSelectionChanged()
-        }
-        .onChange(of: deviceSession.linkState) { _, newState in
-            handleDeviceLinkStateChanged(newState)
-        }
-        .onAppear(perform: handleViewAppear)
-        .onAppear(perform: handleDeviceSessionAppear)
-        .onAppear(perform: handleHUDAutoTestAppear)
-        .onDisappear { Task { await vm.tearDown() } }
-        // 촬영 리뷰 시트
-        .sheet(isPresented: $showPhotoSheet) {
-            if let photo = vm.capturedPhoto {
-                PhotoReviewSheet(
-                    photo: photo,
-                    isAnalyzing: $isAnalyzing,
-                    analysisText: $analysisText,
-                    saveStatus: saveStatus,
-                    onSave: handlePhotoSave,
-                    onSend: { await handlePhotoSend(photo) },
-                    onViewChart: handlePhotoChartOpen
-                )
+    }
+
+    private func applyLifecycleHandlers<Content: View>(to content: Content) -> some View {
+        content
+            .onChange(of: currentPatient?.id) { _, _ in
+                handlePatientSelectionChanged()
             }
-        }
-        .sheet(isPresented: $showVideoSheet) {
-            if let url = vm.recordedVideoURL {
-                VideoReviewSheet(
-                    videoURL: url,
-                    isAnalyzing: $isAnalyzing,
-                    analysisText: $analysisText,
-                    saveStatus: saveStatus,
-                    onSave: handleVideoSave,
-                    onSend: { await handleVideoSend(url) },
-                    onViewChart: handleVideoChartOpen
-                )
+            .onChange(of: deviceSession.linkState) { _, newState in
+                handleDeviceLinkStateChanged(newState)
             }
-        }
-        .sheet(isPresented: $showPhoneCamera) {
-            PhoneCameraPicker { image in
-                photoSource = .phone
-                vm.usePhoneCameraPhoto(image)
+            .onAppear(perform: handleViewAppear)
+            .onAppear(perform: handleDeviceSessionAppear)
+            .onAppear(perform: handleHUDAutoTestAppear)
+            .onDisappear {
+                Task { await vm.tearDown() }
             }
-            .ignoresSafeArea()
-        }
-        // 차트 시트
-        .sheet(isPresented: $showChartSheet) {
-            if let eventId = lastEventId {
-                NavigationStack {
-                    ChartDetailView(eventId: eventId, client: bridgeVm.client)
+    }
+
+    private func applyCaptureSheets<Content: View>(to content: Content) -> some View {
+        content
+            .sheet(isPresented: $showPhotoSheet) {
+                if let photo = vm.capturedPhoto {
+                    PhotoReviewSheet(
+                        photo: photo,
+                        isAnalyzing: $isAnalyzing,
+                        analysisText: $analysisText,
+                        saveStatus: saveStatus,
+                        onSave: handlePhotoSave,
+                        onSend: { await handlePhotoSend(photo) },
+                        onViewChart: handlePhotoChartOpen
+                    )
                 }
             }
-        }
-        // 라벨링 시트
-        .sheet(isPresented: $showLabelSheet) {
-            if let eventId = lastEventId {
-                LabelingView(eventId: eventId, client: bridgeVm.client)
-            }
-        }
-        .onChange(of: vm.capturedPhoto) { _, newPhoto in
-            handleCapturedPhotoChange(newPhoto)
-        }
-        .onChange(of: vm.recordedVideoURL) { _, newURL in
-            handleRecordedVideoChange(newURL)
-        }
-        .onChange(of: vm.isStreaming) { _, streaming in
-            Task {
-                if streaming {
-                    await GlassHUDManager.shared.startContext(patient: currentPatient?.name)
-                } else {
-                    await GlassHUDManager.shared.stopContext()
+            .sheet(isPresented: $showVideoSheet) {
+                if let url = vm.recordedVideoURL {
+                    VideoReviewSheet(
+                        videoURL: url,
+                        isAnalyzing: $isAnalyzing,
+                        analysisText: $analysisText,
+                        saveStatus: saveStatus,
+                        onSave: handleVideoSave,
+                        onSend: { await handleVideoSend(url) },
+                        onViewChart: handleVideoChartOpen
+                    )
                 }
             }
-        }
-        .onChange(of: vm.recorder.isRecording) { _, recording in
-            handleRecorderStateChanged(recording)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .glassCaptouchRecordToggle)) { _ in
-            Task { await toggleRecording() }
-        }
-        .onChange(of: glassExperience.pendingLaunchToken) { _, _ in
-            Task { await handlePendingGlassLaunchIfNeeded() }
-        }
-        .sheet(isPresented: $showCaptureHistory) {
+            .sheet(isPresented: $showPhoneCamera) {
+                PhoneCameraPicker { image in
+                    photoSource = .phone
+                    vm.usePhoneCameraPhoto(image)
+                }
+                .ignoresSafeArea()
+            }
+            .sheet(isPresented: $showChartSheet) {
+                if let eventId = lastEventId {
+                    NavigationStack {
+                        ChartDetailView(eventId: eventId, client: bridgeVm.client)
+                    }
+                }
+            }
+            .sheet(isPresented: $showLabelSheet) {
+                if let eventId = lastEventId {
+                    LabelingView(eventId: eventId, client: bridgeVm.client)
+                }
+            }
+    }
+
+    private func applyCaptureObservers<Content: View>(to content: Content) -> some View {
+        content
+            .onChange(of: vm.capturedPhoto) { _, newPhoto in
+                handleCapturedPhotoChange(newPhoto)
+            }
+            .onChange(of: vm.recordedVideoURL) { _, newURL in
+                handleRecordedVideoChange(newURL)
+            }
+            .onChange(of: vm.isStreaming) { _, streaming in
+                Task {
+                    if streaming {
+                        await GlassHUDManager.shared.startContext(patient: currentPatient?.name)
+                    } else {
+                        await GlassHUDManager.shared.stopContext()
+                    }
+                }
+            }
+            .onChange(of: vm.recorder.isRecording) { _, recording in
+                handleRecorderStateChanged(recording)
+            }
+    }
+
+    private func applyGlassObservers<Content: View>(to content: Content) -> some View {
+        content
+            .onReceive(NotificationCenter.default.publisher(for: .glassCaptouchRecordToggle)) { note in
+                handleGlassCaptureToggleNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassStandbyStartRequested)) { _ in
+                handleGlassStandbyStartNotification()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openCaptureHistoryRequested)) { note in
+                handleOpenCaptureHistoryNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassPrimaryActionRequested)) { note in
+                handleGlassPrimaryActionNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassPatientPickerRequested)) { _ in
+                handleGlassPatientPickerNotification()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassPatientSelectedFromHUD)) { note in
+                handleGlassPatientSelectedNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassRecommendedAssessmentRequested)) { _ in
+                handleGlassRecommendedAssessmentNotification()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassAssessmentSelectedFromHUD)) { note in
+                handleGlassAssessmentSelectedNotification(note)
+            }
+            .onChange(of: glassExperience.pendingLaunchToken) { _, _ in
+                Task { await handlePendingGlassLaunchIfNeeded() }
+            }
+    }
+
+    private func applyCaptureHistorySheet<Content: View>(to content: Content) -> some View {
+        content.sheet(isPresented: $showCaptureHistory) {
             NavigationStack {
                 CaptureHistoryView()
             }
         }
-        .alert("사진 접근 필요", isPresented: $showPhotoPermissionAlert) {
-            Button("설정 열기") {
-                openAppSettings()
+    }
+
+    private func applyAlerts<Content: View>(to content: Content) -> some View {
+        content
+            .alert("사진 접근 필요", isPresented: $showPhotoPermissionAlert) {
+                Button("설정 열기") {
+                    openAppSettings()
+                }
+                Button("닫기", role: .cancel) { }
+            } message: {
+                Text(photoPermissionMessage)
             }
-            Button("닫기", role: .cancel) { }
-        } message: {
-            Text(photoPermissionMessage)
-        }
-        .alert(item: $pendingConsentAction) { action in
-            Alert(
-                title: Text("환자 동의 확인"),
-                message: Text(consentPrompt(for: action.patientName)),
-                primaryButton: .default(Text("동의 기록 후 진행")) {
-                    Task { await recordConsentAndContinue(action) }
-                },
-                secondaryButton: .cancel(Text("취소"))
-            )
-        }
+            .alert(item: $pendingConsentAction) { action in
+                Alert(
+                    title: Text("환자 동의 확인"),
+                    message: Text(consentPrompt(for: action.patientName)),
+                    primaryButton: .default(Text("동의 기록 후 진행")) {
+                        Task { await recordConsentAndContinue(action) }
+                    },
+                    secondaryButton: .cancel(Text("취소"))
+                )
+            }
     }
 
     private var isGuidedModeActive: Bool {
         glassExperience.isGuidedModeActive
+    }
+
+    private var liveStage: LiveStage {
+        switch processingPhase {
+        case .uploading:
+            return .uploading
+        case .analyzing:
+            return .analyzing
+        case .none:
+            break
+        }
+
+        if vm.recorder.isRecording {
+            return .recording(frameCount: vm.recorder.frameCount)
+        }
+        if vm.isStreaming {
+            return .live
+        }
+        if lastEventId != nil {
+            return .completed
+        }
+        if glassHUD.isDisplayConnected {
+            return .ready
+        }
+        return .standby
     }
 
     private var topOverlay: some View {
@@ -268,7 +531,7 @@ struct StreamView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            if vm.isStreaming || vm.recorder.isRecording {
+            if liveStage.showsPill {
                 statusPill
                     .padding(.top, 8)
                     .padding(.horizontal, 16)
@@ -281,8 +544,8 @@ struct StreamView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
-            if DemoConfig.isGlassDemoEnabled, let hudSummary = glassHUD.demoHUDSummary {
-                glassHUDPreviewPill(summary: hudSummary)
+            if let hudSummary = glassHUD.demoHUDSummary {
+                glassHUDPreviewPill(summary: "HUD · \(hudSummary)")
                     .padding(.horizontal, 16)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -309,7 +572,7 @@ struct StreamView: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(DS.ColorToken.primary)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Care Live Session")
+                Text("Kinelo AR")
                     .font(.system(size: DS.FontSize.caption, weight: .bold))
                     .foregroundStyle(.white)
                 Text(guidedSessionSummary)
@@ -360,7 +623,8 @@ struct StreamView: View {
     private var cameraFeed: some View {
         GeometryReader { geo in
             ZStack {
-                DS.ColorToken.cameraBackground
+                SmartGlassMotionBackdrop()
+                    .ignoresSafeArea()
 
                 if let frame = vm.currentFrame {
                     Image(uiImage: frame)
@@ -455,21 +719,25 @@ struct StreamView: View {
     private var statusPill: some View {
         HStack(spacing: DS.Spacing.xs) {
             Circle()
-                .fill(vm.isStreaming ? DS.ColorToken.success : DS.ColorToken.warning)
+                .fill(liveStage.tint)
                 .frame(width: 8, height: 8)
-                .shadow(color: vm.isStreaming ? DS.ColorToken.success : DS.ColorToken.warning, radius: 4)
+                .shadow(color: liveStage.tint, radius: 4)
 
-            Text(vm.isStreaming
-                 ? (vm.recorder.isRecording ? "녹화 중 · \(vm.recorder.frameCount)f" : (DemoConfig.isGlassDemoEnabled ? "데모 스트리밍 중" : "스트리밍 중"))
-                 : vm.statusMessage)
+            Text(liveStage.title)
                 .font(.system(size: DS.FontSize.caption, weight: .semibold))
                 .fontWeight(.medium)
                 .foregroundStyle(.white)
 
-            if vm.recorder.isRecording {
+            if liveStage == .uploading || liveStage == .analyzing {
                 Spacer()
-                Image(systemName: "record.circle.fill")
-                    .foregroundStyle(DS.ColorToken.danger)
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.72)
+                    .tint(.white)
+            } else if case .recording = liveStage {
+                Spacer()
+                Image(systemName: liveStage.iconName)
+                    .foregroundStyle(liveStage.tint)
                     .font(.caption)
             }
         }
@@ -610,9 +878,9 @@ struct StreamView: View {
                                 .lineLimit(1)
                         }
 
-                        Label(vm.isStreaming ? "스트리밍" : vm.statusMessage, systemImage: vm.isStreaming ? "dot.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right")
+                        Label(liveStage.title, systemImage: liveStage.iconName)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(vm.isStreaming ? DS.ColorToken.success : .white.opacity(0.72))
+                            .foregroundStyle(liveStage.showsPill ? liveStage.tint : .white.opacity(0.72))
                             .lineLimit(1)
                     }
                 }
@@ -636,7 +904,7 @@ struct StreamView: View {
                             isBusy: isTranscribing
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(TactileScaleButtonStyle())
                     .disabled(isTranscribing)
 
                     Spacer(minLength: 0)
@@ -672,7 +940,7 @@ struct StreamView: View {
                                 .foregroundStyle(.white)
                         }
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(TactileScaleButtonStyle())
 
                     Spacer(minLength: 0)
 
@@ -696,7 +964,7 @@ struct StreamView: View {
             }
             .shadow(color: DS.ColorToken.primary.opacity(0.16), radius: 18, y: 10)
             .padding(.horizontal, 14)
-            .padding(.bottom, 8)
+            .padding(.bottom, controlBarBottomPadding)
         }
     }
 
@@ -720,9 +988,9 @@ struct StreamView: View {
                     .lineLimit(1)
             }
 
-            Label(vm.isStreaming ? "Live" : "대기", systemImage: vm.isStreaming ? "dot.radiowaves.left.and.right" : "pause.circle")
+            Label(liveStage.compactTitle, systemImage: liveStage.iconName)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(vm.isStreaming ? DS.ColorToken.success : .white.opacity(0.72))
+                .foregroundStyle(liveStage.showsPill ? liveStage.tint : .white.opacity(0.72))
                 .lineLimit(1)
         }
     }
@@ -742,8 +1010,10 @@ struct StreamView: View {
 
         bridgeVm.client.updatePhysioContext(
             clientId: launch.context?.physioClientId ?? "",
-            sessionId: launch.context?.physioSessionId ?? ""
+            sessionId: launch.context?.physioSessionId ?? "",
+            subjectPersonId: launch.context?.subjectPersonId
         )
+        await ensureVisitSessionForCurrentPatient(historySummary: launch.context?.sessionLabel ?? "")
 
         if !vm.isStreaming {
             await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
@@ -768,6 +1038,7 @@ struct StreamView: View {
     private func handlePatientSelectionChanged() {
         withAnimation { sttText = "" }
         Task {
+            await ensureVisitSessionForCurrentPatient()
             if vm.isStreaming {
                 guard !vm.recorder.isRecording else { return }
                 await GlassHUDManager.shared.updateContextPatient(currentPatient?.name)
@@ -776,6 +1047,20 @@ struct StreamView: View {
 
             await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
         }
+    }
+
+    private func ensureVisitSessionForCurrentPatient(historySummary: String = "") async {
+        guard let patient = currentPatient else { return }
+        guard !bridgeVm.client.ownerOrgId.isEmpty,
+              !bridgeVm.client.ownerProviderPersonId.isEmpty,
+              !bridgeVm.client.subjectPersonId.isEmpty
+        else { return }
+        if let active = bridgeVm.visitSession,
+           active.status == "active",
+           active.subject_person_id == bridgeVm.client.subjectPersonId {
+            return
+        }
+        await bridgeVm.startVisitSession(patientAlias: patient.name, historySummary: historySummary)
     }
 
     private func handleDeviceLinkStateChanged(_ newState: LinkState) {
@@ -788,6 +1073,7 @@ struct StreamView: View {
 
     private func handleRecorderStateChanged(_ recording: Bool) {
         Task {
+            await bridgeVm.setVisitRecording(recording)
             if recording {
                 await GlassHUDManager.shared.startRecording(patient: currentPatient?.name)
             } else {
@@ -818,9 +1104,18 @@ struct StreamView: View {
     }
 
     private func handleRecordedVideoChange(_ newURL: URL?) {
-        guard newURL != nil else { return }
+        guard let newURL else { return }
         analysisText = ""
         lastEventId = nil
+        saveStatus = .idle
+        if shouldAutoProcessNextRecordedVideo {
+            shouldAutoProcessNextRecordedVideo = false
+            showVideoSheet = false
+            Task {
+                await processHandsFreeRecordedVideo(newURL)
+            }
+            return
+        }
         showVideoSheet = true
     }
 
@@ -851,29 +1146,29 @@ struct StreamView: View {
         if vm.isStreaming {
             HStack(spacing: 10) {
                 Button {
-                    Task { await toggleRecording() }
+                    Task { await toggleRecording(triggeredBy: .phoneUI) }
                 } label: {
                     DockActionButton(
-                        title: vm.recorder.isRecording ? "녹화중" : "녹화",
+                        title: vm.recorder.isRecording ? "중지" : "REC",
                         systemImage: vm.recorder.isRecording ? "stop.fill" : "record.circle",
                         tint: DS.ColorToken.danger,
                         isActive: vm.recorder.isRecording
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 .disabled(isSavingInProgress)
 
                 Button {
                     Task { await stopStreamingFlow() }
                 } label: {
                     DockActionButton(
-                        title: "종료",
+                        title: "완료",
                         systemImage: "xmark",
                         tint: .white,
                         isActive: false
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
             }
         } else if lastEventId != nil {
             // 완료 후 버튼 그룹
@@ -885,7 +1180,7 @@ struct StreamView: View {
                 } label: {
                     DockActionButton(title: "라벨", systemImage: "tag.fill", tint: DS.ColorToken.warning)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 // 차트 보기 버튼
                 Button {
                     showChartSheet = true
@@ -893,7 +1188,22 @@ struct StreamView: View {
                 } label: {
                     DockActionButton(title: "차트", systemImage: "doc.text.fill", tint: DS.ColorToken.primary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
+
+                if bridgeVm.visitSession?.status == "active" {
+                    Button {
+                        Task { await finishVisitSession() }
+                    } label: {
+                        DockActionButton(
+                            title: "종료",
+                            systemImage: "checkmark.seal.fill",
+                            tint: DS.ColorToken.success,
+                            isBusy: isEndingVisitSession
+                        )
+                    }
+                    .buttonStyle(TactileScaleButtonStyle())
+                    .disabled(isEndingVisitSession)
+                }
             }
         } else if let url = vm.recordedVideoURL {
             HStack(spacing: 10) {
@@ -907,20 +1217,20 @@ struct StreamView: View {
                         isBusy: isSavingInProgress
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 .disabled(isSavingInProgress)
 
                 Button {
                     Task { await runWithConsent(.video(url)) }
                 } label: {
                     DockActionButton(
-                        title: "분석",
+                        title: videoActionButtonTitle,
                         systemImage: uploadButtonSymbol,
                         tint: DS.ColorToken.primary,
                         isBusy: isAnalyzing || isSavingInProgress
                     )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TactileScaleButtonStyle())
                 .disabled(isAnalyzing || isSavingInProgress)
                 .accessibilityLabel("분석 및 업로드")
             }
@@ -929,15 +1239,13 @@ struct StreamView: View {
                 Task { await prepareGlassesDisplay() }
             } label: {
                 DockActionButton(
-                    title: glassHUD.isDisplayConnected ? "HUD켜짐" : "안경화면",
+                    title: standbyHudButtonTitle,
                     systemImage: "rectangle.on.rectangle",
-                    tint: vm.hasActiveDevice
-                        ? (glassHUD.isDisplayConnected ? DS.ColorToken.primary : .white)
-                        : .white.opacity(0.7),
-                    isDisabled: !vm.hasActiveDevice || glassHUD.isDisplayConnected
+                    tint: glassHUD.isDisplayConnected ? DS.ColorToken.primary : .white,
+                    isDisabled: false
                 )
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TactileScaleButtonStyle())
         }
     }
 
@@ -965,7 +1273,7 @@ struct StreamView: View {
             print("[HUDAutoTest] ③ context after stop: \(hud.demoHUDSummary ?? "nil")")
 
             // 4) AI 인사이트
-            await hud.showInsight(title: "차트 생성됨", body: "환자: 테스트 김철수")
+            await hud.showSuccess(title: "차트 생성됨", body: "환자: 테스트 김철수")
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             print("[HUDAutoTest] ④ insight: \(hud.demoHUDSummary ?? "nil")")
 
@@ -991,54 +1299,73 @@ struct StreamView: View {
     }
 
     private var controlHintText: String {
-        if isGuidedModeActive && vm.recorder.isRecording {
-            return "안경 세션 녹화 중입니다. 종료하면 바로 저장하거나 분석할 수 있습니다."
+        switch liveStage {
+        case .uploading:
+            return "캡처를 전송하고 있습니다. 잠시만 기다려주세요."
+        case .analyzing:
+            return "자동 기록을 만들고 있습니다."
+        case .recording:
+            return isGuidedModeActive
+                ? "안경 세션 녹화 중입니다. 종료하면 바로 저장하거나 분석할 수 있습니다."
+                : "녹화 중입니다. 종료하면 영상 리뷰에서 저장하거나 분석할 수 있습니다."
+        case .live:
+            return isGuidedModeActive
+                ? "라이브 세션 중입니다. 가운데는 촬영, 오른쪽은 녹화와 종료입니다."
+                : "가운데 버튼은 사진 촬영, 오른쪽은 녹화와 종료입니다."
+        case .completed:
+            return "차트가 생성되었습니다. 라벨을 붙이거나 차트를 확인하세요."
+        case .ready:
+            if isGuidedModeActive {
+                return "안경 HUD가 켜져 있습니다. 환자를 확인한 뒤 시작하세요."
+            }
+            if currentPatient == nil {
+                return "안경 HUD가 켜져 있습니다. 환자를 선택한 뒤 시작하세요."
+            }
+            return "안경 HUD가 켜져 있습니다. 가운데 시작 버튼으로 촬영을 시작하세요."
+        case .standby:
+            break
         }
-        if isGuidedModeActive && vm.isStreaming {
-            return "Care Live 세션 중입니다. 가운데는 촬영, 오른쪽은 녹화와 종료입니다."
-        }
-        if isGuidedModeActive {
-            return glassHUD.isDisplayConnected
-                ? "안경 HUD가 켜져 있습니다. 환자를 확인한 뒤 라이브를 시작하세요."
-                : "안경에서 시작한 세션입니다. 오른쪽으로 화면을 켜고 라이브를 시작하세요."
-        }
-        if vm.recorder.isRecording {
-            return "녹화 중입니다. 종료하면 영상 리뷰에서 저장하거나 분석할 수 있습니다."
-        }
+
         if DemoConfig.isGlassDemoEnabled {
             if DemoConfig.usesMaskedCaptureFrame {
                 return "데모 모드: 실제 마스킹 촬영 결과를 라이브 프레임처럼 보여줍니다."
             }
             return "데모 모드: 스마트 글라스 연결과 라이브 프레임 수신 흐름을 보여줍니다."
         }
-        if vm.isStreaming {
-            return "가운데 버튼은 사진 촬영, 오른쪽은 녹화와 종료입니다."
-        }
-        if lastEventId != nil {
-            return "차트가 생성되었습니다. 라벨을 붙이거나 차트를 확인하세요."
-        }
         if vm.recordedVideoURL != nil {
-            return "녹화 영상이 준비되었습니다. 저장하거나 분석 업로드하세요."
+            return "녹화 영상이 준비되었습니다. 저장하거나 전송하세요."
         }
         if !vm.hasActiveDevice {
             return "스마트 글라스 없이 iPhone 카메라로 촬영할 수 있습니다."
         }
         if currentPatient == nil {
             return glassHUD.isDisplayConnected
-                ? "안경 HUD가 켜져 있습니다. 환자를 선택한 뒤 라이브를 시작하세요."
-                : "오른쪽 안경 화면 버튼으로 HUD를 켜고, 환자를 선택한 뒤 라이브를 시작하세요."
+                ? "안경 HUD가 켜져 있습니다. 환자를 선택한 뒤 시작하세요."
+                : "오른쪽 HUD 버튼으로 화면을 켜고, 환자를 선택한 뒤 시작하세요."
         }
         if glassHUD.isDisplayConnected {
-            return "안경 HUD가 켜져 있습니다. 가운데 라이브 버튼으로 촬영을 시작하세요."
+            return "안경 HUD가 켜져 있습니다. 가운데 시작 버튼으로 촬영을 시작하세요."
         }
-        return "스마트 글라스 연결 상태를 확인하고, 오른쪽 안경 화면 버튼으로 HUD를 켜세요."
+        return "스마트 글라스 연결 상태를 확인하고, 오른쪽 HUD 버튼으로 화면을 켜세요."
     }
 
     private var centerButtonTitle: String {
         if vm.isStreaming {
             return "촬영"
         }
-        return vm.hasActiveDevice ? "라이브" : "폰촬영"
+        return vm.hasActiveDevice ? "시작" : "폰촬영"
+    }
+
+    private var standbyHudButtonTitle: String {
+        glassHUD.isDisplayConnected ? "준비됨" : "HUD"
+    }
+
+    private var controlBarBottomPadding: CGFloat {
+        isGuidedModeActive ? 14 : 96
+    }
+
+    private var videoActionButtonTitle: String {
+        isAnalyzing ? "분석중" : "전송"
     }
 
     private func openPhoneCamera() {
@@ -1053,12 +1380,29 @@ struct StreamView: View {
     }
 
     private func prepareGlassesDisplay() async {
-        guard vm.hasActiveDevice else {
-            showToast("스마트 글라스를 먼저 연결하세요")
-            return
-        }
         await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
-        showToast("안경 화면을 준비하고 있습니다")
+        if glassHUD.isDisplayConnected {
+            showToast(vm.hasActiveDevice ? "안경 화면을 준비하고 있습니다" : "안경 HUD 미리보기")
+        } else {
+            showToast("안경 연결을 찾는 중입니다")
+        }
+    }
+
+    private func finishVisitSession() async {
+        guard bridgeVm.visitSession?.status == "active" else { return }
+        isEndingVisitSession = true
+        await bridgeVm.endVisitSession()
+        isEndingVisitSession = false
+
+        if bridgeVm.visitSession?.status == "ended" {
+            showToast("방문 세션 종료 · 진행 노트 초안 생성")
+            await GlassHUDManager.shared.showSuccess(
+                title: "세션 종료",
+                body: "iPhone에서 노트 초안을 검토하세요."
+            )
+        } else if !bridgeVm.visitStatusMessage.isEmpty {
+            showToast(bridgeVm.visitStatusMessage)
+        }
     }
 
     private func runWithConsent(_ kind: PendingConsentAction.Kind) async {
@@ -1103,12 +1447,16 @@ struct StreamView: View {
 
     private func analyzeAndSend(_ image: UIImage) async {
         isAnalyzing = true
+        processingPhase = .uploading
         analysisText = "Vision 분석 중..."
+        await GlassHUDManager.shared.showUploading(patient: currentPatient?.name)
 
         let result = await ImageAnalyzer.analyze(image)
         var displayParts = [result.summary]
         if let pose = result.pose { displayParts.append(pose.summary) }
         analysisText = displayParts.joined(separator: "\n")
+        processingPhase = .analyzing
+        await GlassHUDManager.shared.showAnalyzing(patient: currentPatient?.name)
 
         let patientTag = currentPatient.map { "환자: \($0.name)" } ?? "환자: 미지정"
         var descParts = ["[\(photoSource.analysisTitle) 캡처 분석]", patientTag]
@@ -1131,21 +1479,24 @@ struct StreamView: View {
                 source: photoSource.uploadSource
             )
             lastEventId = resp.event_id
+            await bridgeVm.attachVisitEventIfActive(resp.event_id)
             analysisText += "\n✅ 차트 생성 완료"
             bridgeVm.markDone()
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             showToast("✅ 차트 저장됨 — 오른쪽 📄 버튼으로 보기")
             let insightBody = currentPatient.map { "환자: \($0.name)" } ?? "SOAP 노트 생성됨"
-            await GlassHUDManager.shared.showInsight(title: "차트 생성됨", body: insightBody)
+            await GlassHUDManager.shared.showSuccess(title: "차트 생성됨", body: insightBody)
         } catch {
             let errMsg = bridgeErrorMessage(error)
             analysisText += "\n⚠️ 업로드 실패 → 텍스트 전송\n\(errMsg)"
             bridgeVm.sendText(description, patientName: currentPatient?.name)
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showToast("⚠️ 업로드 실패")
+            await GlassHUDManager.shared.showError(title: "업로드 실패", body: errMsg)
         }
 
         isAnalyzing = false
+        processingPhase = .none
     }
 
     private func saveCurrentPhoto(triggeredAutomatically: Bool = false) async {
@@ -1164,42 +1515,221 @@ struct StreamView: View {
         }
     }
 
-    private func saveCurrentVideo(triggeredAutomatically: Bool = false) async {
+    @discardableResult
+    private func saveCurrentVideo(triggeredAutomatically: Bool = false) async -> Bool {
         saveStatus = .saving(triggeredAutomatically ? "영상 자동 저장 중..." : "영상 저장 중...")
         do {
             let capture = try await vm.saveRecordedVideo(patientName: currentPatient?.name)
             UINotificationFeedbackGenerator().notificationOccurred(.success)
             saveStatus = .saved("영상 저장 완료")
             showToast("✅ 영상 저장 완료 · \(capture.relativePath)")
+            return true
         } catch {
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             saveStatus = .failed("영상 저장 실패")
             showToast("⚠️ 영상 저장 실패")
             handleSaveError(error)
+            return false
         }
     }
 
-    private func toggleRecording() async {
+    private func processHandsFreeRecordedVideo(_ url: URL) async {
+        let saveSucceeded = await saveCurrentVideo(triggeredAutomatically: true)
+        if !saveSucceeded {
+            showToast("⚠️ 영상 저장은 실패했지만 업로드는 계속합니다")
+        }
+
+        guard currentPatient != nil else {
+            showToast("환자를 먼저 선택해야 자동 업로드할 수 있습니다")
+            showVideoSheet = true
+            return
+        }
+
+        await runWithConsent(.video(url))
+    }
+
+    private func handleGlassCaptureToggleNotification(_ note: Notification) {
+        let source = GlassRecordToggleSource(notification: note)
+        Task {
+            await handleGlassCaptureToggle(source)
+        }
+    }
+
+    private func handleGlassCaptureToggle(_ source: GlassRecordToggleSource) async {
+        guard currentPatient != nil else {
+            await handleGlassPatientPickerRequested()
+            return
+        }
+        await toggleRecording(triggeredBy: .glass(source))
+    }
+
+    private func handleGlassPrimaryActionNotification(_ note: Notification) {
+        let source = GlassRecordToggleSource(notification: note)
+        Task {
+            await handleGlassPrimaryAction(source)
+        }
+    }
+
+    private func handleGlassPrimaryAction(_ source: GlassRecordToggleSource) async {
+        guard currentPatient != nil else {
+            await handleGlassPatientPickerRequested()
+            return
+        }
+        if vm.isStreaming {
+            await toggleRecording(triggeredBy: .glass(source))
+        } else {
+            await handleGlassStandbyStartRequested()
+        }
+    }
+
+    private func handleGlassStandbyStartNotification() {
+        Task {
+            await handleGlassStandbyStartRequested()
+        }
+    }
+
+    private func handleOpenCaptureHistoryNotification(_ note: Notification) {
+        Task {
+            await handleOpenCaptureHistoryRequested(note)
+        }
+    }
+
+    private func handleGlassPatientPickerNotification() {
+        Task {
+            await handleGlassPatientPickerRequested()
+        }
+    }
+
+    private func handleGlassPatientSelectedNotification(_ note: Notification) {
+        let name = (note.userInfo?["patient_name"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !name.isEmpty else { return }
+        currentPatient = store.touch(name: name)
+        showPatientPicker = false
+        showToast("환자 선택: \(name)")
+        Task {
+            if vm.isStreaming {
+                await GlassHUDManager.shared.updateContextPatient(name)
+            } else {
+                await vm.prepareStandbyDisplay(patientName: name)
+            }
+        }
+    }
+
+    private func handleGlassRecommendedAssessmentNotification() {
+        Task {
+            await handleGlassRecommendedAssessmentRequested()
+        }
+    }
+
+    private func handleGlassAssessmentSelectedNotification(_ note: Notification) {
+        let assessment = (note.userInfo?["assessment"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !assessment.isEmpty else { return }
+        showToast("추천 평가: \(assessment)")
+        Task {
+            await GlassHUDManager.shared.selectAssessment(
+                assessment,
+                patient: currentPatient?.name
+            )
+        }
+    }
+
+    private func handleGlassPatientPickerRequested() async {
+        showPatientPicker = true
+        showToast("환자를 선택하세요")
+        await GlassHUDManager.shared.showPatientSelection(
+            current: currentPatient?.name,
+            candidates: store.recent.map(\.name)
+        )
+    }
+
+    private func handleGlassRecommendedAssessmentRequested() async {
+        showToast("추천 평가 확인")
+        await GlassHUDManager.shared.showRecommendations(patient: currentPatient?.name)
+    }
+
+    private func handleGlassStandbyStartRequested() async {
+        guard currentPatient != nil else {
+            await handleGlassPatientPickerRequested()
+            return
+        }
+        if vm.isStreaming {
+            showToast("🟢 이미 라이브 연결됨")
+            return
+        }
+        if !vm.hasActiveDevice {
+            showToast("⚠️ 안경 연결이 먼저 필요합니다")
+            return
+        }
+        saveStatus = .idle
+        showToast("🟢 안경 HUD · 라이브 시작")
+        await vm.startStreaming()
+    }
+
+    private func handleOpenCaptureHistoryRequested(_ note: Notification? = nil) async {
+        let shouldOpenPhone = (note?.userInfo?["open_phone"] as? String) == "true"
+        if shouldOpenPhone {
+            showCaptureHistory = true
+            showToast("저장 기록 상세")
+            return
+        }
+
+        let summaries = captureHistorySummaries()
+        await GlassHUDManager.shared.showCaptureHistory(
+            patient: currentPatient?.name,
+            summaries: summaries
+        )
+        showToast(summaries.isEmpty ? "HUD 기록 없음" : "HUD 기록 보기")
+    }
+
+    private func captureHistorySummaries() -> [String] {
+        captureStore.captures.prefix(3).map { capture in
+            let media = capture.mediaType == .photo ? "사진" : "영상"
+            let patient = capture.patientName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let patientLabel = (patient?.isEmpty == false) ? patient! : "환자 미지정"
+            return "\(media) · \(patientLabel) · \(Self.captureHistoryTimeFormatter.string(from: capture.createdAt))"
+        }
+    }
+
+    private func toggleRecording(triggeredBy source: RecordingTriggerSource) async {
         if vm.recorder.isRecording {
+            let shouldAutoProcess = handsFreeRecordingSession
+            handsFreeRecordingSession = false
+            if shouldAutoProcess {
+                shouldAutoProcessNextRecordedVideo = true
+            }
             await vm.stopRecording()
+            if shouldAutoProcess {
+                return
+            }
             if autoSaveCaptures {
                 await saveCurrentVideo(triggeredAutomatically: true)
             } else {
                 saveStatus = .saved("영상 저장 준비 완료")
-                showToast("📼 영상 캡처 완료 — 업로드 또는 저장 가능")
+                showToast(source.completionToastMessage)
             }
         } else {
             saveStatus = .idle
+            handsFreeRecordingSession = source.shouldAutoProcess
             vm.startRecording()
-            showToast("🔴 영상 녹화 시작")
+            showToast(source.startToastMessage)
         }
     }
 
     private func stopStreamingFlow() async {
         let wasRecording = vm.recorder.isRecording
+        let shouldAutoProcess = wasRecording && handsFreeRecordingSession
+        if shouldAutoProcess {
+            shouldAutoProcessNextRecordedVideo = true
+        }
+        handsFreeRecordingSession = false
         await vm.stopStreaming()
         if isGuidedModeActive {
             glassExperience.endGuidedMode()
+        }
+        if shouldAutoProcess {
+            return
         }
         if wasRecording, autoSaveCaptures, vm.recordedVideoURL != nil {
             await saveCurrentVideo(triggeredAutomatically: true)
@@ -1211,15 +1741,20 @@ struct StreamView: View {
 
     private func uploadVideo(_ url: URL) async {
         isAnalyzing = true
+        processingPhase = .uploading
         do {
+            await GlassHUDManager.shared.showUploading(patient: currentPatient?.name)
             // 1) 업로드 → outer event_id 수신
             let accepted = try await bridgeVm.client.uploadVideo(
                 fileURL: url,
                 patientName: currentPatient?.name
             )
             lastEventId = accepted.event_id          // 우선 outer id로 차트 버튼 활성화
+            await bridgeVm.attachVisitEventIfActive(accepted.event_id)
             analysisText = "영상 분석 업로드 완료\n⚙️ 처리 중... (\(accepted.size_kb ?? 0)KB)"
             showToast("⚙️ 영상 분석 중...")
+            processingPhase = .analyzing
+            await GlassHUDManager.shared.showAnalyzing(patient: currentPatient?.name)
 
             // 2) 백그라운드 폴링 — 완료 시 toast 업데이트 (최대 60초)
             Task {
@@ -1231,13 +1766,16 @@ struct StreamView: View {
                 if final?.status == "done" {
                     let patientName = currentPatient?.name
                     let insightBody = patientName.map { "환자: \($0)" } ?? "SOAP 노트 생성됨"
-                    await GlassHUDManager.shared.showInsight(title: "차트 생성됨", body: insightBody)
+                    await GlassHUDManager.shared.showSuccess(title: "차트 생성됨", body: insightBody)
                 }
                 await MainActor.run {
                     if final?.status == "done" {
                         // inner event_id가 있으면 교체 (차트 파일이 거기에 있음)
                         if let innerId = final?.result?.event?.id {
                             lastEventId = innerId
+                            Task {
+                                await bridgeVm.attachVisitEventIfActive(innerId)
+                            }
                         }
                         analysisText = "✅ 영상 분석 완료\n📄 차트 생성됨"
                         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -1246,14 +1784,21 @@ struct StreamView: View {
                         let message = UserFacingError.message(code: final?.error_code, fallback: final?.error)
                         analysisText = "⚠️ 영상 분석 실패\n\(message)"
                         showToast("⚠️ 처리 실패")
+                        Task {
+                            await GlassHUDManager.shared.showError(title: "분석 실패", body: message)
+                        }
                     }
+                    processingPhase = .none
                     // timeout이면 lastEventId(outer) 유지 — 서버 측 차트 복사로 조회 가능
                 }
             }
         } catch {
-            analysisText = "⚠️ 영상 업로드 실패\n\(bridgeErrorMessage(error))"
+            let message = bridgeErrorMessage(error)
+            analysisText = "⚠️ 영상 업로드 실패\n\(message)"
             UINotificationFeedbackGenerator().notificationOccurred(.error)
             showToast("⚠️ 업로드 실패")
+            await GlassHUDManager.shared.showError(title: "업로드 실패", body: message)
+            processingPhase = .none
         }
         isAnalyzing = false
     }
@@ -1268,27 +1813,40 @@ struct StreamView: View {
 
     private func transcribeAudio(fileURL: URL) async {
         isTranscribing = true
+        processingPhase = .uploading
 
         do {
+            await GlassHUDManager.shared.showUploading(patient: currentPatient?.name)
             let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL, patientName: currentPatient?.name)
+            await bridgeVm.attachVisitEventIfActive(accepted.event_id)
+            processingPhase = .analyzing
+            await GlassHUDManager.shared.showAnalyzing(patient: currentPatient?.name)
             let final = try await bridgeVm.client.waitUntilDone(eventId: accepted.event_id)
+            if let eventId = final.eventId {
+                await bridgeVm.attachVisitEventIfActive(eventId)
+            }
             let transcript = final.result?.event?.raw_text ?? ""
 
             if transcript.isEmpty {
                 showToast("🎙 변환 결과 없음")
+                await GlassHUDManager.shared.showError(title: "음성 결과 없음", body: "다시 녹음해 주세요.")
             } else {
                 withAnimation {
                     sttText = sttText.isEmpty ? transcript : sttText + "\n" + transcript
                 }
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 showToast("🎙 변환 완료")
+                await GlassHUDManager.shared.showSuccess(title: "음성 기록됨", body: "SOAP 초안에 반영할 준비가 됐습니다.")
             }
         } catch {
-            showToast("⚠️ 변환 실패: \(bridgeErrorMessage(error))")
+            let message = bridgeErrorMessage(error)
+            showToast("⚠️ 변환 실패: \(message)")
             UINotificationFeedbackGenerator().notificationOccurred(.error)
+            await GlassHUDManager.shared.showError(title: "음성 변환 실패", body: message)
         }
 
         isTranscribing = false
+        processingPhase = .none
     }
 
     private func showToast(_ message: String) {
@@ -1345,39 +1903,206 @@ private struct EmptyCameraState: View {
     let hasActiveDevice: Bool
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: iconName)
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.white.opacity(0.48))
+        VStack(spacing: 18) {
+            SmartGlassMark(isStreaming: isStreaming, hasActiveDevice: hasActiveDevice)
 
-            VStack(spacing: 6) {
+            VStack(spacing: 8) {
                 Text(title)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.84))
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .multilineTextAlignment(.center)
+
                 Text(message)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.48))
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.66))
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
+                    .frame(maxWidth: 280)
+            }
+
+            HStack(spacing: 8) {
+                CapabilityChip(title: hasActiveDevice ? "Glass" : "iPhone", iconName: hasActiveDevice ? "eyeglasses" : "iphone")
+                CapabilityChip(title: "Voice", iconName: "waveform")
+                CapabilityChip(title: "Chart", iconName: "doc.text")
             }
         }
-        .padding(.horizontal, 32)
-    }
-
-    private var iconName: String {
-        if isStreaming { return "camera.metering.unknown" }
-        return hasActiveDevice ? "play.circle" : "camera.fill"
+        .padding(.horizontal, 28)
+        .padding(.vertical, 30)
+        .background {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.ultraThinMaterial.opacity(0.62))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.28),
+                                    DS.ColorToken.electric.opacity(0.22),
+                                    Color.white.opacity(0.06)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                }
+                .shadow(color: DS.ColorToken.primary.opacity(0.22), radius: 34, y: 20)
+        }
+        .padding(.horizontal, 26)
     }
 
     private var title: String {
         if isStreaming { return "프레임 수신 대기 중" }
-        return hasActiveDevice ? "촬영 준비됨" : "iPhone 카메라 사용 가능"
+        return hasActiveDevice ? "Kinelo AR Ready" : "iPhone Camera Ready"
     }
 
     private var message: String {
         if isStreaming { return "잠시 후 카메라 프레임이 표시됩니다." }
-        if hasActiveDevice { return "환자를 선택하고 시작 버튼을 누르세요." }
-        return "가운데 폰촬영 버튼으로 사진을 찍어 분석할 수 있습니다."
+        if hasActiveDevice { return "환자를 선택하고 시작 버튼을 누르면 현장 입력이 시작됩니다." }
+        return "스마트 글라스 없이도 폰촬영으로 기록을 만들 수 있습니다."
+    }
+}
+
+private struct SmartGlassMotionBackdrop: View {
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            Canvas { context, size in
+                let rect = CGRect(origin: .zero, size: size)
+                context.fill(
+                    Path(rect),
+                    with: .linearGradient(
+                        Gradient(colors: [
+                            DS.ColorToken.midnight,
+                            Color(red: 0.035, green: 0.055, blue: 0.12),
+                            Color(red: 0.02, green: 0.035, blue: 0.08)
+                        ]),
+                        startPoint: .zero,
+                        endPoint: CGPoint(x: size.width, y: size.height)
+                    )
+                )
+
+                drawGlow(
+                    context: &context,
+                    size: size,
+                    time: time,
+                    offset: 0,
+                    color: DS.ColorToken.electric.opacity(0.28)
+                )
+                drawGlow(
+                    context: &context,
+                    size: size,
+                    time: time,
+                    offset: 2.1,
+                    color: DS.ColorToken.violet.opacity(0.24)
+                )
+                drawGlow(
+                    context: &context,
+                    size: size,
+                    time: time,
+                    offset: 4.2,
+                    color: DS.ColorToken.success.opacity(0.16)
+                )
+            }
+            .overlay {
+                LinearGradient(
+                    colors: [
+                        Color.black.opacity(0.10),
+                        Color.black.opacity(0.44)
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+        }
+    }
+
+    private func drawGlow(
+        context: inout GraphicsContext,
+        size: CGSize,
+        time: TimeInterval,
+        offset: Double,
+        color: Color
+    ) {
+        let x = size.width * (0.5 + 0.34 * CGFloat(sin(time * 0.18 + offset)))
+        let y = size.height * (0.5 + 0.22 * CGFloat(cos(time * 0.15 + offset)))
+        let radius = max(size.width, size.height) * 0.42
+        let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+
+        context.addFilter(.blur(radius: 38))
+        context.fill(
+            Path(ellipseIn: rect),
+            with: .radialGradient(
+                Gradient(colors: [color, .clear]),
+                center: CGPoint(x: x, y: y),
+                startRadius: 0,
+                endRadius: radius
+            )
+        )
+    }
+}
+
+private struct SmartGlassMark: View {
+    let isStreaming: Bool
+    let hasActiveDevice: Bool
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let pulse = 1 + 0.045 * CGFloat(sin(time * 2.2))
+
+            ZStack {
+                Circle()
+                    .fill(DS.ColorToken.electric.opacity(0.12))
+                    .frame(width: 138, height: 138)
+                    .blur(radius: 10)
+                    .scaleEffect(pulse)
+
+                Circle()
+                    .stroke(DS.ColorToken.electric.opacity(0.20), lineWidth: 1)
+                    .frame(width: 118, height: 118)
+                    .rotationEffect(.degrees(time * 12))
+
+                Image(systemName: iconName)
+                    .font(.system(size: 48, weight: .semibold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [.white, DS.ColorToken.electric, DS.ColorToken.violet],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .symbolEffect(.pulse, options: .repeating, value: isStreaming)
+            }
+            .frame(width: 142, height: 142)
+        }
+    }
+
+    private var iconName: String {
+        if isStreaming { return "camera.metering.unknown" }
+        return hasActiveDevice ? "eyeglasses" : "camera.fill"
+    }
+}
+
+private struct CapabilityChip: View {
+    let title: String
+    let iconName: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: iconName)
+                .font(.system(size: 10, weight: .bold))
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(.white.opacity(0.84))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.08), in: Capsule())
+        .overlay {
+            Capsule()
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        }
     }
 }
 
@@ -1508,6 +2233,22 @@ private struct CaptureButton: View {
                         .font(.system(size: 23))
                         .foregroundStyle(.white)
                         .offset(x: usesPhoneCameraFallback ? 0 : 3)
+                }
+                .overlay {
+                    Circle()
+                        .stroke(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.56),
+                                    DS.ColorToken.electric.opacity(0.38),
+                                    Color.white.opacity(0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1
+                        )
+                        .frame(width: 70, height: 70)
                 }
             }
         }

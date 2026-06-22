@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="160" y1="120" x2="860" y2="900" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#02060D"/>
+      <stop offset="1" stop-color="#010308"/>
+    </linearGradient>
+    <linearGradient id="frame" x1="286" y1="310" x2="742" y2="734" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#92F6FF"/>
+      <stop offset="0.52" stop-color="#8EBBFF"/>
+      <stop offset="1" stop-color="#B9A0FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <path d="M332 330H692C752.751 330 802 379.249 802 440V448C802 476.719 825.281 500 854 500C871.673 500 886 514.327 886 532C886 549.673 871.673 564 854 564H784C723.249 564 674 613.249 674 674V676C674 728.467 631.467 771 579 771H445C392.533 771 350 728.467 350 676V674C350 613.249 300.751 564 240 564H170C152.327 564 138 549.673 138 532C138 514.327 152.327 500 170 500C198.719 500 222 476.719 222 448V440C222 379.249 271.249 330 332 330Z" stroke="url(#frame)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M408 544H468L504 490L548 590L592 544H652" stroke="#F8FBFF" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
