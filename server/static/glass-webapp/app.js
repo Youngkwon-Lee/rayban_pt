@@ -94,6 +94,10 @@
       refreshVisibleStatus();
       return;
     }
+    if (command === 'complete_visit_hud') {
+      completeVisitHudSession();
+      return;
+    }
     if (command === 'next_phase' && !glassState.visit_session_id) {
       if (TARGET_CANDIDATE_ID) {
         showToast('환자 고정됨', 'success');
@@ -164,6 +168,56 @@
       })
       .catch(function (e) {
         showToast('상태 확인 실패: ' + e.message, 'error');
+      });
+  }
+
+  function completeVisitHudSession() {
+    fetch(apiUrl('/glass/state'), {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify({
+        patient: null,
+        mode: 'standby',
+        message: '다음 방문 대기',
+        is_recording: false,
+        recording_start: null,
+        session_count: 0,
+        event_role_counts: {},
+        capture_role: 'observation',
+        visit_session_id: null,
+        phase: 'pre_review',
+        readiness: 'ready',
+        error_state: null,
+        last_insight: null,
+      }),
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        visitCandidate = null;
+        visitCandidateOffset = 0;
+        lastCandidateLoadAt = 0;
+        glassState = {
+          patient: null,
+          mode: 'standby',
+          message: '다음 방문 대기',
+          is_recording: false,
+          recording_start: null,
+          session_count: 0,
+          event_role_counts: {},
+          capture_role: 'observation',
+          visit_session_id: null,
+          phase: 'pre_review',
+          readiness: 'ready',
+          error_state: null,
+          last_insight: null,
+          updated_at: null,
+        };
+        render();
+        loadNextVisitCandidate(0);
+        showToast('HUD 정리됨', 'success');
+      })
+      .catch(function (e) {
+        showToast('완료 실패: ' + e.message, 'error');
       });
   }
 
@@ -414,8 +468,8 @@
     }
     if (readiness === 'sync_pending') {
       label.textContent = '완료';
-      btn.removeAttribute('data-action');
-      btn.classList.add('disabled-look');
+      btn.dataset.action = 'complete_visit_hud';
+      btn.classList.remove('disabled-look');
       return;
     }
     btn.dataset.action = 'end_visit_session';
@@ -479,6 +533,7 @@
       select_patient: '환자 선택',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
       end_visit_session: '세션 종료',
+      complete_visit_hud: '완료',
       primary_action: '상태',
     };
     return labels[command] || command;
