@@ -87,7 +87,7 @@
     }
     if (command === 'next_phase' && !glassState.visit_session_id) {
       if (TARGET_CANDIDATE_ID) {
-        showToast('오늘 방문으로 고정됨', 'success');
+        showToast('환자 고정됨', 'success');
         loadNextVisitCandidate(0);
         return;
       }
@@ -168,7 +168,7 @@
           visitCandidate = null;
           render();
         }
-        showToast('방문 시작됨', 'success');
+        showToast('세션 시작됨', 'success');
       })
       .catch(function (e) {
         showToast('시작 실패: ' + e.message, 'error');
@@ -182,12 +182,20 @@
     renderInsight();
     renderToggleButton();
     renderNextButton();
+    renderEndButton();
   }
 
   function renderPatient() {
     var candidateAlias = visitCandidate && visitCandidate.patient_alias;
     var alias = safePatientAlias(glassState.patient || (!glassState.visit_session_id ? candidateAlias : ''));
     var count = glassState.session_count || 0;
+    if (glassState.visit_session_id) {
+      setText('patient-context-label', 'ACTIVE SESSION');
+    } else if (alias) {
+      setText('patient-context-label', TARGET_CANDIDATE_ID ? 'SELECTED PATIENT' : 'NEXT PATIENT');
+    } else {
+      setText('patient-context-label', 'PATIENT ALIAS');
+    }
     setText('patient-name', alias || '미선택');
     setText('session-label', 'E' + count);
   }
@@ -226,19 +234,36 @@
   }
 
   function statusCopy(mode, message) {
-    var patientReady = Boolean(glassState.patient);
+    var selectedAlias = safePatientAlias(glassState.patient || (visitCandidate && visitCandidate.patient_alias) || '');
+    var hasSession = Boolean(glassState.visit_session_id);
     var m = message || '';
+    if (!hasSession && selectedAlias) {
+      return {
+        kicker: TARGET_CANDIDATE_ID ? 'SELECTED' : 'CONFIRM',
+        title: '환자 확인',
+        meta: selectedAlias + ' 방문을 시작할까요?',
+        caption: TARGET_CANDIDATE_ID ? '선택된 오늘 방문입니다. 시작을 눌러 세션을 엽니다.' : '다른 환자면 다음 환자를 누르세요.',
+      };
+    }
+    if (!hasSession && !selectedAlias && (mode === 'standby' || mode === 'ready')) {
+      return {
+        kicker: 'WAIT',
+        title: '환자 대기',
+        meta: m || '오늘 방문 환자를 불러오는 중입니다.',
+        caption: '환자가 보이면 시작으로 세션을 확인합니다.',
+      };
+    }
     if (mode === 'pre_review') {
-      return { kicker: 'READY', title: '방문 준비', meta: m || '기록할 환자와 오늘 세션을 확인하세요.', caption: '상세 기록은 physio_app encounter에서 검토합니다.' };
+      return { kicker: 'SESSION', title: '세션 준비', meta: m || '녹화를 시작할 수 있습니다.', caption: '상세 기록은 physio_app encounter에서 검토합니다.' };
     }
     if (mode === 'assessment') {
-      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || '필요하면 녹화를 시작하세요.', caption: '기록 분류는 서버와 physio_app에서 정리합니다.' };
+      return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: '기록 분류는 서버와 physio_app에서 정리합니다.' };
     }
     if (mode === 'intervention') {
-      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || '필요하면 녹화를 시작하세요.', caption: 'HUD는 세션 제어만 담당합니다.' };
+      return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: 'HUD는 세션 제어만 담당합니다.' };
     }
     if (mode === 'home_program') {
-      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || '필요하면 녹화를 시작하세요.', caption: '과제 내용은 encounter 초안에서 확인합니다.' };
+      return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: '과제 내용은 encounter 초안에서 확인합니다.' };
     }
     if (mode === 'summary') {
       return { kicker: 'DONE', title: '초안 준비', meta: m || '진행 노트 초안이 준비되었습니다.', caption: 'physio_app에서 검토하고 서명하세요.' };
@@ -261,13 +286,13 @@
     if (mode === 'ready') {
       return {
         kicker: 'READY',
-        title: '방문 시작',
-        meta: m || (patientReady ? '선택 환자의 encounter로 시작합니다.' : '환자를 먼저 선택하세요.'),
-        caption: patientReady ? '확인하면 캡처 리모컨으로 전환됩니다.' : '렌즈에는 alias만 표시합니다.',
+        title: '환자 대기',
+        meta: m || '환자를 먼저 선택하세요.',
+        caption: '렌즈에는 alias만 표시합니다.',
       };
     }
-    if (mode === 'standby' && visitCandidate && !glassState.visit_session_id) {
-      return { kicker: 'NEXT', title: '방문 시작', meta: visitCandidate.session_label || '오늘 방문 encounter가 준비되었습니다.', caption: TARGET_CANDIDATE_ID ? '이 방문으로 고정되어 있습니다.' : '다음 환자로 후보를 넘길 수 있습니다.' };
+    if (hasSession) {
+      return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: '종료는 세션을 마칠 때만 누르세요.' };
     }
     return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
@@ -319,7 +344,7 @@
     var label = document.getElementById('toggle-label');
     if (!btn || !label) return;
     if (!glassState.visit_session_id) {
-      label.textContent = '방문 시작';
+      label.textContent = visitCandidate || TARGET_CANDIDATE_ID ? '시작 확인' : '시작 대기';
       btn.dataset.action = 'start_visit';
       btn.classList.remove('stop');
       btn.classList.add('primary');
@@ -343,11 +368,19 @@
     if (!btn || !label) return;
     if (!glassState.visit_session_id) {
       btn.dataset.action = 'next_phase';
-      label.textContent = TARGET_CANDIDATE_ID ? '고정됨' : '다음 환자';
+      label.textContent = TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자';
       return;
     }
     btn.dataset.action = 'primary_action';
-    label.textContent = '상태';
+    label.textContent = '상태 확인';
+  }
+
+  function renderEndButton() {
+    var label = document.getElementById('end-label');
+    var btn = document.getElementById('end-btn');
+    if (!label || !btn) return;
+    label.textContent = glassState.visit_session_id ? '세션 종료' : '닫기';
+    btn.classList.toggle('disabled-look', !glassState.visit_session_id);
   }
 
   function safePatientAlias(name) {
@@ -390,11 +423,11 @@
   function commandLabel(command) {
     var labels = {
       toggle_recording: glassState.is_recording ? '녹화 중지' : '녹화 시작',
-      start_visit: '방문 시작',
+      start_visit: '시작 확인',
       select_patient: '환자 선택',
-      next_phase: TARGET_CANDIDATE_ID ? '오늘 방문 고정' : '다음 환자',
+      next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
       end_visit_session: '세션 종료',
-      primary_action: '기본 동작',
+      primary_action: '상태 확인',
     };
     return labels[command] || command;
   }
@@ -403,8 +436,8 @@
     if (result && result.ok === false) return result.message || '명령 실패';
     var labels = {
       toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
-      start_visit: '방문 시작됨',
-      next_phase: TARGET_CANDIDATE_ID ? '오늘 방문 고정됨' : '다음 환자',
+      start_visit: '세션 시작됨',
+      next_phase: TARGET_CANDIDATE_ID ? '환자 고정됨' : '다른 환자',
       end_visit_session: '세션 종료됨',
     };
     return labels[command] || commandLabel(command) + ' 완료';

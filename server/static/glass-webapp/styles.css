@@ -374,6 +374,12 @@ h2 {
   border-color: rgba(255, 59, 102, 0.48);
 }
 
+.command-button.disabled-look {
+  color: var(--text-muted);
+  background: var(--bg-muted);
+  border-color: rgba(255, 255, 255, 0.10);
+}
+
 .command-icon {
   font-size: 20px;
   line-height: 1;

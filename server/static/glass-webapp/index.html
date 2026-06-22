@@ -33,7 +33,7 @@
 
       <section class="patient-panel panel" aria-label="Session context">
         <div>
-          <p class="meta-label">PATIENT ALIAS</p>
+          <p class="meta-label" id="patient-context-label">PATIENT ALIAS</p>
           <p class="patient-name" id="patient-name">미선택</p>
         </div>
         <div class="context-pills" aria-label="Visit readiness">
@@ -71,11 +71,11 @@
         </button>
         <button class="focusable command-button" id="next-btn" data-action="next_phase">
           <span class="command-icon" aria-hidden="true">›</span>
-          <span id="next-label">다음 환자</span>
+          <span id="next-label">다른 환자</span>
         </button>
         <button class="focusable command-button danger" id="end-btn" data-action="end_visit_session">
           <span class="command-icon" aria-hidden="true">✓</span>
-          <span>종료</span>
+          <span id="end-label">종료</span>
         </button>
       </nav>
     </section>

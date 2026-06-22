@@ -33,7 +33,9 @@ def main() -> None:
     require('name="mrbd-web-app-capable" content="yes"' in glass_html, "MRBD capability meta missing")
     require('aria-label="HUD commands"' in glass_html, "HUD command rail missing")
     require('aria-label="Visit phase"' not in glass_html, "HUD should not duplicate encounter workflow phases")
+    require('id="patient-context-label"' in glass_html, "HUD patient context label missing")
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
+    require('id="end-label"' in glass_html, "HUD dynamic end label missing")
     require('id="capture-role-label"' not in glass_html, "HUD should not expose capture role controls")
     require('id="role-counts-label"' not in glass_html, "HUD should not expose role counters")
     require("phase-chip" not in glass_html, "HUD should use capture labels instead of phase chips")
@@ -67,7 +69,14 @@ def main() -> None:
         "commandResultLabel",
         "safePatientAlias",
         "renderNextButton",
+        "renderEndButton",
         "renderReadiness",
+        "환자 확인",
+        "시작 확인",
+        "다른 환자",
+        "환자 고정",
+        "상태 확인",
+        "세션 종료",
         "bridge_url",
         "normalizeBaseUrl",
         "BRIDGE_BASE_URL",
