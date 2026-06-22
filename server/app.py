@@ -5,8 +5,11 @@ import sqlite3
 import uuid
 import logging
 import concurrent.futures
+import base64
+import hashlib
+import hmac
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -67,6 +70,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 
 BRIDGE_API_KEY = os.getenv("BRIDGE_API_KEY", "").strip()
+HUD_SCOPE_SECRET = os.getenv("RAYBAN_HUD_SCOPE_SECRET", "").strip()
 REQUIRE_API_KEY = _env_bool("REQUIRE_API_KEY", True)
 ALLOW_INSECURE_LAN = _env_bool("ALLOW_INSECURE_LAN", False)
 ALLOW_DOCS_WITHOUT_AUTH = _env_bool("ALLOW_DOCS_WITHOUT_AUTH", False)
@@ -4239,7 +4243,7 @@ def _glass_remote_scope() -> tuple[Optional[str], Optional[str]]:
     return provider_person_id or None, organization_id or None
 
 
-def _moai_fetch_rows(table: str, params: dict[str, str]) -> list[dict]:
+def _moai_fetch_rows(table: str, params) -> list[dict]:
     config = load_moai_writer_config()
     if config is None:
         return []
@@ -4258,6 +4262,128 @@ def _moai_fetch_rows(table: str, params: dict[str, str]) -> list[dict]:
     response.raise_for_status()
     payload = response.json()
     return payload if isinstance(payload, list) else []
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padded = value + "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def _hud_scope_signing_secret() -> str:
+    return HUD_SCOPE_SECRET or BRIDGE_API_KEY
+
+
+def build_hud_scope_token(
+    organization_id: str,
+    provider_person_id: str,
+    expires_at: Optional[datetime] = None,
+) -> str:
+    secret = _hud_scope_signing_secret()
+    if not secret:
+        raise RuntimeError("RAYBAN_HUD_SCOPE_SECRET or BRIDGE_API_KEY is required")
+    exp = expires_at or (datetime.now(timezone.utc) + timedelta(hours=12))
+    payload = {
+        "organization_id": organization_id,
+        "provider_person_id": provider_person_id,
+        "exp": int(exp.timestamp()),
+    }
+    body = _b64url_encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"h1.{body}.{_b64url_encode(sig)}"
+
+
+def _decode_hud_scope_token(raw_token: str) -> dict:
+    secret = _hud_scope_signing_secret()
+    if not secret:
+        raise ValueError("HUD scope secret is not configured")
+    parts = raw_token.strip().split(".")
+    if len(parts) != 3 or parts[0] != "h1":
+        raise ValueError("invalid HUD scope token format")
+    expected = hmac.new(secret.encode("utf-8"), parts[1].encode("ascii"), hashlib.sha256).digest()
+    try:
+        actual = _b64url_decode(parts[2])
+    except Exception as exc:
+        raise ValueError("invalid HUD scope token signature") from exc
+    if not hmac.compare_digest(expected, actual):
+        raise ValueError("invalid HUD scope token signature")
+    try:
+        payload = json.loads(_b64url_decode(parts[1]).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("invalid HUD scope token payload") from exc
+    exp = int(payload.get("exp") or 0)
+    if exp and exp < int(datetime.now(timezone.utc).timestamp()):
+        raise ValueError("expired HUD scope token")
+    organization_id = str(payload.get("organization_id") or "").strip()
+    provider_person_id = str(payload.get("provider_person_id") or "").strip()
+    if not organization_id or not provider_person_id:
+        raise ValueError("HUD scope token requires organization_id and provider_person_id")
+    return {
+        "organization_id": organization_id,
+        "provider_person_id": provider_person_id,
+        "exp": exp,
+    }
+
+
+def _hud_scope_from_request(request: Optional[Request] = None) -> dict:
+    raw_token = ""
+    if request is not None:
+        raw_token = request.headers.get("x-hud-token", "") or request.query_params.get("hud_token", "")
+    if raw_token:
+        try:
+            return _decode_hud_scope_token(raw_token)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail={"code": "INVALID_HUD_SCOPE_TOKEN", "message": str(exc)})
+    provider_person_id, organization_id = _glass_remote_scope()
+    scope: dict[str, str] = {}
+    if provider_person_id:
+        scope["provider_person_id"] = provider_person_id
+    if organization_id:
+        scope["organization_id"] = organization_id
+    return scope
+
+
+def _candidate_matches_hud_scope(candidate: dict, scope: Optional[dict]) -> bool:
+    if not scope:
+        return True
+    provider_person_id = str(scope.get("provider_person_id") or "").strip()
+    organization_id = str(scope.get("organization_id") or "").strip()
+    if provider_person_id and candidate.get("provider_person_id") != provider_person_id:
+        return False
+    if organization_id and candidate.get("organization_id") != organization_id:
+        return False
+    return True
+
+
+def _today_visit_window_utc() -> tuple[str, str, datetime]:
+    now_local = datetime.now().astimezone()
+    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = start_local + timedelta(days=1)
+    now_utc = now_local.astimezone(timezone.utc)
+    start_utc = start_local.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    end_utc = end_local.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return start_utc, end_utc, now_utc
+
+
+def _parse_moai_datetime(value: Optional[str]) -> datetime:
+    raw = str(value or "").strip()
+    if not raw:
+        return datetime.max.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _looks_like_uuid(value: Optional[str]) -> bool:
+    try:
+        uuid.UUID(str(value or ""))
+        return True
+    except ValueError:
+        return False
 
 
 def _visit_candidate_from_encounter_row(row: dict) -> Optional[dict]:
@@ -4286,21 +4412,27 @@ def _visit_candidate_from_encounter_row(row: dict) -> Optional[dict]:
     }
 
 
-def _list_moai_glass_visit_candidates(limit: int = 10) -> list[dict]:
+def _list_moai_glass_visit_candidates(limit: int = 10, scope: Optional[dict] = None) -> list[dict]:
     provider_person_id, organization_id = _glass_remote_scope()
+    if scope:
+        provider_person_id = str(scope.get("provider_person_id") or provider_person_id or "").strip()
+        organization_id = str(scope.get("organization_id") or organization_id or "").strip()
     if not provider_person_id:
         return []
-    window_start = (datetime.utcnow() - timedelta(hours=12)).isoformat(timespec="seconds") + "Z"
-    params = {
-        "select": "id,organization_id,provider_person_id,subject_person_id,period_start,session_type,status,care_setting",
-        "provider_person_id": f"eq.{provider_person_id}",
-        "subject_person_id": "not.is.null",
-        "period_start": f"gte.{window_start}",
-        "order": "period_start.asc.nullslast",
-        "limit": str(max(1, min(limit, 50))),
-    }
+    if not _looks_like_uuid(provider_person_id) or (organization_id and not _looks_like_uuid(organization_id)):
+        return []
+    window_start, window_end, now_utc = _today_visit_window_utc()
+    params = [
+        ("select", "id,organization_id,provider_person_id,subject_person_id,period_start,session_type,status,care_setting"),
+        ("provider_person_id", f"eq.{provider_person_id}"),
+        ("subject_person_id", "not.is.null"),
+        ("period_start", f"gte.{window_start}"),
+        ("period_start", f"lt.{window_end}"),
+        ("order", "period_start.asc.nullslast"),
+        ("limit", str(max(1, min(limit, 50)))),
+    ]
     if organization_id:
-        params["organization_id"] = f"eq.{organization_id}"
+        params.append(("organization_id", f"eq.{organization_id}"))
     try:
         rows = _moai_fetch_rows("encounters", params)
     except Exception as exc:
@@ -4311,11 +4443,12 @@ def _list_moai_glass_visit_candidates(limit: int = 10) -> list[dict]:
         candidate = _visit_candidate_from_encounter_row(row)
         if candidate:
             candidates.append(candidate)
+    candidates.sort(key=lambda candidate: abs((_parse_moai_datetime(candidate.get("created_at")) - now_utc).total_seconds()))
     return candidates
 
 
-def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
-    remote_candidates = _list_moai_glass_visit_candidates(limit=limit)
+def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10, scope: Optional[dict] = None) -> list[dict]:
+    remote_candidates = _list_moai_glass_visit_candidates(limit=limit, scope=scope)
     if remote_candidates:
         return remote_candidates
 
@@ -4336,6 +4469,8 @@ def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> l
     candidates: list[dict] = []
     for row in rows:
         candidate = _visit_candidate_from_event_row(row)
+        if not _candidate_matches_hud_scope(candidate, scope):
+            continue
         key = (
             candidate["organization_id"],
             candidate["subject_person_id"],
@@ -4348,9 +4483,14 @@ def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> l
     return candidates
 
 
-def _get_glass_visit_candidate(conn: sqlite3.Connection, candidate_id: Optional[str] = None, offset: int = 0) -> Optional[dict]:
+def _get_glass_visit_candidate(
+    conn: sqlite3.Connection,
+    candidate_id: Optional[str] = None,
+    offset: int = 0,
+    scope: Optional[dict] = None,
+) -> Optional[dict]:
     if candidate_id:
-        for candidate in _list_moai_glass_visit_candidates(limit=50):
+        for candidate in _list_moai_glass_visit_candidates(limit=50, scope=scope):
             if candidate["id"] == candidate_id or candidate["encounter_id"] == candidate_id:
                 return candidate
         row = conn.execute(
@@ -4358,12 +4498,17 @@ def _get_glass_visit_candidate(conn: sqlite3.Connection, candidate_id: Optional[
             SELECT id, patient_name, owner_org_id, owner_provider_person_id, subject_person_id,
                    physio_client_id, physio_session_id, intent, created_at
             FROM events
-            WHERE id = ?
+            WHERE id = ? OR physio_session_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
             """,
-            (candidate_id,),
+            (candidate_id, candidate_id),
         ).fetchone()
-        return _visit_candidate_from_event_row(row) if row else None
-    candidates = _list_glass_visit_candidates(conn, limit=max(10, offset + 1))
+        candidate = _visit_candidate_from_event_row(row) if row else None
+        if candidate and _candidate_matches_hud_scope(candidate, scope):
+            return candidate
+        return None
+    candidates = _list_glass_visit_candidates(conn, limit=max(10, offset + 1), scope=scope)
     if not candidates:
         return None
     return candidates[offset % len(candidates)]
@@ -4535,7 +4680,12 @@ def _next_visit_phase(current: str) -> str:
     return VISIT_PHASE_ORDER[min(index + 1, len(VISIT_PHASE_ORDER) - 1)]
 
 
-def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dict] = None) -> Optional[dict]:
+def _execute_visit_hud_command(
+    command: str,
+    source: str,
+    metadata: Optional[dict] = None,
+    scope: Optional[dict] = None,
+) -> Optional[dict]:
     if command not in SERVER_EXECUTED_GLASS_COMMANDS:
         return None
 
@@ -4560,7 +4710,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                     else:
                         session_id = None
                 if not session_id:
-                    candidate = _get_glass_visit_candidate(conn)
+                    candidate = _get_glass_visit_candidate(conn, scope=scope)
                     if not candidate:
                         raise LookupError("NO_GLASS_VISIT_CANDIDATE")
                     session = create_visit_session(
@@ -4716,13 +4866,18 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
     return result
 
 
-def _queue_glass_command(command: str, source: str = "glass", metadata: Optional[dict] = None) -> dict:
+def _queue_glass_command(
+    command: str,
+    source: str = "glass",
+    metadata: Optional[dict] = None,
+    scope: Optional[dict] = None,
+) -> dict:
     global _glass_pending_command
     if command not in GLASS_COMMANDS:
         allowed = ", ".join(sorted(GLASS_COMMANDS))
         _error(400, "INVALID_COMMAND", f"command must be one of: {allowed}")
 
-    executed = _execute_visit_hud_command(command, source=source, metadata=metadata)
+    executed = _execute_visit_hud_command(command, source=source, metadata=metadata, scope=scope)
     if executed is not None:
         return {
             "command": command,
@@ -4838,9 +4993,15 @@ def visit_session_end(session_id: str, update_glass: bool = True):
 
 
 @app.get("/glass/visits/next")
-def glass_visits_next(offset: int = 0):
+def glass_visits_next(request: Request, offset: int = 0, candidate_id: Optional[str] = None):
+    scope = _hud_scope_from_request(request)
     with _conn() as conn:
-        candidate = _get_glass_visit_candidate(conn, offset=max(0, offset))
+        candidate = _get_glass_visit_candidate(
+            conn,
+            candidate_id=(candidate_id or "").strip() or None,
+            offset=max(0, offset),
+            scope=scope,
+        )
     if not candidate:
         return {
             "status": "empty",
@@ -4851,9 +5012,14 @@ def glass_visits_next(offset: int = 0):
 
 
 @app.post("/glass/visits/start")
-def glass_visits_start(payload: GlassVisitStartRequest):
+def glass_visits_start(payload: GlassVisitStartRequest, request: Request):
+    scope = _hud_scope_from_request(request)
     with _conn() as conn:
-        candidate = _get_glass_visit_candidate(conn, candidate_id=(payload.candidate_id or "").strip() or None)
+        candidate = _get_glass_visit_candidate(
+            conn,
+            candidate_id=(payload.candidate_id or "").strip() or None,
+            scope=scope,
+        )
         if not candidate:
             _error(404, "NO_GLASS_VISIT_CANDIDATE", "No visit candidate with canonical identity is available.")
         if candidate["readiness"] != "ready":
@@ -4913,8 +5079,9 @@ def glass_state_post(update: GlassStateUpdate):
 
 
 @app.post("/glass/command")
-def glass_command_post(cmd: GlassCommandRequest):
-    queued = _queue_glass_command(cmd.command)
+def glass_command_post(cmd: GlassCommandRequest, request: Request):
+    scope = _hud_scope_from_request(request)
+    queued = _queue_glass_command(cmd.command, scope=scope)
     response = {"ok": True, "command": queued["command"], "id": queued["id"]}
     if "executed" in queued:
         response["executed"] = queued["executed"]
@@ -4922,7 +5089,8 @@ def glass_command_post(cmd: GlassCommandRequest):
 
 
 @app.post("/neural-band/event")
-def neural_band_event_post(event: NeuralBandEventRequest):
+def neural_band_event_post(event: NeuralBandEventRequest, request: Request):
+    scope = _hud_scope_from_request(request)
     gesture = event.gesture.strip().lower()
     command = NEURAL_BAND_GESTURE_MAP.get(gesture)
     if command is None:
@@ -4934,7 +5102,7 @@ def neural_band_event_post(event: NeuralBandEventRequest):
         metadata["device_id"] = event.device_id
     metadata["gesture"] = gesture
 
-    queued = _queue_glass_command(command, source=event.source or "neural_band", metadata=metadata)
+    queued = _queue_glass_command(command, source=event.source or "neural_band", metadata=metadata, scope=scope)
     return {
         "ok": True,
         "gesture": gesture,

@@ -8,6 +8,7 @@ import io
 import os
 import sqlite3
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ["BRIDGE_API_KEY"] = "visit-smoke-key"
@@ -65,6 +66,137 @@ def reset_hud_state() -> None:
         )
 
 
+def exercise_hud_scope_token_candidate_filter() -> None:
+    with tempfile.TemporaryDirectory(prefix="rayban_hud_scope_smoke_") as tmp:
+        configure_isolated_storage(Path(tmp))
+        reset_hud_state()
+        client = TestClient(bridge.app)
+        bridge._moai_fetch_rows = lambda table, params: []
+        token = bridge.build_hud_scope_token(
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+        allowed = client.post(
+            "/ingest",
+            headers=headers(),
+            json={
+                "source": "visit-scope-allowed",
+                "event_type": "text",
+                "patient_name": "Allowed Patient",
+                "owner_org_id": "11111111-1111-4111-8111-111111111111",
+                "owner_provider_person_id": "22222222-2222-4222-8222-222222222222",
+                "subject_person_id": "33333333-3333-4333-8333-333333333333",
+                "physio_session_id": "44444444-4444-4444-8444-444444444444",
+                "text": "allowed visit candidate",
+            },
+        )
+        require(allowed.status_code == 200, f"allowed seed should succeed: {allowed.text}")
+
+        blocked = client.post(
+            "/ingest",
+            headers=headers(),
+            json={
+                "source": "visit-scope-blocked",
+                "event_type": "text",
+                "patient_name": "Blocked Patient",
+                "owner_org_id": "aaaaaaaa-1111-4111-8111-111111111111",
+                "owner_provider_person_id": "bbbbbbbb-2222-4222-8222-222222222222",
+                "subject_person_id": "cccccccc-3333-4333-8333-333333333333",
+                "physio_session_id": "dddddddd-4444-4444-8444-444444444444",
+                "text": "blocked visit candidate",
+            },
+        )
+        require(blocked.status_code == 200, f"blocked seed should succeed: {blocked.text}")
+
+        next_visit = client.get(
+            f"/glass/visits/next?hud_token={token}",
+            headers=headers(),
+        )
+        require(next_visit.status_code == 200, "scoped HUD next visit should succeed")
+        candidate = next_visit.json()["candidate"]
+        require(candidate["encounter_id"] == "44444444-4444-4444-8444-444444444444", "scoped HUD should show only provider candidate")
+        require(candidate["patient_alias"] == "A. P", "scoped HUD should keep only lens-safe alias")
+
+        exact = client.get(
+            f"/glass/visits/next?hud_token={token}&candidate_id=44444444-4444-4444-8444-444444444444",
+            headers=headers(),
+        )
+        require(exact.status_code == 200, "exact encounter HUD candidate should resolve")
+        require(
+            exact.json()["candidate"]["encounter_id"] == "44444444-4444-4444-8444-444444444444",
+            "candidate_id should accept encounter id for physio_app deep links",
+        )
+
+        blocked_exact = client.get(
+            f"/glass/visits/next?hud_token={token}&candidate_id=dddddddd-4444-4444-8444-444444444444",
+            headers=headers(),
+        )
+        require(blocked_exact.status_code == 200, "out-of-scope exact candidate lookup should not fail")
+        require(blocked_exact.json()["candidate"] is None, "out-of-scope encounter should stay hidden")
+
+        invalid = client.get("/glass/visits/next?hud_token=bad-token", headers=headers())
+        require(invalid.status_code == 401, "invalid HUD scope token should be rejected")
+
+
+def exercise_remote_today_candidate_ranking() -> None:
+    now = datetime.now(timezone.utc)
+    nearer = (now + timedelta(minutes=20)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    later = (now + timedelta(hours=3)).isoformat(timespec="seconds").replace("+00:00", "Z")
+    captured_params: list[tuple[str, str]] = []
+    original_fetch = bridge._moai_fetch_rows
+
+    def fake_moai_fetch(table: str, params) -> list[dict]:
+        captured_params.extend(list(params))
+        return [
+            {
+                "id": "later-encounter",
+                "organization_id": "11111111-1111-4111-8111-111111111111",
+                "provider_person_id": "22222222-2222-4222-8222-222222222222",
+                "subject_person_id": "99999999-3333-4333-8333-333333333333",
+                "period_start": later,
+                "session_type": "home_visit_pt",
+                "status": "scheduled",
+                "care_setting": "home_visit",
+            },
+            {
+                "id": "nearer-encounter",
+                "organization_id": "11111111-1111-4111-8111-111111111111",
+                "provider_person_id": "22222222-2222-4222-8222-222222222222",
+                "subject_person_id": "33333333-3333-4333-8333-333333333333",
+                "period_start": nearer,
+                "session_type": "home_visit_pt",
+                "status": "scheduled",
+                "care_setting": "home_visit",
+            },
+        ]
+
+    bridge._moai_fetch_rows = fake_moai_fetch
+    try:
+        candidates = bridge._list_moai_glass_visit_candidates(
+            limit=10,
+            scope={
+                "organization_id": "11111111-1111-4111-8111-111111111111",
+                "provider_person_id": "22222222-2222-4222-8222-222222222222",
+            },
+        )
+        require(candidates[0]["encounter_id"] == "nearer-encounter", "today candidates should rank nearest appointment first")
+        period_filters = [value for key, value in captured_params if key == "period_start"]
+        require(any(value.startswith("gte.") for value in period_filters), "remote lookup should constrain start of today window")
+        require(any(value.startswith("lt.") for value in period_filters), "remote lookup should constrain end of today window")
+        require(
+            ("provider_person_id", "eq.22222222-2222-4222-8222-222222222222") in captured_params,
+            "remote lookup should be provider scoped",
+        )
+        require(
+            ("organization_id", "eq.11111111-1111-4111-8111-111111111111") in captured_params,
+            "remote lookup should be organization scoped",
+        )
+    finally:
+        bridge._moai_fetch_rows = original_fetch
+
+
 def exercise_remote_visit_candidate() -> None:
     with tempfile.TemporaryDirectory(prefix="rayban_remote_visit_candidate_smoke_") as tmp:
         configure_isolated_storage(Path(tmp))
@@ -88,7 +220,7 @@ def exercise_remote_visit_candidate() -> None:
         }
         original_lookup = bridge._list_moai_glass_visit_candidates
         original_fetch = bridge._moai_fetch_rows
-        bridge._list_moai_glass_visit_candidates = lambda limit=10: [remote_candidate]
+        bridge._list_moai_glass_visit_candidates = lambda limit=10, scope=None: [remote_candidate]
 
         def fake_moai_fetch(table: str, params: dict[str, str]) -> list[dict]:
             if table == "encounter_notes":
@@ -158,6 +290,8 @@ def exercise_remote_visit_candidate() -> None:
 
 
 def main() -> None:
+    exercise_hud_scope_token_candidate_filter()
+    exercise_remote_today_candidate_ranking()
     exercise_remote_visit_candidate()
 
     with tempfile.TemporaryDirectory(prefix="rayban_visit_session_smoke_") as tmp:

@@ -3,6 +3,8 @@
 
   var params = new URLSearchParams(window.location.search);
   var API_KEY = params.get('api_key') || '';
+  var HUD_TOKEN = params.get('hud_token') || '';
+  var TARGET_CANDIDATE_ID = params.get('candidate_id') || params.get('encounter_id') || '';
   var BRIDGE_BASE_URL = normalizeBaseUrl(params.get('bridge_url')) || window.location.origin;
   var POLL_MS = 2000;
   var INSIGHT_DURATION_MS = 8000;
@@ -37,12 +39,16 @@
   function apiHeaders() {
     var h = { 'Content-Type': 'application/json' };
     if (API_KEY) h['x-api-key'] = API_KEY;
+    if (HUD_TOKEN) h['x-hud-token'] = HUD_TOKEN;
     return h;
   }
 
   function apiUrl(path) {
     var joiner = path.indexOf('?') === -1 ? '?' : '&';
-    var qp = API_KEY ? joiner + 'api_key=' + encodeURIComponent(API_KEY) : '';
+    var params = [];
+    if (API_KEY) params.push('api_key=' + encodeURIComponent(API_KEY));
+    if (HUD_TOKEN) params.push('hud_token=' + encodeURIComponent(HUD_TOKEN));
+    var qp = params.length ? joiner + params.join('&') : '';
     return BRIDGE_BASE_URL + path + qp;
   }
 
@@ -81,6 +87,11 @@
       return;
     }
     if (command === 'next_phase' && !glassState.visit_session_id) {
+      if (TARGET_CANDIDATE_ID) {
+        showToast('오늘 방문으로 고정됨', 'success');
+        loadNextVisitCandidate(0);
+        return;
+      }
       loadNextVisitCandidate(visitCandidateOffset + 1);
       return;
     }
@@ -109,7 +120,10 @@
 
   function loadNextVisitCandidate(offset) {
     visitCandidateOffset = Math.max(0, offset || 0);
-    fetch(apiUrl('/glass/visits/next?offset=' + encodeURIComponent(visitCandidateOffset)), {
+    var path = TARGET_CANDIDATE_ID
+      ? '/glass/visits/next?candidate_id=' + encodeURIComponent(TARGET_CANDIDATE_ID)
+      : '/glass/visits/next?offset=' + encodeURIComponent(visitCandidateOffset);
+    fetch(apiUrl(path), {
       headers: apiHeaders(),
       cache: 'no-store',
     })
@@ -137,7 +151,7 @@
 
   function startVisit() {
     var body = {
-      candidate_id: visitCandidate ? visitCandidate.id : null,
+      candidate_id: visitCandidate ? visitCandidate.id : (TARGET_CANDIDATE_ID || null),
       update_glass: true,
     };
     fetch(apiUrl('/glass/visits/start'), {
