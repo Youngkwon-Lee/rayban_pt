@@ -28,6 +28,9 @@
   var insightStartTime = null;
   var statePollTimer = null;
   var timerPollTimer = null;
+  var visitCandidate = null;
+  var visitCandidateOffset = 0;
+  var lastCandidateLoadAt = 0;
 
   function apiHeaders() {
     var h = { 'Content-Type': 'application/json' };
@@ -36,7 +39,8 @@
   }
 
   function apiUrl(path) {
-    var qp = API_KEY ? '?api_key=' + encodeURIComponent(API_KEY) : '';
+    var joiner = path.indexOf('?') === -1 ? '?' : '&';
+    var qp = API_KEY ? joiner + 'api_key=' + encodeURIComponent(API_KEY) : '';
     return BRIDGE_BASE_URL + path + qp;
   }
 
@@ -62,6 +66,7 @@
         setConnected(true);
         glassState = data;
         render();
+        maybeLoadVisitCandidate();
       })
       .catch(function () {
         setConnected(false);
@@ -69,6 +74,14 @@
   }
 
   function sendCommand(command) {
+    if (command === 'start_visit') {
+      startVisit();
+      return;
+    }
+    if (command === 'next_phase' && !glassState.visit_session_id) {
+      loadNextVisitCandidate(visitCandidateOffset + 1);
+      return;
+    }
     fetch(apiUrl('/glass/command'), {
       method: 'POST',
       headers: apiHeaders(),
@@ -92,6 +105,61 @@
       });
   }
 
+  function loadNextVisitCandidate(offset) {
+    visitCandidateOffset = Math.max(0, offset || 0);
+    fetch(apiUrl('/glass/visits/next?offset=' + encodeURIComponent(visitCandidateOffset)), {
+      headers: apiHeaders(),
+      cache: 'no-store',
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        visitCandidate = data.candidate || null;
+        lastCandidateLoadAt = Date.now();
+        render();
+      })
+      .catch(function () {
+        visitCandidate = null;
+        lastCandidateLoadAt = Date.now();
+        render();
+      });
+  }
+
+  function maybeLoadVisitCandidate() {
+    if (glassState.visit_session_id) return;
+    if (Date.now() - lastCandidateLoadAt < 10000) return;
+    loadNextVisitCandidate(visitCandidateOffset);
+  }
+
+  function startVisit() {
+    var body = {
+      candidate_id: visitCandidate ? visitCandidate.id : null,
+      update_glass: true,
+    };
+    fetch(apiUrl('/glass/visits/start'), {
+      method: 'POST',
+      headers: apiHeaders(),
+      body: JSON.stringify(body),
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (data.glass_state) {
+          glassState = data.glass_state;
+          visitCandidate = null;
+          render();
+        }
+        showToast('방문 시작됨', 'success');
+      })
+      .catch(function (e) {
+        showToast('시작 실패: ' + e.message, 'error');
+      });
+  }
+
   function render() {
     renderPatient();
     renderReadiness();
@@ -102,7 +170,8 @@
   }
 
   function renderPatient() {
-    var alias = safePatientAlias(glassState.patient);
+    var candidateAlias = visitCandidate && visitCandidate.patient_alias;
+    var alias = safePatientAlias(glassState.patient || (!glassState.visit_session_id ? candidateAlias : ''));
     var count = glassState.session_count || 0;
     setText('patient-name', alias || '미선택');
     setText('session-label', 'E' + count);
@@ -211,6 +280,9 @@
         caption: patientReady ? 'Neural Band Enter로 시작합니다.' : '환자명은 렌즈에 축약 표시됩니다.',
       };
     }
+    if (mode === 'standby' && visitCandidate && !glassState.visit_session_id) {
+      return { kicker: 'NEXT', title: '방문 시작', meta: visitCandidate.session_label || '대기 방문을 시작할 수 있습니다.', caption: 'Neural Band confirm 또는 시작 버튼.' };
+    }
     return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
 
@@ -260,6 +332,14 @@
     var btn = document.getElementById('toggle-btn');
     var label = document.getElementById('toggle-label');
     if (!btn || !label) return;
+    if (!glassState.visit_session_id) {
+      label.textContent = '방문 시작';
+      btn.dataset.action = 'start_visit';
+      btn.classList.remove('stop');
+      btn.classList.add('primary');
+      return;
+    }
+    btn.dataset.action = 'toggle_recording';
     if (glassState.is_recording || glassState.mode === 'recording') {
       label.textContent = '녹화 중지';
       btn.classList.remove('primary');
@@ -311,6 +391,7 @@
   function commandLabel(command) {
     var labels = {
       toggle_recording: glassState.is_recording ? '녹화 중지' : '녹화 시작',
+      start_visit: '방문 시작',
       select_patient: '환자 선택',
       next_phase: '다음 단계',
       end_visit_session: '세션 종료',
@@ -325,6 +406,7 @@
     if (result && result.ok === false) return result.message || '명령 실패';
     var labels = {
       toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
+      start_visit: '방문 시작됨',
       next_phase: '단계 변경됨',
       end_visit_session: '세션 종료됨',
     };
@@ -409,6 +491,7 @@
     var btn = document.getElementById('toggle-btn');
     if (btn) btn.focus();
     pollState();
+    loadNextVisitCandidate(0);
     startTimers();
   }
 

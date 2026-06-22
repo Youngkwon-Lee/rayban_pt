@@ -3755,6 +3755,11 @@ class VisitSessionEventRequest(BaseModel):
     update_glass: bool = True
 
 
+class GlassVisitStartRequest(BaseModel):
+    candidate_id: Optional[str] = None
+    update_glass: bool = True
+
+
 def _apply_visit_session_hud(session: dict) -> dict:
     hud = visit_hud_state(session)
     with _glass_lock:
@@ -3809,6 +3814,7 @@ def _build_visit_session_write_plan(session: dict) -> dict:
 
 
 GLASS_COMMANDS = {
+    "start_visit",
     "toggle_recording",
     "next_phase",
     "end_visit_session",
@@ -3831,11 +3837,13 @@ NEURAL_BAND_GESTURE_MAP = {
     "down": "primary_action",
     "swipe_down": "primary_action",
     "downward": "primary_action",
-    "select": "primary_action",
-    "enter": "primary_action",
-    "confirm": "primary_action",
-    "open": "primary_action",
-    "primary_action": "primary_action",
+    "select": "start_visit",
+    "enter": "start_visit",
+    "confirm": "start_visit",
+    "open": "start_visit",
+    "start": "start_visit",
+    "start_visit": "start_visit",
+    "primary_action": "start_visit",
     "next": "next_phase",
     "swipe_right": "next_phase",
     "right": "next_phase",
@@ -3935,6 +3943,85 @@ def _existing_event_id_for_audit(event_id: Optional[str]) -> Optional[str]:
         return None
 
 
+def _lens_safe_patient_alias(value: Optional[str]) -> str:
+    clean = re.sub(r"\s+", " ", value or "").strip()
+    if not clean:
+        return "Patient"
+    if re.match(r"^[A-Za-z][A-Za-z\s.'-]{1,}$", clean):
+        return " ".join(
+            f"{part[0].upper()}." if index == 0 else part[0].upper()
+            for index, part in enumerate(clean.split())
+            if part
+        ) or "Patient"
+    if len(clean) <= 2:
+        return clean[0] + "*"
+    return clean[0] + "*" + clean[-1]
+
+
+def _visit_candidate_from_event_row(row) -> dict:
+    return {
+        "id": row[0],
+        "patient_alias": _lens_safe_patient_alias(row[1]),
+        "organization_id": row[2],
+        "provider_person_id": row[3],
+        "subject_person_id": row[4],
+        "physio_client_id": row[5],
+        "encounter_id": row[6] or row[0],
+        "source_event_id": row[0],
+        "session_label": row[7] or "방문 재활",
+        "created_at": row[8],
+        "readiness": "ready" if row[2] and row[3] and row[4] else "missing_identity",
+    }
+
+
+def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    rows = conn.execute(
+        """
+        SELECT id, patient_name, owner_org_id, owner_provider_person_id, subject_person_id,
+               physio_client_id, physio_session_id, intent, created_at
+        FROM events
+        WHERE COALESCE(owner_org_id, '') != ''
+          AND COALESCE(owner_provider_person_id, '') != ''
+          AND COALESCE(subject_person_id, '') != ''
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        (max(1, min(limit, 50)),),
+    ).fetchall()
+    seen: set[tuple[str, str, str]] = set()
+    candidates: list[dict] = []
+    for row in rows:
+        candidate = _visit_candidate_from_event_row(row)
+        key = (
+            candidate["organization_id"],
+            candidate["subject_person_id"],
+            candidate["encounter_id"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def _get_glass_visit_candidate(conn: sqlite3.Connection, candidate_id: Optional[str] = None, offset: int = 0) -> Optional[dict]:
+    if candidate_id:
+        row = conn.execute(
+            """
+            SELECT id, patient_name, owner_org_id, owner_provider_person_id, subject_person_id,
+                   physio_client_id, physio_session_id, intent, created_at
+            FROM events
+            WHERE id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+        return _visit_candidate_from_event_row(row) if row else None
+    candidates = _list_glass_visit_candidates(conn, limit=max(10, offset + 1))
+    if not candidates:
+        return None
+    return candidates[offset % len(candidates)]
+
+
 def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
     if command != "show_recommendations":
         return None
@@ -3956,7 +4043,7 @@ def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]
 
 
 VISIT_PHASE_ORDER = ["pre_review", "assessment", "intervention", "home_program", "summary"]
-SERVER_EXECUTED_GLASS_COMMANDS = {"toggle_recording", "next_phase", "end_visit_session"}
+SERVER_EXECUTED_GLASS_COMMANDS = {"start_visit", "toggle_recording", "next_phase", "end_visit_session"}
 
 
 def _active_visit_session_id_from_hud() -> Optional[str]:
@@ -3978,6 +4065,65 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
         return None
 
     session_id = _active_visit_session_id_from_hud()
+    if command == "start_visit":
+        try:
+            with _conn() as conn:
+                if session_id:
+                    existing = get_visit_session(conn, session_id)
+                    if existing and existing.get("status") == "active":
+                        session = existing
+                        candidate = None
+                    else:
+                        session_id = None
+                if not session_id:
+                    candidate = _get_glass_visit_candidate(conn)
+                    if not candidate:
+                        raise LookupError("NO_GLASS_VISIT_CANDIDATE")
+                    session = create_visit_session(
+                        conn,
+                        organization_id=candidate["organization_id"],
+                        provider_person_id=candidate["provider_person_id"],
+                        subject_person_id=candidate["subject_person_id"],
+                        encounter_id=candidate["encounter_id"],
+                        patient_alias=candidate["patient_alias"],
+                        history_summary=f"HUD visit started from event {candidate['source_event_id']}.",
+                    )
+                conn.commit()
+        except LookupError:
+            with _glass_lock:
+                _glass_state.update(
+                    {
+                        "mode": "error",
+                        "message": "시작할 방문 후보 없음",
+                        "readiness": "error",
+                        "error_state": "NO_GLASS_VISIT_CANDIDATE",
+                        "updated_at": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+            _audit_log(None, "warning", f"HUD start blocked no visit candidate source={source}")
+            return {
+                "ok": False,
+                "executed": False,
+                "command": command,
+                "error_code": "NO_GLASS_VISIT_CANDIDATE",
+                "message": "No visit candidate with canonical identity is available.",
+            }
+        hud = _apply_visit_session_hud(session)
+        _audit_log(None, "info", f"HUD command executed command={command} source={source} id={session['id']}")
+        result = {
+            "ok": True,
+            "executed": True,
+            "command": command,
+            "source": source,
+            "session": session,
+            "glass_state": hud,
+        }
+        if metadata:
+            result["metadata"] = metadata
+        if candidate:
+            result["candidate"] = candidate
+        return result
+
     if not session_id:
         if command == "toggle_recording":
             return None
@@ -4176,6 +4322,42 @@ def visit_session_end(session_id: str, update_glass: bool = True):
     plan = _build_visit_session_write_plan(session)
     _audit_log(None, "info", f"visit session ended id={session_id}")
     return {"status": "ended", "session": session, "glass_state": hud, "moai_write_plan": plan}
+
+
+@app.get("/glass/visits/next")
+def glass_visits_next(offset: int = 0):
+    with _conn() as conn:
+        candidate = _get_glass_visit_candidate(conn, offset=max(0, offset))
+    if not candidate:
+        return {
+            "status": "empty",
+            "candidate": None,
+            "message": "No visit candidate with canonical identity is available.",
+        }
+    return {"status": "ready", "candidate": candidate}
+
+
+@app.post("/glass/visits/start")
+def glass_visits_start(payload: GlassVisitStartRequest):
+    with _conn() as conn:
+        candidate = _get_glass_visit_candidate(conn, candidate_id=(payload.candidate_id or "").strip() or None)
+        if not candidate:
+            _error(404, "NO_GLASS_VISIT_CANDIDATE", "No visit candidate with canonical identity is available.")
+        if candidate["readiness"] != "ready":
+            _error(409, "GLASS_VISIT_IDENTITY_REQUIRED", "Visit candidate requires organization, provider, and subject IDs.")
+        session = create_visit_session(
+            conn,
+            organization_id=candidate["organization_id"],
+            provider_person_id=candidate["provider_person_id"],
+            subject_person_id=candidate["subject_person_id"],
+            encounter_id=candidate["encounter_id"],
+            patient_alias=candidate["patient_alias"],
+            history_summary=f"HUD visit started from event {candidate['source_event_id']}.",
+        )
+        conn.commit()
+    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    _audit_log(None, "info", f"glass visit started session={session['id']} candidate={candidate['id']}")
+    return {"status": "started", "candidate": candidate, "session": session, "glass_state": hud}
 
 
 @app.get("/glass/state")

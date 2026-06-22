@@ -52,27 +52,42 @@ def main() -> None:
         unauth = client.post("/visit-sessions/start", json={})
         require(unauth.status_code == 401, "visit session API should require auth")
 
-        start = client.post(
-            "/visit-sessions/start",
+        seed = client.post(
+            "/ingest",
             headers=headers(),
             json={
-                "organization_id": "11111111-1111-4111-8111-111111111111",
-                "provider_person_id": "22222222-2222-4222-8222-222222222222",
+                "source": "visit-seed",
+                "event_type": "text",
+                "patient_name": "P7",
+                "owner_org_id": "11111111-1111-4111-8111-111111111111",
+                "owner_provider_person_id": "22222222-2222-4222-8222-222222222222",
                 "subject_person_id": "33333333-3333-4333-8333-333333333333",
-                "encounter_id": "44444444-4444-4444-8444-444444444444",
-                "patient_alias": "P7",
-                "history_summary": "Recent gait instability; avoid lens PHI.",
+                "physio_session_id": "44444444-4444-4444-8444-444444444444",
+                "text": "visit candidate seed",
             },
         )
+        require(seed.status_code == 200, f"visit seed should succeed: {seed.text}")
+
+        next_visit = client.get("/glass/visits/next", headers=headers())
+        require(next_visit.status_code == 200, "HUD next visit should succeed")
+        candidate = next_visit.json()["candidate"]
+        require(candidate["patient_alias"] == "P*", "HUD should expose only lens-safe patient alias")
+        require(candidate["encounter_id"] == "44444444-4444-4444-8444-444444444444", "HUD candidate should keep encounter")
+
+        start = client.post(
+            "/neural-band/event",
+            headers=headers(),
+            json={"gesture": "confirm", "device_id": "band-visit-start"},
+        )
         require(start.status_code == 200, f"visit session start should succeed: {start.text}")
-        body = start.json()
+        body = start.json()["executed"]
         session = body["session"]
         session_id = session["id"]
-        require(body["status"] == "started", "start status mismatch")
+        require(body["executed"] is True, "neural band confirm should execute visit start")
         require(session["phase"] == "pre_review", "initial phase should be pre_review")
         require(session["encounter_id"] == "44444444-4444-4444-8444-444444444444", "encounter should persist")
-        require(body["glass_state"]["patient"] == "P7", "HUD should receive patient alias")
-        require("Recent gait" not in body["glass_state"]["message"], "HUD should not show history text by default")
+        require(body["glass_state"]["patient"] == "P*", "HUD should receive lens-safe patient alias")
+        require(body["glass_state"]["visit_session_id"] == session_id, "HUD should receive active visit session id")
 
         phase = client.post(
             f"/visit-sessions/{session_id}/phase",
