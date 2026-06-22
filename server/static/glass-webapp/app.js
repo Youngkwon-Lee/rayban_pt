@@ -34,7 +34,9 @@
   var visitCandidate = null;
   var visitCandidateOffset = 0;
   var lastCandidateLoadAt = 0;
+  var sessionRecordPreview = null;
   var recordPreviewLineIndex = 0;
+  var recordPreviewOpen = false;
 
   function apiHeaders() {
     var h = { 'Content-Type': 'application/json' };
@@ -150,13 +152,17 @@
       })
       .then(function (data) {
         visitCandidate = data.candidate || null;
+        if (!glassState.visit_session_id) sessionRecordPreview = null;
         recordPreviewLineIndex = 0;
+        recordPreviewOpen = Boolean(visitCandidate && visitCandidate.record_preview);
         lastCandidateLoadAt = Date.now();
         render();
       })
       .catch(function () {
         visitCandidate = null;
+        if (!glassState.visit_session_id) sessionRecordPreview = null;
         recordPreviewLineIndex = 0;
+        recordPreviewOpen = false;
         lastCandidateLoadAt = Date.now();
         render();
       });
@@ -204,6 +210,7 @@
         visitCandidateOffset = 0;
         recordPreviewLineIndex = 0;
         lastCandidateLoadAt = 0;
+        sessionRecordPreview = null;
         glassState = {
           patient: null,
           mode: 'standby',
@@ -230,6 +237,7 @@
   }
 
   function startVisit() {
+    var previewBeforeStart = visitCandidate && visitCandidate.record_preview;
     var body = {
       candidate_id: visitCandidate ? visitCandidate.id : (TARGET_CANDIDATE_ID || null),
       update_glass: true,
@@ -246,8 +254,10 @@
       .then(function (data) {
         if (data.glass_state) {
           glassState = data.glass_state;
+          sessionRecordPreview = previewBeforeStart || sessionRecordPreview;
           visitCandidate = null;
           recordPreviewLineIndex = 0;
+          recordPreviewOpen = Boolean(sessionRecordPreview);
           render();
         }
         showToast('세션 시작됨', 'success');
@@ -317,6 +327,7 @@
       showToast('표시할 기록 없음', 'error');
       return;
     }
+    recordPreviewOpen = true;
     recordPreviewLineIndex = (recordPreviewLineIndex + 1) % preview.lines.length;
     renderStatus();
     showToast('기록 ' + (recordPreviewLineIndex + 1) + '/' + preview.lines.length, 'success');
@@ -348,6 +359,15 @@
         title: '환자 대기',
         meta: m || '오늘 방문 환자를 불러오는 중입니다.',
         caption: '환자가 보이면 시작으로 세션을 확인합니다.',
+      };
+    }
+    if (preview && recordPreviewOpen && hasSession) {
+      return {
+        kicker: mode === 'recording' ? 'REC + RECORD' : 'RECORD',
+        title: '기록 확인',
+        meta: previewMeta(preview),
+        caption: previewCaption(preview),
+        preview: preview,
       };
     }
     if (mode === 'pre_review') {
@@ -406,6 +426,7 @@
   function recordPreview() {
     var candidatePreview = visitCandidate && visitCandidate.record_preview;
     if (candidatePreview && candidatePreview.lens_safe !== false) return candidatePreview;
+    if (sessionRecordPreview && sessionRecordPreview.lens_safe !== false) return sessionRecordPreview;
     var insight = glassState.last_insight;
     if (insight && insight.source === 'moai_web.pre_review' && insight.lens_safe !== false) {
       return {
@@ -551,7 +572,7 @@
       btn.classList.remove('hidden');
       return;
     }
-    if (normalizedMode() === 'pre_review' && recordPreview()) {
+    if (glassState.visit_session_id && recordPreview()) {
       btn.dataset.action = 'cycle_record_preview';
       label.textContent = '기록 보기';
       btn.classList.remove('hidden');
