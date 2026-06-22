@@ -3815,6 +3815,101 @@ def _build_visit_session_write_plan(session: dict) -> dict:
     return build_moai_write_plan(bundle)
 
 
+def _trim_event_text(value: Optional[str], limit: int = 140) -> str:
+    text = re.sub(r"\s+", " ", value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
+    event_ids = [str(event_id) for event_id in session.get("event_ids") or [] if str(event_id).strip()]
+    if not event_ids:
+        return []
+    placeholders = ",".join("?" for _ in event_ids)
+    rows = conn.execute(
+        f"""
+        SELECT id, event_type, raw_text, intent, created_at
+        FROM events
+        WHERE id IN ({placeholders})
+        """,
+        event_ids,
+    ).fetchall()
+    by_id = {
+        row[0]: {
+            "id": row[0],
+            "event_type": row[1],
+            "raw_text": row[2] or "",
+            "intent": row[3] or "",
+            "created_at": row[4],
+        }
+        for row in rows
+    }
+    return [by_id[event_id] for event_id in event_ids if event_id in by_id]
+
+
+def _linked_event_bucket(event: dict) -> str:
+    text = f"{event.get('intent') or ''} {event.get('raw_text') or ''}".lower()
+    if any(token in text for token in ["home program", "home exercise", "과제", "homework", "assigned"]):
+        return "home_program"
+    if any(token in text for token in ["assessment", "평가", "test", "tug", "measure"]):
+        return "assessment"
+    if any(token in text for token in ["intervention", "중재", "training", "practice", "completed"]):
+        return "intervention"
+    return "observation"
+
+
+def _build_linked_event_progress_note(session: dict, linked_events: list[dict]) -> dict:
+    lines_by_bucket = {"assessment": [], "intervention": [], "home_program": [], "observation": []}
+    for event in linked_events:
+        text = _trim_event_text(event.get("raw_text"))
+        if not text:
+            continue
+        lines_by_bucket[_linked_event_bucket(event)].append(text)
+
+    objective_lines = []
+    if lines_by_bucket["assessment"]:
+        objective_lines.append("평가: " + "; ".join(lines_by_bucket["assessment"][:3]))
+    if lines_by_bucket["observation"]:
+        objective_lines.append("관찰: " + "; ".join(lines_by_bucket["observation"][:3]))
+    if lines_by_bucket["intervention"]:
+        objective_lines.append("중재: " + "; ".join(lines_by_bucket["intervention"][:3]))
+
+    plan_lines = []
+    if lines_by_bucket["home_program"]:
+        plan_lines.append("과제: " + "; ".join(lines_by_bucket["home_program"][:3]))
+    plan_lines.append("다음 방문 시 반응과 수행 안전성을 재확인.")
+
+    assessment_basis = lines_by_bucket["assessment"] or lines_by_bucket["observation"] or lines_by_bucket["intervention"]
+    return {
+        "note_format": "progress",
+        "status": "draft",
+        "requires_approval": True,
+        "subjective": session.get("history_summary") or "방문 재활 세션 진행.",
+        "objective": "\n".join(objective_lines) or f"linked_events={len(linked_events)}.",
+        "assessment": (
+            "방문 중 기록된 평가/관찰/중재 내용을 바탕으로 clinician review 필요: "
+            + "; ".join(assessment_basis[:3])
+            if assessment_basis
+            else "AI 추출 결과는 clinician review 전 draft 상태."
+        ),
+        "plan": "\n".join(plan_lines),
+    }
+
+
+def _refresh_visit_progress_note_from_events(conn: sqlite3.Connection, session: dict) -> dict:
+    linked_events = _visit_linked_events(conn, session)
+    if not linked_events:
+        return session
+    draft = _build_linked_event_progress_note(session, linked_events)
+    conn.execute(
+        "UPDATE visit_sessions SET draft_progress_note = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(draft, ensure_ascii=False, separators=(",", ":")), datetime.utcnow().isoformat() + "Z", session["id"]),
+    )
+    refreshed = get_visit_session(conn, session["id"])
+    return refreshed or session
+
+
 GLASS_COMMANDS = {
     "start_visit",
     "toggle_recording",
@@ -4294,6 +4389,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                         candidate = None
                         if existing.get("phase") == "summary":
                             session = end_visit_session(conn, session_id)
+                            session = _refresh_visit_progress_note_from_events(conn, session)
                             plan = _build_visit_session_write_plan(session)
                         else:
                             session = existing
@@ -4395,6 +4491,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             else:
                 if existing.get("phase") == "summary":
                     session = end_visit_session(conn, session_id)
+                    session = _refresh_visit_progress_note_from_events(conn, session)
                     plan = _build_visit_session_write_plan(session)
                 else:
                     session = update_visit_phase(conn, session_id, "summary", _build_visit_end_checkpoint_cue(existing))
@@ -4547,6 +4644,7 @@ def visit_session_end(session_id: str, update_glass: bool = True):
     try:
         with _conn() as conn:
             session = end_visit_session(conn, session_id)
+            session = _refresh_visit_progress_note_from_events(conn, session)
             conn.commit()
     except KeyError:
         raise HTTPException(status_code=404, detail="visit session not found")

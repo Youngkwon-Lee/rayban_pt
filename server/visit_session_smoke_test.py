@@ -263,6 +263,23 @@ def main() -> None:
         require(ingest.status_code == 200, f"ingest should succeed: {ingest.text}")
         event_id = ingest.json()["event_id"]
 
+        home_program = client.post(
+            "/ingest",
+            headers=headers(),
+            json={
+                "source": "visit-smoke",
+                "event_type": "text",
+                "patient_name": "P7",
+                "owner_org_id": "11111111-1111-4111-8111-111111111111",
+                "owner_provider_person_id": "22222222-2222-4222-8222-222222222222",
+                "subject_person_id": "33333333-3333-4333-8333-333333333333",
+                "physio_session_id": "44444444-4444-4444-8444-444444444444",
+                "text": "home program assigned: supported standing practice",
+            },
+        )
+        require(home_program.status_code == 200, f"home program ingest should succeed: {home_program.text}")
+        home_program_event_id = home_program.json()["event_id"]
+
         attach = client.post(
             f"/visit-sessions/{session_id}/events",
             headers=headers(),
@@ -271,6 +288,18 @@ def main() -> None:
         require(attach.status_code == 200, "event attach should succeed")
         require(attach.json()["session"]["event_ids"] == [event_id], "attached event should persist")
         require(attach.json()["glass_state"]["session_count"] == 1, "HUD count should reflect event count")
+
+        attach_home_program = client.post(
+            f"/visit-sessions/{session_id}/events",
+            headers=headers(),
+            json={"event_id": home_program_event_id},
+        )
+        require(attach_home_program.status_code == 200, "home program event attach should succeed")
+        require(
+            attach_home_program.json()["session"]["event_ids"] == [event_id, home_program_event_id],
+            "multiple attached events should persist",
+        )
+        require(attach_home_program.json()["glass_state"]["session_count"] == 2, "HUD count should reflect all events")
 
         checkpoint = client.post(
             "/neural-band/event",
@@ -305,6 +334,15 @@ def main() -> None:
         require(note_op["payload"]["note_format"] == "progress", "visit note should be progress format")
         require(note_op["payload"]["requires_approval"] is True, "visit note should require approval")
         require(event_id in note_op["payload"]["ai_draft_snapshot"]["linked_event_ids"], "note should link event ids")
+        note_content = note_op["payload"]["note_content"]
+        require(
+            "standing balance intervention completed" in note_content,
+            "progress note should summarize linked intervention event",
+        )
+        require(
+            "home program assigned" in note_content,
+            "progress note should summarize linked home program event",
+        )
 
     print("OK: visit session orchestration smoke test passed")
 
