@@ -27,11 +27,13 @@ def main() -> None:
     require('aria-label="HUD commands"' in glass_html, "HUD command rail missing")
     require('aria-label="Visit phase"' in glass_html, "HUD visit phase strip missing")
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
+    require('id="capture-role-label"' in glass_html, "HUD capture role indicator missing")
+    require('id="role-counts-label"' in glass_html, "HUD role counts indicator missing")
     for phase in ["pre_review", "assessment", "intervention", "home_program", "summary"]:
         require(f'data-phase="{phase}"' in glass_html, f"HUD phase chip missing: {phase}")
-    for command in ["toggle_recording", "next_phase", "show_recommendations", "open_capture_history", "end_visit_session"]:
+    for command in ["toggle_recording", "next_phase", "next_role", "show_recommendations", "open_capture_history", "end_visit_session"]:
         require(f'data-action="{command}"' in glass_html, f"HUD command missing: {command}")
-    require(glass_html.count("focusable command-button") == 5, "HUD should expose five focusable commands")
+    require(glass_html.count("focusable command-button") == 6, "HUD should expose six focusable commands")
 
     glass_css = client.get("/glass-app/styles.css")
     require(glass_css.status_code == 200, "glass webapp CSS should load")
@@ -55,6 +57,12 @@ def main() -> None:
         "commandResultLabel",
         "safePatientAlias",
         "renderPhase",
+        "renderCaptureRole",
+        "normalizedCaptureRole",
+        "roleCountsLabel",
+        "capture_role",
+        "event_role_counts",
+        "next_role",
         "renderReadiness",
         "bridge_url",
         "normalizeBaseUrl",

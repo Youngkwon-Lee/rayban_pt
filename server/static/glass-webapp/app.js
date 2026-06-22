@@ -15,6 +15,8 @@
     is_recording: false,
     recording_start: null,
     session_count: 0,
+    event_role_counts: {},
+    capture_role: 'observation',
     visit_session_id: null,
     phase: 'pre_review',
     readiness: 'ready',
@@ -162,6 +164,7 @@
 
   function render() {
     renderPatient();
+    renderCaptureRole();
     renderReadiness();
     renderPhase();
     renderStatus();
@@ -175,6 +178,13 @@
     var count = glassState.session_count || 0;
     setText('patient-name', alias || '미선택');
     setText('session-label', 'E' + count);
+  }
+
+  function renderCaptureRole() {
+    var role = normalizedCaptureRole();
+    var counts = glassState.event_role_counts || {};
+    setText('capture-role-label', roleLabel(role) + ' 기록');
+    setText('role-counts-label', roleCountsLabel(counts));
   }
 
   function renderReadiness() {
@@ -286,6 +296,31 @@
     return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
 
+  function normalizedCaptureRole() {
+    var role = String(glassState.capture_role || '').trim();
+    if (['observation', 'assessment', 'intervention', 'home_program'].indexOf(role) !== -1) return role;
+    var phase = phaseFromMode(normalizedMode());
+    if (phase === 'assessment' || phase === 'intervention' || phase === 'home_program') return phase;
+    return 'observation';
+  }
+
+  function roleLabel(role) {
+    var labels = {
+      observation: '관찰',
+      assessment: '평가',
+      intervention: '중재',
+      home_program: '과제',
+    };
+    return labels[role] || '관찰';
+  }
+
+  function roleCountsLabel(counts) {
+    var assessment = Number(counts.assessment || 0);
+    var intervention = Number(counts.intervention || 0);
+    var homeProgram = Number(counts.home_program || 0);
+    return '평' + assessment + ' 중' + intervention + ' 과' + homeProgram;
+  }
+
   function renderInsight() {
     var card = document.getElementById('insight-card');
     var insight = glassState.last_insight;
@@ -394,6 +429,7 @@
       start_visit: '방문 시작',
       select_patient: '환자 선택',
       next_phase: '다음 단계',
+      next_role: '기록 역할',
       end_visit_session: '세션 종료',
       show_recommendations: '큐 표시',
       open_capture_history: '기록 열기',
@@ -408,6 +444,7 @@
       toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
       start_visit: '방문 시작됨',
       next_phase: '단계 변경됨',
+      next_role: '기록 역할 변경됨',
       end_visit_session: '세션 종료됨',
     };
     return labels[command] || commandLabel(command) + ' 완료';

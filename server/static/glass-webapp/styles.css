@@ -120,7 +120,7 @@ h1 {
 }
 
 .patient-name {
-  max-width: 340px;
+  max-width: 230px;
   margin: 0;
   overflow: hidden;
   color: var(--text-primary);
@@ -134,18 +134,31 @@ h1 {
 .context-pills {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .session-pill {
-  min-width: 64px;
-  padding: 8px 10px;
+  min-width: 52px;
+  padding: 8px 8px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 800;
   text-align: center;
   background: var(--bg-muted);
   border-radius: var(--radius);
+}
+
+.session-pill.role {
+  min-width: 76px;
+  color: #061015;
+  background: var(--accent-primary);
+  border: 1px solid var(--accent-primary);
+}
+
+.session-pill.count {
+  min-width: 88px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .session-pill.ready {
@@ -349,8 +362,8 @@ h2 {
 
 .command-rail {
   display: grid;
-  grid-template-columns: 1.45fr 1fr 1fr 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: 1.35fr repeat(5, 1fr);
+  gap: 6px;
 }
 
 .command-button {
@@ -359,11 +372,11 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px 8px;
+  gap: 6px;
+  padding: 10px 6px;
   color: var(--text-primary);
   font: inherit;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 900;
   line-height: 1;
   background: var(--bg-surface-strong);
