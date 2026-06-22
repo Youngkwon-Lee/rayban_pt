@@ -17,7 +17,7 @@ import json
 
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -81,7 +81,7 @@ VIDEO_STORE = _env_bool("VIDEO_STORE", False)
 PILOT_CAPTURE_MODE = _env_bool("PILOT_CAPTURE_MODE", False)
 
 PUBLIC_PATHS = {"/", "/health", "/label-taxonomy"}
-PUBLIC_PATH_PREFIXES = ("/glass-app", "/neural-band-console")
+PUBLIC_PATH_PREFIXES = ("/glass-app", "/neural-band-console", "/g")
 DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
 
 ASYNC_RESULTS: dict[str, dict] = {}
@@ -2089,6 +2089,15 @@ def _event_status_result(processed: dict) -> dict:
     if processed.get("media"):
         result["media"] = processed["media"]
     return result
+
+
+@app.get("/g/demo")
+def glass_demo_shortlink():
+    params = []
+    if BRIDGE_API_KEY:
+        params.append(f"api_key={BRIDGE_API_KEY}")
+    params.append("candidate_id=enc-demo-a1f607c7")
+    return RedirectResponse(url="/glass-app/?" + "&".join(params), status_code=302)
 
 
 @app.get("/", response_class=HTMLResponse)

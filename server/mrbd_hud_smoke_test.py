@@ -21,6 +21,13 @@ def main() -> None:
 
     glass_app = client.get("/glass-app/")
     require(glass_app.status_code == 200, "glass webapp should be public")
+    shortlink = client.get("/g/demo", follow_redirects=False)
+    require(shortlink.status_code == 302, "demo QR shortlink should redirect")
+    require(
+        shortlink.headers.get("location") == "/glass-app/?candidate_id=enc-demo-a1f607c7"
+        or shortlink.headers.get("location") == "/glass-app/?api_key=mrbd-temp-20260622&candidate_id=enc-demo-a1f607c7",
+        "demo QR shortlink redirect target mismatch",
+    )
     glass_html = glass_app.text
     require('name="viewport" content="width=600, height=600' in glass_html, "MRBD viewport meta missing")
     require('name="mrbd-web-app-capable" content="yes"' in glass_html, "MRBD capability meta missing")
