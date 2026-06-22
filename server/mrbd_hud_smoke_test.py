@@ -36,6 +36,8 @@ def main() -> None:
     require('id="patient-context-label"' in glass_html, "HUD patient context label missing")
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
     require('id="end-label"' in glass_html, "HUD dynamic end label missing")
+    require('id="record-list"' in glass_html, "HUD record preview list missing")
+    require('id="record-line-0"' in glass_html, "HUD record preview line missing")
     require('id="capture-role-label"' not in glass_html, "HUD should not expose capture role controls")
     require('id="role-counts-label"' not in glass_html, "HUD should not expose role counters")
     require("phase-chip" not in glass_html, "HUD should use capture labels instead of phase chips")
@@ -52,6 +54,8 @@ def main() -> None:
     require("width: 600px;" in css_text and "height: 600px;" in css_text, "HUD CSS should fix 600x600 canvas")
     require("background: #000000" in css_text, "HUD page background should be additive-display transparent black")
     require("min-height: 88px;" in css_text, "HUD commands should use MRBD button height")
+    require(".record-list" in css_text, "HUD CSS should include record preview list")
+    require("white-space: nowrap;" in css_text, "HUD text should avoid uncontrolled wrapping")
 
     glass_js = client.get("/glass-app/app.js")
     require(glass_js.status_code == 200, "glass webapp JS should load")
@@ -75,7 +79,9 @@ def main() -> None:
         "completeVisitHudSession",
         "complete_visit_hud",
         "recordPreview",
-        "activePreviewLine",
+        "renderRecordList",
+        "record-preview-mode",
+        "previewMeta",
         "cycleRecordPreview",
         "cycle_record_preview",
         "previewCaption",

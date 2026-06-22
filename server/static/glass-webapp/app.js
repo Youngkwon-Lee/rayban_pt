@@ -308,6 +308,7 @@
     setText('status-title', copy.title);
     setText('status-meta', copy.meta);
     setText('status-caption', copy.caption);
+    renderRecordList(copy.preview || null);
   }
 
   function cycleRecordPreview() {
@@ -336,8 +337,9 @@
       return {
         kicker: TARGET_CANDIDATE_ID ? 'SELECTED' : 'CONFIRM',
         title: preview ? '기록 확인' : '환자 확인',
-        meta: preview ? activePreviewLine(preview) : selectedAlias + ' 방문을 시작할까요?',
+        meta: preview ? previewMeta(preview) : selectedAlias + ' 방문을 시작할까요?',
         caption: preview ? previewCaption(preview) : (TARGET_CANDIDATE_ID ? '선택된 오늘 방문입니다. 시작을 눌러 세션을 엽니다.' : '다른 환자면 다음 환자를 누르세요.'),
+        preview: preview || null,
       };
     }
     if (!hasSession && !selectedAlias && (mode === 'standby' || mode === 'ready')) {
@@ -352,8 +354,9 @@
       return {
         kicker: 'REVIEW',
         title: '기록 확인',
-        meta: preview ? activePreviewLine(preview) : (m || '녹화를 시작할 수 있습니다.'),
+        meta: preview ? previewMeta(preview) : (m || '녹화를 시작할 수 있습니다.'),
         caption: preview ? previewCaption(preview) : '상세 기록은 physio_app encounter에서 검토합니다.',
+        preview: preview || null,
       };
     }
     if (mode === 'assessment') {
@@ -426,10 +429,39 @@
     return parts.length ? parts.join(' · ') : '요약만 렌즈에 표시합니다.';
   }
 
+  function previewMeta(preview) {
+    return (preview && preview.cue) || activePreviewLine(preview) || '기록 요약';
+  }
+
   function activePreviewLine(preview) {
     var lines = preview && preview.lines;
     if (lines && lines.length) return lines[normalizedPreviewIndex(preview)];
     return (preview && preview.cue) || '기록 요약 없음';
+  }
+
+  function renderRecordList(preview) {
+    var list = document.getElementById('record-list');
+    if (!list) return;
+    var panel = list.closest('.status-panel');
+    var lines = preview && preview.lines;
+    if (!lines || !lines.length) {
+      list.classList.add('hidden');
+      if (panel) panel.classList.remove('record-preview-mode');
+      for (var emptyIndex = 0; emptyIndex < 3; emptyIndex += 1) {
+        setText('record-line-' + emptyIndex, '');
+      }
+      return;
+    }
+    list.classList.remove('hidden');
+    if (panel) panel.classList.add('record-preview-mode');
+    var active = normalizedPreviewIndex(preview);
+    for (var i = 0; i < 3; i += 1) {
+      var el = document.getElementById('record-line-' + i);
+      if (!el) continue;
+      el.textContent = lines[i] || '';
+      el.classList.toggle('active', i === active);
+      el.classList.toggle('hidden', !lines[i]);
+    }
   }
 
   function normalizedPreviewIndex(preview) {

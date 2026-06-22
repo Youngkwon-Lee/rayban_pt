@@ -4653,9 +4653,11 @@ def _build_local_candidate_record_preview(conn: sqlite3.Connection, candidate: d
         (source_event_id, encounter_id),
     ).fetchall()
     lines: list[str] = []
+    marker_count = 0
     for row in rows:
         raw_text = str(row[2] or "")
         if raw_text.startswith("Visit session ended; source_visit_session_id="):
+            marker_count += 1
             text = "세션 종료 · 노트 초안 생성"
         else:
             text = _short_lens_text(raw_text or row[3] or row[1] or "방문 기록", limit=58)
@@ -4664,14 +4666,19 @@ def _build_local_candidate_record_preview(conn: sqlite3.Connection, candidate: d
             line = f"{label}: {text}"
             if line not in lines:
                 lines.append(line)
-    if not lines:
-        lines = ["로컬 기록 없음", "physio_app 상세에서 전체 확인"]
+    demo_only = bool(rows) and marker_count == len(rows)
+    if demo_only or not lines:
+        lines = [
+            "데모 노트: 최근 방문 후 기립 균형 훈련 지속",
+            "데모 평가: min-mod assist, 피로 시 체간 흔들림",
+            "데모 과제: 보호자 도움 하 서기 3회",
+        ]
     return {
         "title": "기록 요약",
-        "cue": "로컬 기록 " + str(len(rows)),
+        "cue": "데모 기록" if demo_only or not rows else "로컬 기록 " + str(len(rows)),
         "lines": lines[:3],
         "lens_safe": True,
-        "source": "local.record_preview",
+        "source": "demo.record_preview" if demo_only or not rows else "local.record_preview",
         "signals": {
             "notes_count": len(rows),
             "pending_notes_count": 0,
