@@ -15,6 +15,7 @@ os.environ["REQUIRE_PATIENT_CONSENT"] = "false"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as bridge  # noqa: E402
+import mlops_harness  # noqa: E402
 
 
 API_KEY = os.environ["BRIDGE_API_KEY"]
@@ -406,6 +407,26 @@ def main() -> None:
         require(jobs.status_code == 200, "pending moai sync jobs should load")
         queued = [job for job in jobs.json()["items"] if job["event_id"] == sync_job["event_id"]]
         require(queued, "visit session sync job should be visible in pending queue")
+
+        harness_args = type(
+            "HarnessArgs",
+            (),
+            {
+                "subject_person_id": None,
+                "provider_person_id": None,
+                "encounter_id": None,
+                "capture_device": "rayban_visit_session",
+                "no_resolve_identity": True,
+            },
+        )()
+        bundle, harness_plan = mlops_harness._build_bundle_and_plan(harness_args, sync_job["event_id"])
+        require(bundle["context"]["source_type"] == "visit_session_sync_marker", "harness should detect visit sync marker")
+        require(
+            harness_plan["summary"]["operation_count"] == sync_job["operation_count"],
+            "harness visit plan should match queued operation count",
+        )
+        dry_run = mlops_harness._execute_plan_if_allowed(harness_plan, execute=False)
+        require(dry_run["status"] == "dry_run", "harness should dry-run visit sync plan")
 
     print("OK: visit session orchestration smoke test passed")
 
