@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import sqlite3
 import tempfile
@@ -427,6 +429,30 @@ def main() -> None:
         )
         dry_run = mlops_harness._execute_plan_if_allowed(harness_plan, execute=False)
         require(dry_run["status"] == "dry_run", "harness should dry-run visit sync plan")
+
+        sync_pending_args = type(
+            "SyncPendingArgs",
+            (),
+            {
+                "subject_person_id": None,
+                "provider_person_id": None,
+                "encounter_id": None,
+                "capture_device": "rayban_visit_session",
+                "no_resolve_identity": True,
+                "status": "pending",
+                "limit": 10,
+                "execute": False,
+                "continue_on_error": False,
+                "full": False,
+            },
+        )()
+        with contextlib.redirect_stdout(io.StringIO()):
+            sync_pending_exit = mlops_harness.cmd_sync_pending(sync_pending_args)
+        require(sync_pending_exit == 0, "harness sync-pending should dry-run visit job")
+        planned_jobs = client.get("/moai-sync/jobs?status=planned&limit=10", headers=headers())
+        require(planned_jobs.status_code == 200, "planned moai sync jobs should load")
+        planned = [job for job in planned_jobs.json()["items"] if job["event_id"] == sync_job["event_id"]]
+        require(planned, "visit session sync job should become planned after dry-run sync-pending")
 
     print("OK: visit session orchestration smoke test passed")
 
