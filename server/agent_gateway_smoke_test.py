@@ -99,6 +99,26 @@ def main() -> None:
         require(state_after["last_insight"]["id"] == updated["cue"]["id"], "HUD should receive cue id")
         require(state_after["last_insight"]["lens_safe"] is True, "HUD insight should be lens-safe")
 
+        rec_state = client.post(
+            "/glass/state",
+            headers=headers(),
+            json={"mode": "recording", "message": "recording", "is_recording": True, "session_count": 2},
+        )
+        require(rec_state.status_code == 200, "recording glass state should update")
+        rec_cmd = client.post(
+            "/glass/command",
+            headers=headers(),
+            json={"command": "show_recommendations"},
+        )
+        require(rec_cmd.status_code == 200, "recommendation command should queue")
+        rec_after = client.get("/glass/state", headers=headers()).json()
+        require(rec_after["last_insight"]["source"] == "agent_gateway_dry_run", "recommendation command should generate cue")
+        require(rec_after["last_insight"]["lens_safe"] is True, "recommendation cue should be lens-safe")
+        require(len(rec_after["last_insight"]["body"]) <= 80, "recommendation cue should be lens-short")
+
+        queued = client.get("/glass/command", headers=headers()).json()
+        require(queued["command"] == "show_recommendations", "recommendation command should still reach iOS")
+
         blocked_tool = client.post(
             "/agent/cue-dry-run",
             headers=headers(),

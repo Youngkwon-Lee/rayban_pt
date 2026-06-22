@@ -2689,6 +2689,8 @@ import threading as _threading
 _glass_lock = _threading.Lock()
 _glass_state: dict = {
     "patient": None,
+    "mode": "standby",
+    "message": "라이브 연결을 기다리는 중",
     "is_recording": False,
     "recording_start": None,
     "session_count": 0,
@@ -2700,6 +2702,8 @@ _glass_pending_command: Optional[dict] = None
 
 class GlassStateUpdate(BaseModel):
     patient: Optional[str] = None
+    mode: Optional[str] = None
+    message: Optional[str] = None
     is_recording: Optional[bool] = None
     recording_start: Optional[str] = None
     session_count: Optional[int] = None
@@ -2708,6 +2712,13 @@ class GlassStateUpdate(BaseModel):
 
 class GlassCommandRequest(BaseModel):
     command: str
+
+
+class NeuralBandEventRequest(BaseModel):
+    gesture: str
+    device_id: Optional[str] = None
+    source: str = "neural_band"
+    metadata: Optional[dict] = None
 
 
 class AgentCueDryRunRequest(BaseModel):
@@ -2803,6 +2814,86 @@ def _existing_event_id_for_audit(event_id: Optional[str]) -> Optional[str]:
         return None
 
 
+GLASS_COMMANDS = {
+    "toggle_recording",
+    "start_live",
+    "open_capture_history",
+    "primary_action",
+    "select_patient",
+    "show_recommendations",
+}
+NEURAL_BAND_GESTURE_MAP = {
+    "toggle_recording": "toggle_recording",
+    "tap": "toggle_recording",
+    "single_tap": "toggle_recording",
+    "double_tap": "toggle_recording",
+    "press": "toggle_recording",
+    "squeeze": "toggle_recording",
+    "down": "primary_action",
+    "swipe_down": "primary_action",
+    "downward": "primary_action",
+    "select": "primary_action",
+    "enter": "primary_action",
+    "confirm": "primary_action",
+    "open": "primary_action",
+    "primary_action": "primary_action",
+    "patient": "select_patient",
+    "select_patient": "select_patient",
+    "patient_select": "select_patient",
+    "history": "open_capture_history",
+    "records": "open_capture_history",
+    "open_history": "open_capture_history",
+    "recommend": "show_recommendations",
+    "recommendations": "show_recommendations",
+    "assessment": "show_recommendations",
+    "evaluation": "show_recommendations",
+    "show_recommendations": "show_recommendations",
+}
+
+
+def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
+    if command != "show_recommendations":
+        return None
+    with _glass_lock:
+        mode = str(_glass_state.get("mode") or ("recording" if _glass_state.get("is_recording") else "ready"))
+        session_count = int(_glass_state.get("session_count") or 0)
+    payload = AgentCueDryRunRequest(
+        mode=mode,
+        observed_phase="session cue",
+        context_summary=f"HUD request from {source}; session {session_count}",
+        risk_flags=["fatigue"] if mode == "recording" else [],
+    )
+    cue = _build_dry_run_session_cue(payload)
+    with _glass_lock:
+        _glass_state["last_insight"] = cue
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    _audit_log(None, "info", f"agent command cue generated source={source} mode={mode}")
+    return cue
+
+
+def _queue_glass_command(command: str, source: str = "glass", metadata: Optional[dict] = None) -> dict:
+    global _glass_pending_command
+    if command not in GLASS_COMMANDS:
+        allowed = ", ".join(sorted(GLASS_COMMANDS))
+        _error(400, "INVALID_COMMAND", f"command must be one of: {allowed}")
+
+    queued = {
+        "command": command,
+        "id": str(uuid.uuid4()),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "source": source,
+    }
+    if metadata:
+        queued["metadata"] = metadata
+
+    with _glass_lock:
+        _glass_pending_command = queued
+    cue = _generate_command_cue_if_needed(command, source)
+    if cue:
+        queued["cue_id"] = cue["id"]
+    return queued
+
+
 @app.get("/glass/state")
 def glass_state_get():
     with _glass_lock:
@@ -2811,16 +2902,21 @@ def glass_state_get():
 
 @app.post("/glass/state")
 def glass_state_post(update: GlassStateUpdate):
+    fields_set = getattr(update, "model_fields_set", getattr(update, "__fields_set__", set()))
     with _glass_lock:
-        if update.patient is not None:
+        if "patient" in fields_set:
             _glass_state["patient"] = update.patient
-        if update.is_recording is not None:
+        if "mode" in fields_set:
+            _glass_state["mode"] = update.mode
+        if "message" in fields_set:
+            _glass_state["message"] = update.message
+        if "is_recording" in fields_set:
             _glass_state["is_recording"] = update.is_recording
-        if update.recording_start is not None:
+        if "recording_start" in fields_set:
             _glass_state["recording_start"] = update.recording_start
-        if update.session_count is not None:
+        if "session_count" in fields_set:
             _glass_state["session_count"] = update.session_count
-        if update.last_insight is not None:
+        if "last_insight" in fields_set:
             _glass_state["last_insight"] = update.last_insight
         _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
     return {"ok": True}
@@ -2828,16 +2924,30 @@ def glass_state_post(update: GlassStateUpdate):
 
 @app.post("/glass/command")
 def glass_command_post(cmd: GlassCommandRequest):
-    global _glass_pending_command
-    if cmd.command not in {"toggle_recording"}:
-        _error(400, "INVALID_COMMAND", "command must be 'toggle_recording'")
-    with _glass_lock:
-        _glass_pending_command = {
-            "command": cmd.command,
-            "id": str(uuid.uuid4()),
-            "created_at": datetime.utcnow().isoformat() + "Z",
-        }
-    return {"ok": True, "command": cmd.command}
+    queued = _queue_glass_command(cmd.command)
+    return {"ok": True, "command": queued["command"], "id": queued["id"]}
+
+
+@app.post("/neural-band/event")
+def neural_band_event_post(event: NeuralBandEventRequest):
+    gesture = event.gesture.strip().lower()
+    command = NEURAL_BAND_GESTURE_MAP.get(gesture)
+    if command is None:
+        allowed = ", ".join(sorted(NEURAL_BAND_GESTURE_MAP.keys()))
+        _error(400, "INVALID_NEURAL_BAND_GESTURE", f"gesture must map to one of: {allowed}")
+
+    metadata = dict(event.metadata or {})
+    if event.device_id:
+        metadata["device_id"] = event.device_id
+    metadata["gesture"] = gesture
+
+    queued = _queue_glass_command(command, source=event.source or "neural_band", metadata=metadata)
+    return {
+        "ok": True,
+        "gesture": gesture,
+        "mapped_command": queued["command"],
+        "id": queued["id"],
+    }
 
 
 @app.post("/agent/cue-dry-run")
