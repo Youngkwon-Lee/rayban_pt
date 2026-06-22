@@ -306,7 +306,7 @@
           sessionRecordPreview = previewBeforeStart || sessionRecordPreview;
           visitCandidate = null;
           recordPreviewLineIndex = 0;
-          recordPreviewOpen = Boolean(sessionRecordPreview);
+          recordPreviewOpen = false;
           render();
         }
         showToast('세션 시작됨', 'success');
@@ -379,6 +379,7 @@
     recordPreviewOpen = true;
     recordPreviewLineIndex = (recordPreviewLineIndex + 1) % preview.lines.length;
     renderStatus();
+    renderMiddleButton();
     showToast('기록 ' + (recordPreviewLineIndex + 1) + '/' + preview.lines.length, 'success');
   }
 
@@ -421,11 +422,10 @@
     }
     if (mode === 'pre_review') {
       return {
-        kicker: 'REVIEW',
-        title: '기록 확인',
-        meta: preview ? previewMeta(preview) : (m || '녹화를 시작할 수 있습니다.'),
-        caption: preview ? previewCaption(preview) : '상세 기록은 physio_app encounter에서 검토합니다.',
-        preview: preview || null,
+        kicker: 'CAPTURE',
+        title: '기록 대기',
+        meta: '녹화 시작으로 평가와 중재를 캡처하세요.',
+        caption: preview ? '이전 기록은 기록 확인 탭에서 봅니다.' : '필요한 장면에서 녹화를 시작하세요.',
       };
     }
     if (mode === 'assessment') {
@@ -631,7 +631,7 @@
     }
     if (glassState.visit_session_id && recordPreview()) {
       btn.dataset.action = 'cycle_record_preview';
-      label.textContent = '기록 보기';
+      label.textContent = recordPreviewOpen ? '기록 보기' : '기록 확인';
       btn.classList.remove('hidden');
       return;
     }
@@ -718,7 +718,7 @@
       start_visit: '시작 확인',
       select_patient: '환자 선택',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
-      cycle_record_preview: '기록 보기',
+      cycle_record_preview: recordPreviewOpen ? '기록 보기' : '기록 확인',
       end_visit_session: '세션 종료',
       complete_visit_hud: '완료',
       primary_action: '상태',
