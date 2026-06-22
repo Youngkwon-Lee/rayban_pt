@@ -516,21 +516,29 @@
     var lines = preview && preview.lines;
     if (!lines || !lines.length) {
       list.classList.add('hidden');
+      list.innerHTML = '';
       if (panel) panel.classList.remove('record-preview-mode');
-      for (var emptyIndex = 0; emptyIndex < 3; emptyIndex += 1) {
-        setText('record-line-' + emptyIndex, '');
-      }
       return;
     }
     list.classList.remove('hidden');
     if (panel) panel.classList.add('record-preview-mode');
     var active = normalizedPreviewIndex(preview);
-    for (var i = 0; i < 3; i += 1) {
-      var el = document.getElementById('record-line-' + i);
+    if (list.children.length !== lines.length) {
+      list.innerHTML = '';
+      for (var createIndex = 0; createIndex < lines.length; createIndex += 1) {
+        var row = document.createElement('p');
+        row.id = 'record-line-' + createIndex;
+        list.appendChild(row);
+      }
+    }
+    for (var i = 0; i < lines.length; i += 1) {
+      var el = list.children[i];
       if (!el) continue;
       el.textContent = lines[i] || '';
       el.classList.toggle('active', i === active);
-      el.classList.toggle('hidden', !lines[i]);
+      if (i === active && document.activeElement === panel) {
+        el.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
     }
   }
 
@@ -741,6 +749,37 @@
     });
   }
 
+  function commandButtons() {
+    return Array.prototype.slice.call(document.querySelectorAll('.command-button.focusable')).filter(function (el) {
+      return !el.classList.contains('hidden') && el.offsetParent !== null;
+    });
+  }
+
+  function focusCommand(delta) {
+    var items = commandButtons();
+    if (!items.length) return;
+    var currentIndex = items.indexOf(document.activeElement);
+    var nextIndex = currentIndex < 0 ? 0 : (currentIndex + delta + items.length) % items.length;
+    items[nextIndex].focus();
+  }
+
+  function focusRecordCard() {
+    var card = document.getElementById('status-card');
+    if (card) card.focus();
+  }
+
+  function scrollRecordCard(delta) {
+    var preview = recordPreview();
+    if (!preview || !preview.lines || !preview.lines.length) {
+      showToast('표시할 기록 없음', 'error');
+      return;
+    }
+    recordPreviewOpen = true;
+    recordPreviewLineIndex = (normalizedPreviewIndex(preview) + delta + preview.lines.length) % preview.lines.length;
+    renderStatus();
+    showToast('기록 ' + (recordPreviewLineIndex + 1) + '/' + preview.lines.length, 'success');
+  }
+
   function moveFocus(delta) {
     var items = focusables();
     if (!items.length) return;
@@ -758,13 +797,31 @@
     });
 
     document.addEventListener('keydown', function (e) {
-      if (['ArrowRight', 'ArrowDown'].indexOf(e.key) !== -1) {
-        moveFocus(1);
+      if (e.key === 'ArrowRight') {
+        focusCommand(1);
         e.preventDefault();
         return;
       }
-      if (['ArrowLeft', 'ArrowUp'].indexOf(e.key) !== -1) {
-        moveFocus(-1);
+      if (e.key === 'ArrowLeft') {
+        focusCommand(-1);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        if (document.activeElement && document.activeElement.classList.contains('command-button')) {
+          focusRecordCard();
+        } else {
+          focusCommand(0);
+        }
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        if (document.activeElement && document.activeElement.id === 'status-card') {
+          scrollRecordCard(1);
+        } else {
+          focusCommand(0);
+        }
         e.preventDefault();
         return;
       }

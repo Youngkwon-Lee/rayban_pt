@@ -4642,7 +4642,7 @@ def _record_preview_detail_lines(
         summary = row.get("summary_text") or row.get("title") or row.get("body_region") or row.get("media_kind")
         if summary:
             lines.append("미디어: " + _short_lens_text(str(summary), limit=54))
-    return lines[:3]
+    return lines[:6]
 
 
 def _build_local_candidate_record_preview(conn: sqlite3.Connection, candidate: dict) -> dict:
@@ -4677,12 +4677,15 @@ def _build_local_candidate_record_preview(conn: sqlite3.Connection, candidate: d
         lines = [
             "데모 노트: 최근 방문 후 기립 균형 훈련 지속",
             "데모 평가: min-mod assist, 피로 시 체간 흔들림",
+            "데모 관찰: 보행 시작 시 좌우 체중 이동 지연",
+            "데모 중재: sit-to-stand 5회, 휴식 2회",
+            "데모 cue: 발 전체 접지 후 일어나기",
             "데모 과제: 보호자 도움 하 서기 3회",
         ]
     return {
         "title": "기록 요약",
         "cue": "데모 기록" if demo_only or not rows else "로컬 기록 " + str(len(rows)),
-        "lines": lines[:3],
+        "lines": lines[:6],
         "lens_safe": True,
         "source": "demo.record_preview" if demo_only or not rows else "local.record_preview",
         "signals": {
