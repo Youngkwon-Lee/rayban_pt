@@ -44,9 +44,80 @@ def configure_isolated_storage(root: Path) -> None:
         conn.executescript(schema)
 
 
+def reset_hud_state() -> None:
+    with bridge._glass_lock:
+        bridge._glass_state.update(
+            {
+                "visit_session_id": None,
+                "patient": "대기",
+                "mode": "ready",
+                "message": "준비됨",
+                "is_recording": False,
+                "recording_start": None,
+                "session_count": 0,
+                "readiness": "ready",
+                "error_state": None,
+            }
+        )
+
+
+def exercise_remote_visit_candidate() -> None:
+    with tempfile.TemporaryDirectory(prefix="rayban_remote_visit_candidate_smoke_") as tmp:
+        configure_isolated_storage(Path(tmp))
+        reset_hud_state()
+        client = TestClient(bridge.app)
+        remote_candidate = {
+            "id": "moai:55555555-5555-4555-8555-555555555555",
+            "patient_alias": "P-333333",
+            "organization_id": "11111111-1111-4111-8111-111111111111",
+            "provider_person_id": "22222222-2222-4222-8222-222222222222",
+            "subject_person_id": "33333333-3333-4333-8333-333333333333",
+            "physio_client_id": None,
+            "encounter_id": "55555555-5555-4555-8555-555555555555",
+            "source_event_id": None,
+            "session_label": "home_visit_pt",
+            "created_at": "2026-06-22T09:00:00Z",
+            "readiness": "ready",
+            "source": "moai_web.encounters",
+            "status": "scheduled",
+            "care_setting": "home_visit",
+        }
+        original_lookup = bridge._list_moai_glass_visit_candidates
+        bridge._list_moai_glass_visit_candidates = lambda limit=10: [remote_candidate]
+        try:
+            next_visit = client.get("/glass/visits/next", headers=headers())
+            require(next_visit.status_code == 200, "remote HUD next visit should succeed")
+            candidate = next_visit.json()["candidate"]
+            require(candidate["source"] == "moai_web.encounters", "HUD should prefer moai encounter candidates")
+            require(candidate["patient_alias"] == "P-333333", "remote candidate should keep lens-safe alias")
+
+            start = client.post(
+                "/glass/visits/start",
+                headers=headers(),
+                json={"candidate_id": candidate["id"]},
+            )
+            require(start.status_code == 200, f"remote HUD visit start should succeed: {start.text}")
+            session = start.json()["session"]
+            require(
+                session["encounter_id"] == "55555555-5555-4555-8555-555555555555",
+                "remote encounter id should anchor visit session",
+            )
+            require(session["patient_alias"] == "P-333333", "remote alias should persist to visit session")
+            require(
+                "moai_web.encounters" in session["history_summary"],
+                "remote start summary should record candidate source",
+            )
+        finally:
+            bridge._list_moai_glass_visit_candidates = original_lookup
+            reset_hud_state()
+
+
 def main() -> None:
+    exercise_remote_visit_candidate()
+
     with tempfile.TemporaryDirectory(prefix="rayban_visit_session_smoke_") as tmp:
         configure_isolated_storage(Path(tmp))
+        reset_hud_state()
         client = TestClient(bridge.app)
 
         unauth = client.post("/visit-sessions/start", json={})

@@ -3971,10 +3971,106 @@ def _visit_candidate_from_event_row(row) -> dict:
         "session_label": row[7] or "방문 재활",
         "created_at": row[8],
         "readiness": "ready" if row[2] and row[3] and row[4] else "missing_identity",
+        "source": "local_events",
     }
 
 
+def _glass_remote_scope() -> tuple[Optional[str], Optional[str]]:
+    provider_person_id = (
+        os.getenv("RAYBAN_HUD_PROVIDER_PERSON_ID")
+        or os.getenv("GLASS_PROVIDER_PERSON_ID")
+        or os.getenv("MOAI_WEB_PROVIDER_PERSON_ID")
+        or ""
+    ).strip()
+    organization_id = (
+        os.getenv("RAYBAN_HUD_ORGANIZATION_ID")
+        or os.getenv("GLASS_ORGANIZATION_ID")
+        or os.getenv("MOAI_WEB_ORGANIZATION_ID")
+        or ""
+    ).strip()
+    return provider_person_id or None, organization_id or None
+
+
+def _moai_fetch_rows(table: str, params: dict[str, str]) -> list[dict]:
+    config = load_moai_writer_config()
+    if config is None:
+        return []
+    headers = {
+        "apikey": config.api_key,
+        "Accept": "application/json",
+    }
+    if config.auth_header:
+        headers["Authorization"] = config.auth_header
+    response = requests.get(
+        f"{config.base_url}/rest/v1/{table}",
+        headers=headers,
+        params=params,
+        timeout=config.timeout_seconds,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
+
+
+def _visit_candidate_from_encounter_row(row: dict) -> Optional[dict]:
+    organization_id = str(row.get("organization_id") or "").strip()
+    provider_person_id = str(row.get("provider_person_id") or "").strip()
+    subject_person_id = str(row.get("subject_person_id") or "").strip()
+    encounter_id = str(row.get("id") or "").strip()
+    if not (organization_id and provider_person_id and subject_person_id and encounter_id):
+        return None
+    short_subject = subject_person_id.split("-", 1)[0][:6].upper()
+    return {
+        "id": f"moai:{encounter_id}",
+        "patient_alias": f"P-{short_subject}" if short_subject else "Patient",
+        "organization_id": organization_id,
+        "provider_person_id": provider_person_id,
+        "subject_person_id": subject_person_id,
+        "physio_client_id": None,
+        "encounter_id": encounter_id,
+        "source_event_id": None,
+        "session_label": str(row.get("session_type") or "방문 재활"),
+        "created_at": row.get("period_start"),
+        "readiness": "ready",
+        "source": "moai_web.encounters",
+        "status": row.get("status"),
+        "care_setting": row.get("care_setting"),
+    }
+
+
+def _list_moai_glass_visit_candidates(limit: int = 10) -> list[dict]:
+    provider_person_id, organization_id = _glass_remote_scope()
+    if not provider_person_id:
+        return []
+    window_start = (datetime.utcnow() - timedelta(hours=12)).isoformat(timespec="seconds") + "Z"
+    params = {
+        "select": "id,organization_id,provider_person_id,subject_person_id,period_start,session_type,status,care_setting",
+        "provider_person_id": f"eq.{provider_person_id}",
+        "subject_person_id": "not.is.null",
+        "period_start": f"gte.{window_start}",
+        "order": "period_start.asc.nullslast",
+        "limit": str(max(1, min(limit, 50))),
+    }
+    if organization_id:
+        params["organization_id"] = f"eq.{organization_id}"
+    try:
+        rows = _moai_fetch_rows("encounters", params)
+    except Exception as exc:
+        logger.warning("moai glass visit candidate lookup failed: %s", exc)
+        return []
+    candidates: list[dict] = []
+    for row in rows:
+        candidate = _visit_candidate_from_encounter_row(row)
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
 def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
+    remote_candidates = _list_moai_glass_visit_candidates(limit=limit)
+    if remote_candidates:
+        return remote_candidates
+
     rows = conn.execute(
         """
         SELECT id, patient_name, owner_org_id, owner_provider_person_id, subject_person_id,
@@ -4006,6 +4102,9 @@ def _list_glass_visit_candidates(conn: sqlite3.Connection, limit: int = 10) -> l
 
 def _get_glass_visit_candidate(conn: sqlite3.Connection, candidate_id: Optional[str] = None, offset: int = 0) -> Optional[dict]:
     if candidate_id:
+        for candidate in _list_moai_glass_visit_candidates(limit=50):
+            if candidate["id"] == candidate_id or candidate["encounter_id"] == candidate_id:
+                return candidate
         row = conn.execute(
             """
             SELECT id, patient_name, owner_org_id, owner_provider_person_id, subject_person_id,
@@ -4020,6 +4119,12 @@ def _get_glass_visit_candidate(conn: sqlite3.Connection, candidate_id: Optional[
     if not candidates:
         return None
     return candidates[offset % len(candidates)]
+
+
+def _visit_candidate_history_summary(candidate: dict) -> str:
+    if candidate.get("source_event_id"):
+        return f"HUD visit started from event {candidate['source_event_id']}."
+    return f"HUD visit started from {candidate.get('source') or 'visit candidate'} {candidate['encounter_id']}."
 
 
 def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
@@ -4086,7 +4191,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                         subject_person_id=candidate["subject_person_id"],
                         encounter_id=candidate["encounter_id"],
                         patient_alias=candidate["patient_alias"],
-                        history_summary=f"HUD visit started from event {candidate['source_event_id']}.",
+                        history_summary=_visit_candidate_history_summary(candidate),
                     )
                 conn.commit()
         except LookupError:
@@ -4352,7 +4457,7 @@ def glass_visits_start(payload: GlassVisitStartRequest):
             subject_person_id=candidate["subject_person_id"],
             encounter_id=candidate["encounter_id"],
             patient_alias=candidate["patient_alias"],
-            history_summary=f"HUD visit started from event {candidate['source_event_id']}.",
+            history_summary=_visit_candidate_history_summary(candidate),
         )
         conn.commit()
     hud = _apply_visit_session_hud(session) if payload.update_glass else None
