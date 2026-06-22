@@ -4534,7 +4534,7 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
         "encounter_notes",
         _subject_history_params(
             subject_context,
-            select="id,encounter_id,note_format,status,approval_status,created_at",
+            select="id,encounter_id,note_format,status,approval_status,objective,assessment,plan,note_content,created_at",
             order="created_at.desc.nullslast",
         ),
     )
@@ -4542,7 +4542,7 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
         "observations",
         _subject_history_params(
             subject_context,
-            select="id,code,code_display,status,interpretation,effective_datetime,created_at",
+            select="id,code,code_display,status,interpretation,value_string,note,effective_datetime,created_at",
             order="effective_datetime.desc.nullslast",
         ),
     )
@@ -4550,7 +4550,7 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
         "activity_sessions",
         _subject_history_params(
             subject_context,
-            select="id,activity_type,status,created_at",
+            select="id,activity_type,status,notes,metrics,created_at",
             order="created_at.desc.nullslast",
         ),
     )
@@ -4558,7 +4558,7 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
         "client_media_summaries",
         _subject_history_params(
             subject_context,
-            select="id,title,media_kind,body_region,observed_at,created_at",
+            select="id,title,summary_text,media_kind,body_region,observed_at,created_at",
             order="observed_at.desc.nullslast",
         ),
     )
@@ -4583,11 +4583,13 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
     cue = " · ".join(signals[:3]) if signals else "최근 기록 없음"
     if len(cue) > 44:
         cue = cue[:41].rstrip() + "..."
-    lines = [
+    detail_lines = _record_preview_detail_lines(notes, observations, activity_sessions, media_summaries)
+    count_lines = [
         f"노트 {len(notes)}" + (f" · 미승인 {len(pending_notes)}" if pending_notes else ""),
         f"평가 {len(observations)} · 중재/과제 {len(activity_sessions)}",
         f"미디어 요약 {len(media_summaries)}",
     ]
+    lines = detail_lines or count_lines
     return {
         "title": "기록 요약",
         "cue": cue,
@@ -4602,6 +4604,39 @@ def _build_subject_record_preview(subject_context: dict) -> dict:
             "media_summaries_count": len(media_summaries),
         },
     }
+
+
+def _record_preview_detail_lines(
+    notes: list[dict],
+    observations: list[dict],
+    activity_sessions: list[dict],
+    media_summaries: list[dict],
+) -> list[str]:
+    lines: list[str] = []
+    for row in notes[:1]:
+        text = row.get("assessment") or row.get("objective") or row.get("plan") or row.get("note_content")
+        if text:
+            lines.append("노트: " + _short_lens_text(str(text), limit=58))
+    for row in observations[:1]:
+        label = str(row.get("code_display") or row.get("code") or "평가").strip()
+        value = row.get("value_string") or row.get("interpretation") or row.get("note")
+        if value:
+            lines.append(_short_lens_text(f"평가: {label} {value}", limit=58))
+        elif label:
+            lines.append(_short_lens_text(f"평가: {label}", limit=58))
+    for row in activity_sessions[:1]:
+        activity = str(row.get("activity_type") or "중재").strip()
+        note = row.get("notes")
+        if not note and isinstance(row.get("metrics"), dict):
+            metric_parts = [str(value) for value in row["metrics"].values() if value]
+            note = " ".join(metric_parts[:2])
+        line = f"중재: {activity}" + (f" · {note}" if note else "")
+        lines.append(_short_lens_text(line, limit=58))
+    for row in media_summaries[:1]:
+        summary = row.get("summary_text") or row.get("title") or row.get("body_region") or row.get("media_kind")
+        if summary:
+            lines.append("미디어: " + _short_lens_text(str(summary), limit=54))
+    return lines[:3]
 
 
 def _attach_record_preview_to_candidate(candidate: Optional[dict]) -> Optional[dict]:

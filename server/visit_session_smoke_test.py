@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import sqlite3
 import tempfile
@@ -231,6 +232,10 @@ def exercise_remote_visit_candidate() -> None:
                         "note_format": "progress",
                         "status": "draft",
                         "approval_status": "pending",
+                        "objective": "환자 김민수 010-1234-5678 기립 유지 20초, 후반부 체간 흔들림 관찰",
+                        "assessment": "체간 안정성 저하와 피로 누적 소견",
+                        "plan": "기립 유지 훈련",
+                        "note_content": "S/O/A/P draft",
                         "created_at": "2026-06-20T09:00:00Z",
                     }
                 ]
@@ -242,13 +247,30 @@ def exercise_remote_visit_candidate() -> None:
                         "code_display": "Assist Level",
                         "status": "final",
                         "interpretation": "unchanged",
+                        "value_string": "mod assist",
+                        "note": "Therapist-reviewed label",
                         "effective_datetime": "2026-06-20T09:15:00Z",
                     }
                 ]
             if table == "activity_sessions":
-                return [{"id": "act-1", "activity_type": "home_exercise", "status": "completed"}]
+                return [
+                    {
+                        "id": "act-1",
+                        "activity_type": "home_exercise",
+                        "status": "completed",
+                        "notes": "standing balance practice completed",
+                        "metrics": {"assist_level": "mod", "performance": "fair"},
+                    }
+                ]
             if table == "client_media_summaries":
-                return [{"id": "media-summary-1", "media_kind": "video", "body_region": "hip"}]
+                return [
+                    {
+                        "id": "media-summary-1",
+                        "media_kind": "video",
+                        "body_region": "hip",
+                        "summary_text": "hip strategy observed",
+                    }
+                ]
             return []
 
         bridge._moai_fetch_rows = fake_moai_fetch
@@ -266,6 +288,10 @@ def exercise_remote_visit_candidate() -> None:
             require(preview["signals"]["activity_sessions_count"] == 1, "candidate preview should count activities")
             require("노트 1" in preview["cue"], "candidate preview should include note count")
             require("미승인 확인" in preview["cue"], "candidate preview should include pending-note flag")
+            require(any("체간 안정성 저하" in line for line in preview["lines"]), "candidate preview should include note snippet")
+            require(any("Assist Level mod assist" in line for line in preview["lines"]), "candidate preview should include observation snippet")
+            require("김민수" not in json.dumps(preview, ensure_ascii=False), "candidate preview should redact patient names")
+            require("010-1234-5678" not in json.dumps(preview, ensure_ascii=False), "candidate preview should redact phones")
 
             start = client.post(
                 "/glass/visits/start",
@@ -291,6 +317,7 @@ def exercise_remote_visit_candidate() -> None:
             require(insight["signals"]["observations_count"] == 1, "pre-review should count observations")
             require(insight["signals"]["activity_sessions_count"] == 1, "pre-review should count activities")
             require(insight["signals"]["media_summaries_count"] == 1, "pre-review should count media summaries")
+            require(any("체간 안정성 저하" in line for line in insight["lines"]), "pre-review insight should include note snippet")
         finally:
             bridge._list_moai_glass_visit_candidates = original_lookup
             bridge._moai_fetch_rows = original_fetch
