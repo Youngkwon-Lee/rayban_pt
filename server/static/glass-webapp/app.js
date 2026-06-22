@@ -255,6 +255,7 @@
   function statusCopy(mode, message) {
     var selectedAlias = safePatientAlias(glassState.patient || (visitCandidate && visitCandidate.patient_alias) || '');
     var hasSession = Boolean(glassState.visit_session_id);
+    var readiness = String(glassState.readiness || '').toLowerCase();
     var m = message || '';
     if (!hasSession && selectedAlias) {
       return {
@@ -284,8 +285,11 @@
     if (mode === 'home_program') {
       return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: '과제 내용은 encounter 초안에서 확인합니다.' };
     }
+    if (mode === 'summary' && readiness === 'sync_pending') {
+      return { kicker: 'QUEUE', title: '전송 대기', meta: m || '진행 노트 초안이 준비되었습니다.', caption: 'physio_app에서 검토하고 서명하세요.' };
+    }
     if (mode === 'summary') {
-      return { kicker: 'DONE', title: '초안 준비', meta: m || '진행 노트 초안이 준비되었습니다.', caption: 'physio_app에서 검토하고 서명하세요.' };
+      return { kicker: 'CONFIRM', title: '종료 확인', meta: m || '세션을 종료하려면 한 번 더 누르세요.', caption: '종료하면 진행 노트 초안 생성과 전송 대기로 넘어갑니다.' };
     }
     if (mode === 'recording') {
       return { kicker: 'REC', title: '녹화 중', meta: m || '세션 캡처를 저장 중입니다.', caption: '내용 분류와 노트 초안은 서버에서 처리합니다.' };
@@ -398,8 +402,24 @@
     var label = document.getElementById('end-label');
     var btn = document.getElementById('end-btn');
     if (!label || !btn) return;
-    label.textContent = glassState.visit_session_id ? '세션 종료' : '닫기';
-    btn.classList.toggle('disabled-look', !glassState.visit_session_id);
+    var mode = normalizedMode();
+    var readiness = String(glassState.readiness || '').toLowerCase();
+    var hasSession = Boolean(glassState.visit_session_id);
+    if (!hasSession) {
+      label.textContent = '닫기';
+      btn.dataset.action = 'primary_action';
+      btn.classList.add('disabled-look');
+      return;
+    }
+    if (readiness === 'sync_pending') {
+      label.textContent = '전송 상태';
+      btn.dataset.action = 'primary_action';
+      btn.classList.add('disabled-look');
+      return;
+    }
+    btn.dataset.action = 'end_visit_session';
+    label.textContent = mode === 'summary' ? '종료 확정' : '세션 종료';
+    btn.classList.remove('disabled-look');
   }
 
   function safePatientAlias(name) {
@@ -469,7 +489,7 @@
       toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
       start_visit: '세션 시작됨',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정됨' : '다른 환자',
-      end_visit_session: '세션 종료됨',
+      end_visit_session: result && result.session && result.session.status === 'ended' ? '세션 종료됨' : '종료 확인 필요',
     };
     return labels[command] || commandLabel(command) + ' 완료';
   }
