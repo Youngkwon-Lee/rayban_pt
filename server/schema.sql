@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS visit_sessions (
     error_state TEXT,
     cue TEXT NOT NULL DEFAULT '',
     event_ids TEXT NOT NULL DEFAULT '[]',
+    event_refs TEXT NOT NULL DEFAULT '[]',
     draft_progress_note TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP

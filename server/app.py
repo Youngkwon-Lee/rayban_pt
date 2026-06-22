@@ -3683,6 +3683,7 @@ _glass_state: dict = {
     "is_recording": False,
     "recording_start": None,
     "session_count": 0,
+    "event_role_counts": {},
     "last_insight": None,
     "updated_at": None,
 }
@@ -3696,6 +3697,7 @@ class GlassStateUpdate(BaseModel):
     is_recording: Optional[bool] = None
     recording_start: Optional[str] = None
     session_count: Optional[int] = None
+    event_role_counts: Optional[dict] = None
     visit_session_id: Optional[str] = None
     phase: Optional[str] = None
     readiness: Optional[str] = None
@@ -3752,6 +3754,8 @@ class VisitSessionRecordingRequest(BaseModel):
 
 class VisitSessionEventRequest(BaseModel):
     event_id: str
+    role: Optional[str] = None
+    phase: Optional[str] = None
     update_glass: bool = True
 
 
@@ -3826,6 +3830,11 @@ def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
     event_ids = [str(event_id) for event_id in session.get("event_ids") or [] if str(event_id).strip()]
     if not event_ids:
         return []
+    refs_by_id = {
+        str(ref.get("event_id")): ref
+        for ref in session.get("event_refs") or []
+        if str(ref.get("event_id") or "").strip()
+    }
     placeholders = ",".join("?" for _ in event_ids)
     rows = conn.execute(
         f"""
@@ -3842,6 +3851,8 @@ def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
             "raw_text": row[2] or "",
             "intent": row[3] or "",
             "created_at": row[4],
+            "role": refs_by_id.get(row[0], {}).get("role"),
+            "phase": refs_by_id.get(row[0], {}).get("phase"),
         }
         for row in rows
     }
@@ -3849,6 +3860,9 @@ def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
 
 
 def _linked_event_bucket(event: dict) -> str:
+    role = str(event.get("role") or "").strip()
+    if role in {"assessment", "intervention", "home_program", "observation"}:
+        return role
     text = f"{event.get('intent') or ''} {event.get('raw_text') or ''}".lower()
     if any(token in text for token in ["home program", "home exercise", "과제", "homework", "assigned"]):
         return "home_program"
@@ -4326,8 +4340,19 @@ def _attach_pre_review_to_session(conn: sqlite3.Connection, session: dict) -> tu
 
 def _build_visit_end_checkpoint_cue(session: dict) -> str:
     event_count = len(session.get("event_ids") or [])
+    role_counts = {"assessment": 0, "intervention": 0, "home_program": 0, "observation": 0}
+    for ref in session.get("event_refs") or []:
+        role = str(ref.get("role") or "observation")
+        role_counts[role] = role_counts.get(role, 0) + 1
+    role_parts = []
+    if role_counts.get("assessment"):
+        role_parts.append(f"평가 {role_counts['assessment']}")
+    if role_counts.get("intervention"):
+        role_parts.append(f"중재 {role_counts['intervention']}")
+    if role_counts.get("home_program"):
+        role_parts.append(f"과제 {role_counts['home_program']}")
     status_parts = [
-        f"기록 {event_count}",
+        " · ".join(role_parts) if role_parts else f"기록 {event_count}",
         f"phase {session.get('phase') or 'unknown'}",
     ]
     if session.get("recording_status") == "recording":
@@ -4630,7 +4655,7 @@ def visit_session_attach_event(session_id: str, payload: VisitSessionEventReques
         if not event_exists:
             raise HTTPException(status_code=404, detail="event not found")
         try:
-            session = attach_visit_event(conn, session_id, payload.event_id)
+            session = attach_visit_event(conn, session_id, payload.event_id, role=payload.role, phase=payload.phase)
         except KeyError:
             raise HTTPException(status_code=404, detail="visit session not found")
         conn.commit()
@@ -4713,6 +4738,8 @@ def glass_state_post(update: GlassStateUpdate):
             _glass_state["recording_start"] = update.recording_start
         if "session_count" in fields_set:
             _glass_state["session_count"] = update.session_count
+        if "event_role_counts" in fields_set:
+            _glass_state["event_role_counts"] = update.event_role_counts
         if "visit_session_id" in fields_set:
             _glass_state["visit_session_id"] = update.visit_session_id
         if "phase" in fields_set:

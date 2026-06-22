@@ -55,6 +55,7 @@ def reset_hud_state() -> None:
                 "is_recording": False,
                 "recording_start": None,
                 "session_count": 0,
+                "event_role_counts": {},
                 "readiness": "ready",
                 "error_state": None,
             }
@@ -283,23 +284,39 @@ def main() -> None:
         attach = client.post(
             f"/visit-sessions/{session_id}/events",
             headers=headers(),
-            json={"event_id": event_id},
+            json={"event_id": event_id, "role": "intervention"},
         )
         require(attach.status_code == 200, "event attach should succeed")
         require(attach.json()["session"]["event_ids"] == [event_id], "attached event should persist")
+        require(
+            attach.json()["session"]["event_refs"][0]["role"] == "intervention",
+            "attached event should persist explicit role",
+        )
         require(attach.json()["glass_state"]["session_count"] == 1, "HUD count should reflect event count")
+        require(
+            attach.json()["glass_state"]["event_role_counts"]["intervention"] == 1,
+            "HUD should count intervention events",
+        )
 
         attach_home_program = client.post(
             f"/visit-sessions/{session_id}/events",
             headers=headers(),
-            json={"event_id": home_program_event_id},
+            json={"event_id": home_program_event_id, "role": "home_program"},
         )
         require(attach_home_program.status_code == 200, "home program event attach should succeed")
         require(
             attach_home_program.json()["session"]["event_ids"] == [event_id, home_program_event_id],
             "multiple attached events should persist",
         )
+        require(
+            attach_home_program.json()["session"]["event_refs"][1]["role"] == "home_program",
+            "home program role should persist",
+        )
         require(attach_home_program.json()["glass_state"]["session_count"] == 2, "HUD count should reflect all events")
+        require(
+            attach_home_program.json()["glass_state"]["event_role_counts"]["home_program"] == 1,
+            "HUD should count home program events",
+        )
 
         checkpoint = client.post(
             "/neural-band/event",
@@ -312,6 +329,8 @@ def main() -> None:
         require(checkpointed["session"]["status"] == "active", "long press should not end immediately")
         require(checkpointed["session"]["phase"] == "summary", "long press should move to summary checkpoint")
         require("확인=종료" in checkpointed["session"]["cue"], "checkpoint cue should ask for confirm")
+        require("중재 1" in checkpointed["session"]["cue"], "checkpoint cue should summarize intervention count")
+        require("과제 1" in checkpointed["session"]["cue"], "checkpoint cue should summarize home program count")
         require("moai_write_plan" not in checkpointed, "checkpoint should not build write plan yet")
 
         end = client.post(

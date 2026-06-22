@@ -8,6 +8,7 @@ from typing import Any
 
 
 VISIT_PHASES = {"pre_review", "assessment", "intervention", "home_program", "summary"}
+VISIT_EVENT_ROLES = {"assessment", "intervention", "home_program", "observation"}
 
 
 def utc_now() -> str:
@@ -36,6 +37,7 @@ def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
             error_state TEXT,
             cue TEXT NOT NULL DEFAULT '',
             event_ids TEXT NOT NULL DEFAULT '[]',
+            event_refs TEXT NOT NULL DEFAULT '[]',
             draft_progress_note TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -48,6 +50,9 @@ def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
             ON visit_sessions(encounter_id);
         """
     )
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(visit_sessions)").fetchall()}
+    if "event_refs" not in columns:
+        conn.execute("ALTER TABLE visit_sessions ADD COLUMN event_refs TEXT NOT NULL DEFAULT '[]'")
 
 
 def _as_json(value: Any) -> str:
@@ -72,11 +77,54 @@ def _from_json_dict(value: str | None) -> dict[str, Any]:
         return {}
 
 
+def _from_json_refs(value: str | None) -> list[dict[str, Any]]:
+    try:
+        parsed = json.loads(value or "[]")
+        if isinstance(parsed, list):
+            refs = []
+            for item in parsed:
+                if not isinstance(item, dict):
+                    continue
+                event_id = str(item.get("event_id") or "").strip()
+                if not event_id:
+                    continue
+                refs.append(
+                    {
+                        "event_id": event_id,
+                        "role": str(item.get("role") or "observation"),
+                        "phase": str(item.get("phase") or ""),
+                        "attached_at": str(item.get("attached_at") or ""),
+                    }
+                )
+            return refs
+    except Exception:
+        pass
+    return []
+
+
+def _event_role_counts(event_refs: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {role: 0 for role in sorted(VISIT_EVENT_ROLES)}
+    for ref in event_refs:
+        role = normalize_event_role(str(ref.get("role") or ""))
+        counts[role] = counts.get(role, 0) + 1
+    return counts
+
+
 def normalize_phase(phase: str) -> str:
     clean = (phase or "").strip()
     if clean not in VISIT_PHASES:
         raise ValueError(f"phase must be one of: {', '.join(sorted(VISIT_PHASES))}")
     return clean
+
+
+def normalize_event_role(role: str | None, phase: str | None = None) -> str:
+    clean = (role or "").strip()
+    if clean in VISIT_EVENT_ROLES:
+        return clean
+    phase_clean = (phase or "").strip()
+    if phase_clean in {"assessment", "intervention", "home_program"}:
+        return phase_clean
+    return "observation"
 
 
 def row_to_visit_session(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
@@ -99,9 +147,10 @@ def row_to_visit_session(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
         "error_state": row[15],
         "cue": row[16],
         "event_ids": _from_json_list(row[17]),
-        "draft_progress_note": _from_json_dict(row[18]),
-        "created_at": row[19],
-        "updated_at": row[20],
+        "event_refs": _from_json_refs(row[18]),
+        "draft_progress_note": _from_json_dict(row[19]),
+        "created_at": row[20],
+        "updated_at": row[21],
     }
 
 
@@ -111,7 +160,7 @@ def get_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, An
         SELECT id, organization_id, provider_person_id, subject_person_id, encounter_id,
                patient_alias, phase, status, recording_status, selected_at, started_at, ended_at,
                session_timer_started_at, history_summary, readiness, error_state, cue, event_ids,
-               draft_progress_note, created_at, updated_at
+               event_refs, draft_progress_note, created_at, updated_at
         FROM visit_sessions
         WHERE id = ?
         """,
@@ -194,16 +243,34 @@ def set_visit_recording(conn: sqlite3.Connection, session_id: str, is_recording:
     return get_visit_session(conn, session_id) or {}
 
 
-def attach_visit_event(conn: sqlite3.Connection, session_id: str, event_id: str) -> dict[str, Any]:
+def attach_visit_event(
+    conn: sqlite3.Connection,
+    session_id: str,
+    event_id: str,
+    *,
+    role: str | None = None,
+    phase: str | None = None,
+) -> dict[str, Any]:
     existing = get_visit_session(conn, session_id)
     if not existing:
         raise KeyError(session_id)
     event_ids = existing["event_ids"]
     if event_id not in event_ids:
         event_ids.append(event_id)
+    ref_role = normalize_event_role(role, phase or existing.get("phase"))
+    ref_phase = (phase or existing.get("phase") or "").strip()
+    event_refs = [ref for ref in existing.get("event_refs") or [] if ref.get("event_id") != event_id]
+    event_refs.append(
+        {
+            "event_id": event_id,
+            "role": ref_role,
+            "phase": ref_phase,
+            "attached_at": utc_now(),
+        }
+    )
     conn.execute(
-        "UPDATE visit_sessions SET event_ids = ?, updated_at = ? WHERE id = ?",
-        (_as_json(event_ids), utc_now(), session_id),
+        "UPDATE visit_sessions SET event_ids = ?, event_refs = ?, updated_at = ? WHERE id = ?",
+        (_as_json(event_ids), _as_json(event_refs), utc_now(), session_id),
     )
     return get_visit_session(conn, session_id) or {}
 
@@ -252,6 +319,7 @@ def visit_hud_state(session: dict[str, Any]) -> dict[str, Any]:
         "is_recording": recording,
         "recording_start": session.get("session_timer_started_at") if recording else None,
         "session_count": len(session.get("event_ids") or []),
+        "event_role_counts": _event_role_counts(session.get("event_refs") or []),
         "phase": session.get("phase") or "pre_review",
         "readiness": session.get("readiness") or "ready",
         "error_state": session.get("error_state"),
