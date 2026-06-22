@@ -251,6 +251,9 @@ def visit_hud_state(session: dict[str, Any]) -> dict[str, Any]:
         "is_recording": recording,
         "recording_start": session.get("session_timer_started_at") if recording else None,
         "session_count": len(session.get("event_ids") or []),
+        "phase": session.get("phase") or "pre_review",
+        "readiness": session.get("readiness") or "ready",
+        "error_state": session.get("error_state"),
         "last_insight": {
             "id": session.get("id"),
             "title": "Visit Session",

@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
-  <meta name="description" content="Rayban PT capture HUD for Meta Ray-Ban Display glasses.">
+  <meta name="description" content="Glanceable Rayban PT visit HUD for Meta Ray-Ban Display glasses.">
   <meta name="mrbd-web-app-capable" content="yes">
   <link rel="icon" href="data:image/png;base64,iVBORw0KGgo=">
-  <title>Rayban PT HUD</title>
+  <title>Rayban PT Visit HUD</title>
   <script>
     (function () {
       var assetQuery = window.location.search || "";
@@ -19,11 +19,11 @@
 </head>
 <body>
   <main id="app" class="app-root" aria-live="polite">
-    <section id="home" class="screen" aria-label="Rayban PT capture status">
+    <section id="home" class="screen" aria-label="Rayban PT visit HUD">
       <header class="hud-header panel">
         <div>
           <p class="eyebrow">Rayban PT</p>
-          <h1>Capture HUD</h1>
+          <h1>Visit HUD</h1>
         </div>
         <div class="connection" id="conn-status">
           <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
@@ -33,10 +33,21 @@
 
       <section class="patient-panel panel" aria-label="Session context">
         <div>
-          <p class="meta-label">PATIENT</p>
+          <p class="meta-label">PATIENT ALIAS</p>
           <p class="patient-name" id="patient-name">미선택</p>
         </div>
-        <div class="session-pill" id="session-label">대기</div>
+        <div class="context-pills" aria-label="Visit readiness">
+          <div class="session-pill" id="readiness-label">준비</div>
+          <div class="session-pill" id="session-label">E0</div>
+        </div>
+      </section>
+
+      <section class="phase-panel panel" aria-label="Visit phase">
+        <div class="phase-chip" data-phase="pre_review">기록</div>
+        <div class="phase-chip" data-phase="assessment">평가</div>
+        <div class="phase-chip" data-phase="intervention">중재</div>
+        <div class="phase-chip" data-phase="home_program">과제</div>
+        <div class="phase-chip" data-phase="summary">요약</div>
       </section>
 
       <section class="status-panel panel" id="status-card" aria-label="Capture state">

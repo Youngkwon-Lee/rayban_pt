@@ -6,6 +6,7 @@
   var BRIDGE_BASE_URL = normalizeBaseUrl(params.get('bridge_url')) || window.location.origin;
   var POLL_MS = 2000;
   var INSIGHT_DURATION_MS = 8000;
+  var VISIT_PHASES = ['pre_review', 'assessment', 'intervention', 'home_program', 'summary'];
 
   var glassState = {
     patient: null,
@@ -14,6 +15,8 @@
     is_recording: false,
     recording_start: null,
     session_count: 0,
+    readiness: 'ready',
+    error_state: null,
     last_insight: null,
     updated_at: null,
   };
@@ -83,6 +86,8 @@
 
   function render() {
     renderPatient();
+    renderReadiness();
+    renderPhase();
     renderStatus();
     renderInsight();
     renderToggleButton();
@@ -92,14 +97,36 @@
     var alias = safePatientAlias(glassState.patient);
     var count = glassState.session_count || 0;
     setText('patient-name', alias || '미선택');
-    setText('session-label', count > 0 ? 'S' + count : '대기');
+    setText('session-label', 'E' + count);
+  }
+
+  function renderReadiness() {
+    var label = document.getElementById('readiness-label');
+    if (!label) return;
+    var hasError = Boolean(glassState.error_state) || glassState.mode === 'error';
+    var ready = String(glassState.readiness || '').toLowerCase() || (hasError ? 'error' : 'ready');
+    label.classList.toggle('ready', !hasError && ready === 'ready');
+    label.classList.toggle('error', hasError || ready === 'error');
+    label.textContent = hasError ? '오류' : (ready === 'ready' ? '준비' : '확인');
+  }
+
+  function renderPhase() {
+    var mode = normalizedMode();
+    var phase = phaseFromMode(mode);
+    var activeIndex = VISIT_PHASES.indexOf(phase);
+    var chips = document.querySelectorAll('.phase-chip');
+    Array.prototype.forEach.call(chips, function (chip) {
+      var chipIndex = VISIT_PHASES.indexOf(chip.dataset.phase);
+      chip.classList.toggle('active', chip.dataset.phase === phase);
+      chip.classList.toggle('done', activeIndex > 0 && chipIndex >= 0 && chipIndex < activeIndex);
+    });
   }
 
   function renderStatus() {
     var card = document.getElementById('status-card');
     var recDot = document.getElementById('rec-dot');
     var timer = document.getElementById('rec-timer');
-    var mode = glassState.mode || (glassState.is_recording ? 'recording' : 'ready');
+    var mode = normalizedMode();
     var copy = statusCopy(mode, glassState.message);
 
     card.dataset.mode = mode;
@@ -113,9 +140,45 @@
     setText('status-caption', copy.caption);
   }
 
+  function normalizedMode() {
+    if (glassState.is_recording) return 'recording';
+    return glassState.mode || 'standby';
+  }
+
+  function phaseFromMode(mode) {
+    if (VISIT_PHASES.indexOf(mode) !== -1) return mode;
+    if (mode === 'ready' || mode === 'standby') return 'pre_review';
+    if (mode === 'recording') return phaseFromMessage(glassState.message) || 'assessment';
+    if (mode === 'success') return 'summary';
+    return 'pre_review';
+  }
+
+  function phaseFromMessage(message) {
+    var text = String(message || '').toLowerCase();
+    if (text.indexOf('home') !== -1 || text.indexOf('과제') !== -1) return 'home_program';
+    if (text.indexOf('중재') !== -1 || text.indexOf('intervention') !== -1) return 'intervention';
+    if (text.indexOf('평가') !== -1 || text.indexOf('assessment') !== -1) return 'assessment';
+    return '';
+  }
+
   function statusCopy(mode, message) {
     var patientReady = Boolean(glassState.patient);
     var m = message || '';
+    if (mode === 'pre_review') {
+      return { kicker: 'REVIEW', title: '기록 확인', meta: m || '이전 기록과 금기 사항을 확인하세요.', caption: '환자 식별 정보는 최소 alias만 표시합니다.' };
+    }
+    if (mode === 'assessment') {
+      return { kicker: 'ASSESS', title: '평가', meta: m || '관찰, 신체검사, 기능평가를 진행하세요.', caption: '결과는 자동 라벨 후보로 저장됩니다.' };
+    }
+    if (mode === 'intervention') {
+      return { kicker: 'TREAT', title: '중재', meta: m || '수행한 중재와 반응을 짧게 캡처하세요.', caption: '세부 기록은 서버에서 초안으로 정리합니다.' };
+    }
+    if (mode === 'home_program') {
+      return { kicker: 'HOME', title: '과제', meta: m || '가정 과제와 보호자 cue를 확인하세요.', caption: '렌즈에는 짧은 cue만 표시합니다.' };
+    }
+    if (mode === 'summary') {
+      return { kicker: 'NOTE', title: '노트 초안', meta: m || '진행 노트 초안 검토가 필요합니다.', caption: '전송 전 iPhone/physio 앱에서 승인하세요.' };
+    }
     if (mode === 'recording') {
       return { kicker: 'REC', title: '녹화 중', meta: m || '세션 캡처를 저장 중입니다.', caption: '민감 정보는 앱과 서버에서만 처리합니다.' };
     }
@@ -145,7 +208,7 @@
   function renderInsight() {
     var card = document.getElementById('insight-card');
     var insight = glassState.last_insight;
-    var mode = glassState.mode || (glassState.is_recording ? 'recording' : 'ready');
+    var mode = normalizedMode();
     var hideInModes = { recording: true, uploading: true, analyzing: true };
 
     if (!insight || hideInModes[mode]) {

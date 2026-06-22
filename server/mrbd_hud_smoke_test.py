@@ -25,6 +25,10 @@ def main() -> None:
     require('name="viewport" content="width=600, height=600' in glass_html, "MRBD viewport meta missing")
     require('name="mrbd-web-app-capable" content="yes"' in glass_html, "MRBD capability meta missing")
     require('aria-label="HUD commands"' in glass_html, "HUD command rail missing")
+    require('aria-label="Visit phase"' in glass_html, "HUD visit phase strip missing")
+    require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
+    for phase in ["pre_review", "assessment", "intervention", "home_program", "summary"]:
+        require(f'data-phase="{phase}"' in glass_html, f"HUD phase chip missing: {phase}")
     for command in ["toggle_recording", "select_patient", "show_recommendations", "open_capture_history"]:
         require(f'data-action="{command}"' in glass_html, f"HUD command missing: {command}")
     require(glass_html.count("focusable command-button") == 4, "HUD should expose four focusable commands")
@@ -46,6 +50,8 @@ def main() -> None:
         "ArrowUp",
         "sendCommand",
         "safePatientAlias",
+        "renderPhase",
+        "renderReadiness",
         "bridge_url",
         "normalizeBaseUrl",
         "BRIDGE_BASE_URL",
