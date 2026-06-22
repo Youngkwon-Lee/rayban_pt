@@ -272,14 +272,27 @@ def main() -> None:
         require(attach.json()["session"]["event_ids"] == [event_id], "attached event should persist")
         require(attach.json()["glass_state"]["session_count"] == 1, "HUD count should reflect event count")
 
-        end = client.post(
+        checkpoint = client.post(
             "/neural-band/event",
             headers=headers(),
             json={"gesture": "long_press", "device_id": "band-visit-smoke"},
         )
+        require(checkpoint.status_code == 200, f"visit checkpoint should succeed: {checkpoint.text}")
+        checkpointed = checkpoint.json()["executed"]
+        require(checkpointed["executed"] is True, "neural band long press should execute server-side")
+        require(checkpointed["session"]["status"] == "active", "long press should not end immediately")
+        require(checkpointed["session"]["phase"] == "summary", "long press should move to summary checkpoint")
+        require("확인=종료" in checkpointed["session"]["cue"], "checkpoint cue should ask for confirm")
+        require("moai_write_plan" not in checkpointed, "checkpoint should not build write plan yet")
+
+        end = client.post(
+            "/neural-band/event",
+            headers=headers(),
+            json={"gesture": "confirm", "device_id": "band-visit-smoke"},
+        )
         require(end.status_code == 200, f"visit end should succeed: {end.text}")
         ended = end.json()["executed"]
-        require(ended["executed"] is True, "neural band long press should execute server-side")
+        require(ended["executed"] is True, "neural band confirm should execute final end")
         require(ended["session"]["status"] == "ended", "session should end")
         require(ended["session"]["phase"] == "summary", "ended phase should be summary")
         require(ended["glass_state"]["is_recording"] is False, "HUD should stop recording on end")

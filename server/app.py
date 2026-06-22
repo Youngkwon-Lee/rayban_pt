@@ -4229,6 +4229,17 @@ def _attach_pre_review_to_session(conn: sqlite3.Connection, session: dict) -> tu
     return updated, pre_review
 
 
+def _build_visit_end_checkpoint_cue(session: dict) -> str:
+    event_count = len(session.get("event_ids") or [])
+    status_parts = [
+        f"기록 {event_count}",
+        f"phase {session.get('phase') or 'unknown'}",
+    ]
+    if session.get("recording_status") == "recording":
+        status_parts.append("녹화중")
+    return " · ".join(status_parts + ["확인=종료"])
+
+
 def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
     if command != "show_recommendations":
         return None
@@ -4276,11 +4287,16 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
         try:
             with _conn() as conn:
                 pre_review = None
+                plan = None
                 if session_id:
                     existing = get_visit_session(conn, session_id)
                     if existing and existing.get("status") == "active":
-                        session = existing
                         candidate = None
+                        if existing.get("phase") == "summary":
+                            session = end_visit_session(conn, session_id)
+                            plan = _build_visit_session_write_plan(session)
+                        else:
+                            session = existing
                     else:
                         session_id = None
                 if not session_id:
@@ -4331,6 +4347,8 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
             result["metadata"] = metadata
         if candidate:
             result["candidate"] = candidate
+        if plan:
+            result["moai_write_plan"] = plan
         return result
 
     if not session_id:
@@ -4375,8 +4393,12 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                 )
                 plan = None
             else:
-                session = end_visit_session(conn, session_id)
-                plan = _build_visit_session_write_plan(session)
+                if existing.get("phase") == "summary":
+                    session = end_visit_session(conn, session_id)
+                    plan = _build_visit_session_write_plan(session)
+                else:
+                    session = update_visit_phase(conn, session_id, "summary", _build_visit_end_checkpoint_cue(existing))
+                    plan = None
             conn.commit()
     except KeyError:
         with _glass_lock:
