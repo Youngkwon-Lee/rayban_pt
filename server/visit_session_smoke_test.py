@@ -83,7 +83,39 @@ def exercise_remote_visit_candidate() -> None:
             "care_setting": "home_visit",
         }
         original_lookup = bridge._list_moai_glass_visit_candidates
+        original_fetch = bridge._moai_fetch_rows
         bridge._list_moai_glass_visit_candidates = lambda limit=10: [remote_candidate]
+
+        def fake_moai_fetch(table: str, params: dict[str, str]) -> list[dict]:
+            if table == "encounter_notes":
+                return [
+                    {
+                        "id": "note-1",
+                        "encounter_id": "prev-enc-1",
+                        "note_format": "progress",
+                        "status": "draft",
+                        "approval_status": "pending",
+                        "created_at": "2026-06-20T09:00:00Z",
+                    }
+                ]
+            if table == "observations":
+                return [
+                    {
+                        "id": "obs-1",
+                        "code": "assist_level",
+                        "code_display": "Assist Level",
+                        "status": "final",
+                        "interpretation": "unchanged",
+                        "effective_datetime": "2026-06-20T09:15:00Z",
+                    }
+                ]
+            if table == "activity_sessions":
+                return [{"id": "act-1", "activity_type": "home_exercise", "status": "completed"}]
+            if table == "client_media_summaries":
+                return [{"id": "media-summary-1", "media_kind": "video", "body_region": "hip"}]
+            return []
+
+        bridge._moai_fetch_rows = fake_moai_fetch
         try:
             next_visit = client.get("/glass/visits/next", headers=headers())
             require(next_visit.status_code == 200, "remote HUD next visit should succeed")
@@ -107,8 +139,17 @@ def exercise_remote_visit_candidate() -> None:
                 "moai_web.encounters" in session["history_summary"],
                 "remote start summary should record candidate source",
             )
+            require("노트 1" in session["cue"], "pre-review cue should include note count")
+            require("미승인 확인" in session["cue"], "pre-review cue should flag pending notes")
+            insight = start.json()["glass_state"]["last_insight"]
+            require(insight["source"] == "moai_web.pre_review", "HUD insight should come from pre-review")
+            require(insight["lens_safe"] is True, "pre-review insight should be lens-safe")
+            require(insight["signals"]["observations_count"] == 1, "pre-review should count observations")
+            require(insight["signals"]["activity_sessions_count"] == 1, "pre-review should count activities")
+            require(insight["signals"]["media_summaries_count"] == 1, "pre-review should count media summaries")
         finally:
             bridge._list_moai_glass_visit_candidates = original_lookup
+            bridge._moai_fetch_rows = original_fetch
             reset_hud_state()
 
 
@@ -119,6 +160,7 @@ def main() -> None:
         configure_isolated_storage(Path(tmp))
         reset_hud_state()
         client = TestClient(bridge.app)
+        bridge._moai_fetch_rows = lambda table, params: []
 
         unauth = client.post("/visit-sessions/start", json={})
         require(unauth.status_code == 401, "visit session API should require auth")

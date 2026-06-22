@@ -3760,8 +3760,10 @@ class GlassVisitStartRequest(BaseModel):
     update_glass: bool = True
 
 
-def _apply_visit_session_hud(session: dict) -> dict:
+def _apply_visit_session_hud(session: dict, insight: Optional[dict] = None) -> dict:
     hud = visit_hud_state(session)
+    if insight:
+        hud["last_insight"] = insight
     with _glass_lock:
         _glass_state.update(hud)
         _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -4127,6 +4129,106 @@ def _visit_candidate_history_summary(candidate: dict) -> str:
     return f"HUD visit started from {candidate.get('source') or 'visit candidate'} {candidate['encounter_id']}."
 
 
+def _safe_moai_fetch_rows(table: str, params: dict[str, str]) -> list[dict]:
+    try:
+        return _moai_fetch_rows(table, params)
+    except Exception as exc:
+        logger.warning("moai pre-review lookup failed table=%s: %s", table, exc)
+        return []
+
+
+def _subject_history_params(session: dict, *, select: str, order: str, limit: int = 3) -> dict[str, str]:
+    params = {
+        "select": select,
+        "subject_person_id": f"eq.{session['subject_person_id']}",
+        "order": order,
+        "limit": str(max(1, min(limit, 10))),
+    }
+    organization_id = str(session.get("organization_id") or "").strip()
+    if organization_id:
+        params["organization_id"] = f"eq.{organization_id}"
+    return params
+
+
+def _build_visit_pre_review(session: dict) -> dict:
+    notes = _safe_moai_fetch_rows(
+        "encounter_notes",
+        _subject_history_params(
+            session,
+            select="id,encounter_id,note_format,status,approval_status,created_at",
+            order="created_at.desc.nullslast",
+        ),
+    )
+    observations = _safe_moai_fetch_rows(
+        "observations",
+        _subject_history_params(
+            session,
+            select="id,code,code_display,status,interpretation,effective_datetime,created_at",
+            order="effective_datetime.desc.nullslast",
+        ),
+    )
+    activity_sessions = _safe_moai_fetch_rows(
+        "activity_sessions",
+        _subject_history_params(
+            session,
+            select="id,activity_type,status,created_at",
+            order="created_at.desc.nullslast",
+        ),
+    )
+    media_summaries = _safe_moai_fetch_rows(
+        "client_media_summaries",
+        _subject_history_params(
+            session,
+            select="id,title,media_kind,body_region,observed_at,created_at",
+            order="observed_at.desc.nullslast",
+        ),
+    )
+
+    signals: list[str] = []
+    pending_notes = [
+        row
+        for row in notes
+        if str(row.get("approval_status") or "").lower() in {"pending", "none", ""}
+        or str(row.get("status") or "").lower() == "draft"
+    ]
+    if notes:
+        signals.append(f"노트 {len(notes)}")
+    if pending_notes:
+        signals.append("미승인 확인")
+    if observations:
+        signals.append(f"평가 {len(observations)}")
+    if activity_sessions:
+        signals.append(f"중재/과제 {len(activity_sessions)}")
+    if media_summaries:
+        signals.append(f"미디어요약 {len(media_summaries)}")
+
+    cue = " · ".join(signals[:3]) if signals else "기록 확인 후 평가로 진행"
+    if len(cue) > 44:
+        cue = cue[:41].rstrip() + "..."
+    severity = "warning" if pending_notes else "info"
+    return {
+        "id": f"pre-review:{session['id']}",
+        "title": "Pre-review",
+        "body": cue,
+        "severity": severity,
+        "lens_safe": True,
+        "source": "moai_web.pre_review",
+        "signals": {
+            "notes_count": len(notes),
+            "pending_notes_count": len(pending_notes),
+            "observations_count": len(observations),
+            "activity_sessions_count": len(activity_sessions),
+            "media_summaries_count": len(media_summaries),
+        },
+    }
+
+
+def _attach_pre_review_to_session(conn: sqlite3.Connection, session: dict) -> tuple[dict, dict]:
+    pre_review = _build_visit_pre_review(session)
+    updated = update_visit_phase(conn, session["id"], "pre_review", pre_review["body"])
+    return updated, pre_review
+
+
 def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]:
     if command != "show_recommendations":
         return None
@@ -4173,6 +4275,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
     if command == "start_visit":
         try:
             with _conn() as conn:
+                pre_review = None
                 if session_id:
                     existing = get_visit_session(conn, session_id)
                     if existing and existing.get("status") == "active":
@@ -4193,6 +4296,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                         patient_alias=candidate["patient_alias"],
                         history_summary=_visit_candidate_history_summary(candidate),
                     )
+                    session, pre_review = _attach_pre_review_to_session(conn, session)
                 conn.commit()
         except LookupError:
             with _glass_lock:
@@ -4213,7 +4317,7 @@ def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dic
                 "error_code": "NO_GLASS_VISIT_CANDIDATE",
                 "message": "No visit candidate with canonical identity is available.",
             }
-        hud = _apply_visit_session_hud(session)
+        hud = _apply_visit_session_hud(session, insight=pre_review)
         _audit_log(None, "info", f"HUD command executed command={command} source={source} id={session['id']}")
         result = {
             "ok": True,
@@ -4356,8 +4460,9 @@ def visit_session_start(payload: VisitSessionStartRequest):
             patient_alias=payload.patient_alias,
             history_summary=payload.history_summary,
         )
+        session, pre_review = _attach_pre_review_to_session(conn, session)
         conn.commit()
-    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    hud = _apply_visit_session_hud(session, insight=pre_review) if payload.update_glass else None
     _audit_log(None, "info", f"visit session started id={session['id']}")
     return {"status": "started", "session": session, "glass_state": hud}
 
@@ -4459,8 +4564,9 @@ def glass_visits_start(payload: GlassVisitStartRequest):
             patient_alias=candidate["patient_alias"],
             history_summary=_visit_candidate_history_summary(candidate),
         )
+        session, pre_review = _attach_pre_review_to_session(conn, session)
         conn.commit()
-    hud = _apply_visit_session_hud(session) if payload.update_glass else None
+    hud = _apply_visit_session_hud(session, insight=pre_review) if payload.update_glass else None
     _audit_log(None, "info", f"glass visit started session={session['id']} candidate={candidate['id']}")
     return {"status": "started", "candidate": candidate, "session": session, "glass_state": hud}
 
