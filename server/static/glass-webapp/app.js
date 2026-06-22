@@ -1,14 +1,16 @@
 (function () {
   'use strict';
 
-  // ── Config ────────────────────────────────────────────────────────────────
   var params = new URLSearchParams(window.location.search);
   var API_KEY = params.get('api_key') || '';
+  var BRIDGE_BASE_URL = normalizeBaseUrl(params.get('bridge_url')) || window.location.origin;
   var POLL_MS = 2000;
+  var INSIGHT_DURATION_MS = 8000;
 
-  // ── State ─────────────────────────────────────────────────────────────────
   var glassState = {
     patient: null,
+    mode: 'standby',
+    message: '라이브 연결을 기다리는 중',
     is_recording: false,
     recording_start: null,
     session_count: 0,
@@ -19,9 +21,9 @@
   var insightDismissTimer = null;
   var insightProgressTimer = null;
   var insightStartTime = null;
-  var INSIGHT_DURATION_MS = 8000;
+  var statePollTimer = null;
+  var timerPollTimer = null;
 
-  // ── API helpers ───────────────────────────────────────────────────────────
   function apiHeaders() {
     var h = { 'Content-Type': 'application/json' };
     if (API_KEY) h['x-api-key'] = API_KEY;
@@ -29,14 +31,24 @@
   }
 
   function apiUrl(path) {
-    var base = window.location.origin;
     var qp = API_KEY ? '?api_key=' + encodeURIComponent(API_KEY) : '';
-    return base + path + qp;
+    return BRIDGE_BASE_URL + path + qp;
   }
 
-  // ── Poll glass state ──────────────────────────────────────────────────────
+  function normalizeBaseUrl(raw) {
+    var value = String(raw || '').trim();
+    if (!value) return '';
+    try {
+      var url = new URL(value);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+      return url.origin;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function pollState() {
-    fetch(apiUrl('/glass/state'), { headers: apiHeaders() })
+    fetch(apiUrl('/glass/state'), { headers: apiHeaders(), cache: 'no-store' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -51,26 +63,24 @@
       });
   }
 
-  // ── Toggle recording ──────────────────────────────────────────────────────
-  function toggleRecording() {
+  function sendCommand(command) {
     fetch(apiUrl('/glass/command'), {
       method: 'POST',
       headers: apiHeaders(),
-      body: JSON.stringify({ command: 'toggle_recording' }),
+      body: JSON.stringify({ command: command }),
     })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
       .then(function () {
-        showToast(glassState.is_recording ? '녹화 중지 요청됨' : '녹화 시작 요청됨', 'success');
+        showToast(commandLabel(command) + ' 요청됨', 'success');
       })
       .catch(function (e) {
-        showToast('명령 전송 실패: ' + e.message, 'error');
+        showToast('명령 실패: ' + e.message, 'error');
       });
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
   function render() {
     renderPatient();
     renderStatus();
@@ -79,53 +89,74 @@
   }
 
   function renderPatient() {
-    var name = glassState.patient || '환자 미선택';
+    var alias = safePatientAlias(glassState.patient);
     var count = glassState.session_count || 0;
-    var sessionLabel = count > 0 ? '세션 ' + count + '회 완료' : '녹화 대기';
-
-    setText('patient-name', name);
-    setText('session-label', sessionLabel);
+    setText('patient-name', alias || '미선택');
+    setText('session-label', count > 0 ? 'S' + count : '대기');
   }
 
   function renderStatus() {
     var card = document.getElementById('status-card');
     var recDot = document.getElementById('rec-dot');
-    var title = document.getElementById('status-title');
-    var meta = document.getElementById('status-meta');
     var timer = document.getElementById('rec-timer');
+    var mode = glassState.mode || (glassState.is_recording ? 'recording' : 'ready');
+    var copy = statusCopy(mode, glassState.message);
 
-    if (glassState.is_recording) {
-      card.classList.add('recording');
-      recDot.classList.remove('hidden');
-      title.classList.add('recording');
-      setText('status-title', 'REC');
+    card.dataset.mode = mode;
+    recDot.classList.toggle('hidden', mode !== 'recording');
+    timer.classList.toggle('hidden', mode !== 'recording');
+    timer.textContent = mode === 'recording' ? elapsedString(glassState.recording_start) : '';
 
-      var patient = glassState.patient;
-      var count = glassState.session_count || 0;
-      var metaText = count > 0 ? '세션 ' + count : '';
-      if (patient) metaText = (metaText ? metaText + ' · ' : '') + patient;
-      setText('status-meta', metaText);
+    setText('status-kicker', copy.kicker);
+    setText('status-title', copy.title);
+    setText('status-meta', copy.meta);
+    setText('status-caption', copy.caption);
+  }
 
-      timer.textContent = elapsedString(glassState.recording_start);
-    } else {
-      card.classList.remove('recording');
-      recDot.classList.add('hidden');
-      title.classList.remove('recording');
-      setText('status-title', '대기 중');
-      setText('status-meta', '');
-      timer.textContent = '';
+  function statusCopy(mode, message) {
+    var patientReady = Boolean(glassState.patient);
+    var m = message || '';
+    if (mode === 'recording') {
+      return { kicker: 'REC', title: '녹화 중', meta: m || '세션 캡처를 저장 중입니다.', caption: '민감 정보는 앱과 서버에서만 처리합니다.' };
     }
+    if (mode === 'uploading') {
+      return { kicker: 'SEND', title: '업로드', meta: m || '브리지로 전송 중입니다.', caption: '렌즈에는 업로드 상태만 표시합니다.' };
+    }
+    if (mode === 'analyzing') {
+      return { kicker: 'AI', title: '분석 중', meta: m || '요약과 차트 초안을 준비 중입니다.', caption: '결과는 clinician review 전까지 초안입니다.' };
+    }
+    if (mode === 'success') {
+      return { kicker: 'DONE', title: '저장 완료', meta: m || '기록 생성이 완료되었습니다.', caption: '필요하면 기록 화면에서 검토하세요.' };
+    }
+    if (mode === 'error') {
+      return { kicker: 'ISSUE', title: '확인 필요', meta: m || '다시 시도하거나 앱 상태를 확인하세요.', caption: '오류 세부 정보는 iPhone/bridge에서 확인합니다.' };
+    }
+    if (mode === 'ready') {
+      return {
+        kicker: 'READY',
+        title: '녹화 준비',
+        meta: m || (patientReady ? '선택 환자 세션을 시작할 수 있습니다.' : '환자를 먼저 선택하세요.'),
+        caption: patientReady ? 'Neural Band Enter로 시작합니다.' : '환자명은 렌즈에 축약 표시됩니다.',
+      };
+    }
+    return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
 
   function renderInsight() {
+    var card = document.getElementById('insight-card');
     var insight = glassState.last_insight;
-    if (!insight) return;
+    var mode = glassState.mode || (glassState.is_recording ? 'recording' : 'ready');
+    var hideInModes = { recording: true, uploading: true, analyzing: true };
 
-    var insightId = insight.id || (insight.title + ':' + insight.body);
+    if (!insight || hideInModes[mode]) {
+      card.classList.add('hidden');
+      return;
+    }
+
+    var insightId = insight.id || (String(insight.title || '') + ':' + String(insight.body || ''));
     if (insightId === lastInsightId) return;
-
     lastInsightId = insightId;
-    showInsightCard(insight.title || '', insight.body || '');
+    showInsightCard(insight.title || '확인 필요', insight.body || '');
   }
 
   function showInsightCard(title, body) {
@@ -138,7 +169,6 @@
     var card = document.getElementById('insight-card');
     var progress = document.getElementById('insight-progress');
     card.classList.remove('hidden');
-
     insightStartTime = Date.now();
     progress.style.transform = 'scaleY(1)';
 
@@ -146,7 +176,7 @@
       var elapsed = Date.now() - insightStartTime;
       var remaining = Math.max(0, 1 - elapsed / INSIGHT_DURATION_MS);
       progress.style.transform = 'scaleY(' + remaining + ')';
-    }, 100);
+    }, 250);
 
     insightDismissTimer = setTimeout(function () {
       clearInterval(insightProgressTimer);
@@ -156,18 +186,31 @@
 
   function renderToggleButton() {
     var btn = document.getElementById('toggle-btn');
-    if (glassState.is_recording) {
-      btn.textContent = '■ 녹화 중지';
+    var label = document.getElementById('toggle-label');
+    if (!btn || !label) return;
+    if (glassState.is_recording || glassState.mode === 'recording') {
+      label.textContent = '녹화 중지';
       btn.classList.remove('primary');
       btn.classList.add('stop');
     } else {
-      btn.textContent = '● 녹화 시작';
+      label.textContent = '녹화 시작';
       btn.classList.remove('stop');
       btn.classList.add('primary');
     }
   }
 
-  // ── Timer update (1 s tick while recording) ───────────────────────────────
+  function safePatientAlias(name) {
+    var clean = String(name || '').trim();
+    if (!clean) return '';
+    if (/^[A-Za-z][A-Za-z\s.'-]{1,}$/.test(clean)) {
+      return clean.split(/\s+/).map(function (part, index) {
+        return index === 0 ? part.charAt(0).toUpperCase() + '.' : part.charAt(0).toUpperCase();
+      }).join(' ');
+    }
+    if (clean.length <= 2) return clean.charAt(0) + '*';
+    return clean.charAt(0) + '*' + clean.charAt(clean.length - 1);
+  }
+
   function elapsedString(isoStart) {
     if (!isoStart) return '00:00';
     var start = new Date(isoStart).getTime();
@@ -177,81 +220,112 @@
     return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
   }
 
-  // ── Connection indicator ──────────────────────────────────────────────────
   function setConnected(ok) {
     var dot = document.getElementById('conn-dot');
     var label = document.getElementById('conn-label');
-    if (ok) {
-      dot.className = 'conn-dot connected';
-      label.textContent = '연결됨';
-    } else {
-      dot.className = 'conn-dot error';
-      label.textContent = '오류';
-    }
+    dot.className = 'conn-dot ' + (ok ? 'connected' : 'error');
+    label.textContent = ok ? '연결됨' : '오류';
   }
 
-  // ── Toast ─────────────────────────────────────────────────────────────────
   function showToast(msg, type) {
     var toast = document.getElementById('toast');
     toast.textContent = msg;
     toast.className = 'toast' + (type ? ' ' + type : '');
     toast.offsetHeight;
     toast.classList.add('visible');
-    setTimeout(function () { toast.classList.remove('visible'); }, 2500);
+    window.setTimeout(function () { toast.classList.remove('visible'); }, 2500);
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  function commandLabel(command) {
+    var labels = {
+      toggle_recording: glassState.is_recording ? '녹화 중지' : '녹화 시작',
+      select_patient: '환자 선택',
+      show_recommendations: '큐 표시',
+      open_capture_history: '기록 열기',
+      primary_action: '기본 동작',
+    };
+    return labels[command] || command;
+  }
+
   function setText(id, text) {
     var el = document.getElementById(id);
     if (el) el.textContent = text;
   }
 
-  // ── Events ────────────────────────────────────────────────────────────────
+  function focusables() {
+    return Array.prototype.slice.call(document.querySelectorAll('.focusable'));
+  }
+
+  function moveFocus(delta) {
+    var items = focusables();
+    if (!items.length) return;
+    var currentIndex = items.indexOf(document.activeElement);
+    var nextIndex = currentIndex < 0 ? 0 : (currentIndex + delta + items.length) % items.length;
+    items[nextIndex].focus();
+    items[nextIndex].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
   function setupEvents() {
     document.addEventListener('click', function (e) {
       var el = e.target.closest('[data-action]');
       if (!el) return;
-      var action = el.dataset.action;
-      if (action === 'toggle-recording') toggleRecording();
+      sendCommand(el.dataset.action);
     });
 
     document.addEventListener('keydown', function (e) {
-      switch (e.key) {
-        case 'Enter':
-          var focused = document.activeElement;
-          if (focused && focused.classList.contains('focusable')) {
-            focused.click();
-          } else {
-            toggleRecording();
-          }
-          e.preventDefault();
-          break;
-        case ' ':
-          toggleRecording();
-          e.preventDefault();
-          break;
+      if (['ArrowRight', 'ArrowDown'].indexOf(e.key) !== -1) {
+        moveFocus(1);
+        e.preventDefault();
+        return;
+      }
+      if (['ArrowLeft', 'ArrowUp'].indexOf(e.key) !== -1) {
+        moveFocus(-1);
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        var focused = document.activeElement;
+        if (focused && focused.classList.contains('focusable')) focused.click();
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        sendCommand('primary_action');
+        e.preventDefault();
+      }
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) {
+        clearInterval(statePollTimer);
+        clearInterval(timerPollTimer);
+      } else {
+        startTimers();
+        pollState();
       }
     });
   }
 
-  // ── REC timer tick ────────────────────────────────────────────────────────
   function timerTick() {
-    if (glassState.is_recording) {
+    if (glassState.is_recording || glassState.mode === 'recording') {
       var timer = document.getElementById('rec-timer');
       if (timer) timer.textContent = elapsedString(glassState.recording_start);
     }
   }
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  function startTimers() {
+    clearInterval(statePollTimer);
+    clearInterval(timerPollTimer);
+    statePollTimer = setInterval(pollState, POLL_MS);
+    timerPollTimer = setInterval(timerTick, 1000);
+  }
+
   function init() {
     setupEvents();
-
     var btn = document.getElementById('toggle-btn');
     if (btn) btn.focus();
-
     pollState();
-    setInterval(pollState, POLL_MS);
-    setInterval(timerTick, 1000);
+    startTimers();
   }
 
   if (document.readyState === 'loading') {
