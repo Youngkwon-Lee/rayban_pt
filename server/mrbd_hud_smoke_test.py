@@ -29,9 +29,9 @@ def main() -> None:
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
     for phase in ["pre_review", "assessment", "intervention", "home_program", "summary"]:
         require(f'data-phase="{phase}"' in glass_html, f"HUD phase chip missing: {phase}")
-    for command in ["toggle_recording", "select_patient", "show_recommendations", "open_capture_history"]:
+    for command in ["toggle_recording", "next_phase", "show_recommendations", "open_capture_history", "end_visit_session"]:
         require(f'data-action="{command}"' in glass_html, f"HUD command missing: {command}")
-    require(glass_html.count("focusable command-button") == 4, "HUD should expose four focusable commands")
+    require(glass_html.count("focusable command-button") == 5, "HUD should expose five focusable commands")
 
     glass_css = client.get("/glass-app/styles.css")
     require(glass_css.status_code == 200, "glass webapp CSS should load")
@@ -49,6 +49,7 @@ def main() -> None:
         "ArrowLeft",
         "ArrowUp",
         "sendCommand",
+        "commandResultLabel",
         "safePatientAlias",
         "renderPhase",
         "renderReadiness",

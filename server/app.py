@@ -3676,6 +3676,7 @@ import threading as _threading
 
 _glass_lock = _threading.Lock()
 _glass_state: dict = {
+    "visit_session_id": None,
     "patient": None,
     "mode": "standby",
     "message": "라이브 연결을 기다리는 중",
@@ -3695,6 +3696,10 @@ class GlassStateUpdate(BaseModel):
     is_recording: Optional[bool] = None
     recording_start: Optional[str] = None
     session_count: Optional[int] = None
+    visit_session_id: Optional[str] = None
+    phase: Optional[str] = None
+    readiness: Optional[str] = None
+    error_state: Optional[str] = None
     last_insight: Optional[dict] = None
 
 
@@ -3805,6 +3810,8 @@ def _build_visit_session_write_plan(session: dict) -> dict:
 
 GLASS_COMMANDS = {
     "toggle_recording",
+    "next_phase",
+    "end_visit_session",
     "start_live",
     "open_capture_history",
     "primary_action",
@@ -3818,6 +3825,9 @@ NEURAL_BAND_GESTURE_MAP = {
     "double_tap": "toggle_recording",
     "press": "toggle_recording",
     "squeeze": "toggle_recording",
+    "long_press": "end_visit_session",
+    "hold": "end_visit_session",
+    "pinch_hold": "end_visit_session",
     "down": "primary_action",
     "swipe_down": "primary_action",
     "downward": "primary_action",
@@ -3826,6 +3836,11 @@ NEURAL_BAND_GESTURE_MAP = {
     "confirm": "primary_action",
     "open": "primary_action",
     "primary_action": "primary_action",
+    "next": "next_phase",
+    "swipe_right": "next_phase",
+    "right": "next_phase",
+    "forward": "next_phase",
+    "phase": "next_phase",
     "patient": "select_patient",
     "select_patient": "select_patient",
     "patient_select": "select_patient",
@@ -3837,6 +3852,10 @@ NEURAL_BAND_GESTURE_MAP = {
     "assessment": "show_recommendations",
     "evaluation": "show_recommendations",
     "show_recommendations": "show_recommendations",
+    "end": "end_visit_session",
+    "finish": "end_visit_session",
+    "complete": "end_visit_session",
+    "end_visit_session": "end_visit_session",
 }
 AGENT_ALLOWED_TOOLS = {"generate_session_cue"}
 AGENT_BLOCKED_ACTIONS = [
@@ -3936,11 +3955,126 @@ def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]
     return cue
 
 
+VISIT_PHASE_ORDER = ["pre_review", "assessment", "intervention", "home_program", "summary"]
+SERVER_EXECUTED_GLASS_COMMANDS = {"toggle_recording", "next_phase", "end_visit_session"}
+
+
+def _active_visit_session_id_from_hud() -> Optional[str]:
+    with _glass_lock:
+        session_id = str(_glass_state.get("visit_session_id") or "").strip()
+    return session_id or None
+
+
+def _next_visit_phase(current: str) -> str:
+    try:
+        index = VISIT_PHASE_ORDER.index(current)
+    except ValueError:
+        return "assessment"
+    return VISIT_PHASE_ORDER[min(index + 1, len(VISIT_PHASE_ORDER) - 1)]
+
+
+def _execute_visit_hud_command(command: str, source: str, metadata: Optional[dict] = None) -> Optional[dict]:
+    if command not in SERVER_EXECUTED_GLASS_COMMANDS:
+        return None
+
+    session_id = _active_visit_session_id_from_hud()
+    if not session_id:
+        if command == "toggle_recording":
+            return None
+        with _glass_lock:
+            _glass_state.update(
+                {
+                    "mode": "error",
+                    "message": "활성 방문 세션 없음",
+                    "readiness": "error",
+                    "error_state": "NO_ACTIVE_VISIT_SESSION",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+        _audit_log(None, "warning", f"HUD command blocked no active visit session command={command} source={source}")
+        return {
+            "ok": False,
+            "executed": False,
+            "command": command,
+            "error_code": "NO_ACTIVE_VISIT_SESSION",
+            "message": "active visit session is required",
+        }
+
+    try:
+        with _conn() as conn:
+            existing = get_visit_session(conn, session_id)
+            if not existing:
+                raise KeyError(session_id)
+            if command == "toggle_recording":
+                session = set_visit_recording(
+                    conn,
+                    session_id,
+                    is_recording=existing.get("recording_status") != "recording",
+                )
+                plan = None
+            elif command == "next_phase":
+                session = update_visit_phase(
+                    conn,
+                    session_id,
+                    _next_visit_phase(str(existing.get("phase") or "pre_review")),
+                )
+                plan = None
+            else:
+                session = end_visit_session(conn, session_id)
+                plan = _build_visit_session_write_plan(session)
+            conn.commit()
+    except KeyError:
+        with _glass_lock:
+            _glass_state.update(
+                {
+                    "mode": "error",
+                    "message": "방문 세션을 찾을 수 없음",
+                    "readiness": "error",
+                    "error_state": "VISIT_SESSION_NOT_FOUND",
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+        _audit_log(None, "warning", f"HUD command blocked missing visit session id={session_id} command={command}")
+        return {
+            "ok": False,
+            "executed": False,
+            "command": command,
+            "error_code": "VISIT_SESSION_NOT_FOUND",
+            "message": "visit session not found",
+        }
+
+    hud = _apply_visit_session_hud(session)
+    _audit_log(None, "info", f"HUD command executed command={command} source={source} id={session_id}")
+    result = {
+        "ok": True,
+        "executed": True,
+        "command": command,
+        "source": source,
+        "session": session,
+        "glass_state": hud,
+    }
+    if metadata:
+        result["metadata"] = metadata
+    if plan:
+        result["moai_write_plan"] = plan
+    return result
+
+
 def _queue_glass_command(command: str, source: str = "glass", metadata: Optional[dict] = None) -> dict:
     global _glass_pending_command
     if command not in GLASS_COMMANDS:
         allowed = ", ".join(sorted(GLASS_COMMANDS))
         _error(400, "INVALID_COMMAND", f"command must be one of: {allowed}")
+
+    executed = _execute_visit_hud_command(command, source=source, metadata=metadata)
+    if executed is not None:
+        return {
+            "command": command,
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "source": source,
+            "executed": executed,
+        }
 
     queued = {
         "command": command,
@@ -4066,6 +4200,14 @@ def glass_state_post(update: GlassStateUpdate):
             _glass_state["recording_start"] = update.recording_start
         if "session_count" in fields_set:
             _glass_state["session_count"] = update.session_count
+        if "visit_session_id" in fields_set:
+            _glass_state["visit_session_id"] = update.visit_session_id
+        if "phase" in fields_set:
+            _glass_state["phase"] = update.phase
+        if "readiness" in fields_set:
+            _glass_state["readiness"] = update.readiness
+        if "error_state" in fields_set:
+            _glass_state["error_state"] = update.error_state
         if "last_insight" in fields_set:
             _glass_state["last_insight"] = update.last_insight
         _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -4075,7 +4217,10 @@ def glass_state_post(update: GlassStateUpdate):
 @app.post("/glass/command")
 def glass_command_post(cmd: GlassCommandRequest):
     queued = _queue_glass_command(cmd.command)
-    return {"ok": True, "command": queued["command"], "id": queued["id"]}
+    response = {"ok": True, "command": queued["command"], "id": queued["id"]}
+    if "executed" in queued:
+        response["executed"] = queued["executed"]
+    return response
 
 
 @app.post("/neural-band/event")
@@ -4097,6 +4242,7 @@ def neural_band_event_post(event: NeuralBandEventRequest):
         "gesture": gesture,
         "mapped_command": queued["command"],
         "id": queued["id"],
+        "executed": queued.get("executed"),
     }
 
 

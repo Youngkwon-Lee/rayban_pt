@@ -15,6 +15,8 @@
     is_recording: false,
     recording_start: null,
     session_count: 0,
+    visit_session_id: null,
+    phase: 'pre_review',
     readiness: 'ready',
     error_state: null,
     last_insight: null,
@@ -76,8 +78,14 @@
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
-      .then(function () {
-        showToast(commandLabel(command) + ' 요청됨', 'success');
+      .then(function (data) {
+        if (data.executed && data.executed.glass_state) {
+          glassState = data.executed.glass_state;
+          render();
+          showToast(commandResultLabel(command, data.executed), data.executed.ok === false ? 'error' : 'success');
+        } else {
+          showToast(commandLabel(command) + ' 요청됨', 'success');
+        }
       })
       .catch(function (e) {
         showToast('명령 실패: ' + e.message, 'error');
@@ -147,6 +155,7 @@
 
   function phaseFromMode(mode) {
     if (VISIT_PHASES.indexOf(mode) !== -1) return mode;
+    if (VISIT_PHASES.indexOf(glassState.phase) !== -1) return glassState.phase;
     if (mode === 'ready' || mode === 'standby') return 'pre_review';
     if (mode === 'recording') return phaseFromMessage(glassState.message) || 'assessment';
     if (mode === 'success') return 'summary';
@@ -303,11 +312,23 @@
     var labels = {
       toggle_recording: glassState.is_recording ? '녹화 중지' : '녹화 시작',
       select_patient: '환자 선택',
+      next_phase: '다음 단계',
+      end_visit_session: '세션 종료',
       show_recommendations: '큐 표시',
       open_capture_history: '기록 열기',
       primary_action: '기본 동작',
     };
     return labels[command] || command;
+  }
+
+  function commandResultLabel(command, result) {
+    if (result && result.ok === false) return result.message || '명령 실패';
+    var labels = {
+      toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
+      next_phase: '단계 변경됨',
+      end_visit_session: '세션 종료됨',
+    };
+    return labels[command] || commandLabel(command) + ' 완료';
   }
 
   function setText(id, text) {

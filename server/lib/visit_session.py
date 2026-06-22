@@ -245,6 +245,7 @@ def end_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, An
 def visit_hud_state(session: dict[str, Any]) -> dict[str, Any]:
     recording = session.get("recording_status") == "recording"
     return {
+        "visit_session_id": session.get("id"),
         "patient": session.get("patient_alias") or "Patient",
         "mode": "recording" if recording else session.get("phase") or "ready",
         "message": session.get("cue") or f"{session.get('phase', 'ready')} 준비",

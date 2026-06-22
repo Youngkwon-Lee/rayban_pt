@@ -99,6 +99,24 @@ def main() -> None:
         require(recording.json()["session"]["recording_status"] == "recording", "recording state should persist")
         require(recording.json()["glass_state"]["is_recording"] is True, "HUD should reflect recording")
         require(recording.json()["glass_state"]["recording_start"], "HUD should include recording start time")
+        require(recording.json()["glass_state"]["visit_session_id"] == session_id, "HUD should expose active visit session")
+
+        hud_toggle = client.post(
+            "/glass/command",
+            headers=headers(),
+            json={"command": "toggle_recording"},
+        )
+        require(hud_toggle.status_code == 200, "HUD toggle command should succeed")
+        require(hud_toggle.json()["executed"]["executed"] is True, "HUD toggle should execute server-side")
+        require(hud_toggle.json()["executed"]["session"]["recording_status"] == "idle", "HUD toggle should stop recording")
+
+        hud_next = client.post(
+            "/glass/command",
+            headers=headers(),
+            json={"command": "next_phase"},
+        )
+        require(hud_next.status_code == 200, "HUD next phase command should succeed")
+        require(hud_next.json()["executed"]["session"]["phase"] == "intervention", "HUD next phase should advance workflow")
 
         ingest = client.post(
             "/ingest",
@@ -126,9 +144,14 @@ def main() -> None:
         require(attach.json()["session"]["event_ids"] == [event_id], "attached event should persist")
         require(attach.json()["glass_state"]["session_count"] == 1, "HUD count should reflect event count")
 
-        end = client.post(f"/visit-sessions/{session_id}/end", headers=headers())
+        end = client.post(
+            "/neural-band/event",
+            headers=headers(),
+            json={"gesture": "long_press", "device_id": "band-visit-smoke"},
+        )
         require(end.status_code == 200, f"visit end should succeed: {end.text}")
-        ended = end.json()
+        ended = end.json()["executed"]
+        require(ended["executed"] is True, "neural band long press should execute server-side")
         require(ended["session"]["status"] == "ended", "session should end")
         require(ended["session"]["phase"] == "summary", "ended phase should be summary")
         require(ended["glass_state"]["is_recording"] is False, "HUD should stop recording on end")

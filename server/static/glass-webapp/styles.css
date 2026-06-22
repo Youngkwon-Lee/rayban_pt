@@ -349,7 +349,7 @@ h2 {
 
 .command-rail {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr 1fr;
+  grid-template-columns: 1.45fr 1fr 1fr 1fr 1fr;
   gap: 8px;
 }
 
@@ -398,6 +398,12 @@ h2 {
   color: #ffffff;
   background: var(--danger);
   border-color: var(--danger);
+}
+
+.command-button.danger {
+  color: #ffffff;
+  background: #2a1118;
+  border-color: rgba(255, 59, 102, 0.48);
 }
 
 .command-icon {

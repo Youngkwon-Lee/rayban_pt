@@ -77,9 +77,9 @@
           <span class="command-icon" aria-hidden="true">●</span>
           <span id="toggle-label">녹화 시작</span>
         </button>
-        <button class="focusable command-button" data-action="select_patient">
-          <span class="command-icon" aria-hidden="true">◇</span>
-          <span>환자</span>
+        <button class="focusable command-button" data-action="next_phase">
+          <span class="command-icon" aria-hidden="true">›</span>
+          <span>다음</span>
         </button>
         <button class="focusable command-button" data-action="show_recommendations">
           <span class="command-icon" aria-hidden="true">+</span>
@@ -88,6 +88,10 @@
         <button class="focusable command-button" data-action="open_capture_history">
           <span class="command-icon" aria-hidden="true">≡</span>
           <span>기록</span>
+        </button>
+        <button class="focusable command-button danger" id="end-btn" data-action="end_visit_session">
+          <span class="command-icon" aria-hidden="true">✓</span>
+          <span>종료</span>
         </button>
       </nav>
     </section>
