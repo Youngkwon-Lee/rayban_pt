@@ -64,7 +64,7 @@
   }
 
   function pollState() {
-    fetch(apiUrl('/glass/state'), { headers: apiHeaders(), cache: 'no-store' })
+    return fetch(apiUrl('/glass/state'), { headers: apiHeaders(), cache: 'no-store' })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -77,12 +77,21 @@
       })
       .catch(function () {
         setConnected(false);
+        throw new Error('state fetch failed');
       });
+  }
+
+  function pollStateQuiet() {
+    pollState().catch(function () {});
   }
 
   function sendCommand(command) {
     if (command === 'start_visit') {
       startVisit();
+      return;
+    }
+    if (command === 'primary_action') {
+      refreshVisibleStatus();
       return;
     }
     if (command === 'next_phase' && !glassState.visit_session_id) {
@@ -146,6 +155,16 @@
     if (glassState.visit_session_id) return;
     if (Date.now() - lastCandidateLoadAt < 10000) return;
     loadNextVisitCandidate(visitCandidateOffset);
+  }
+
+  function refreshVisibleStatus() {
+    pollState()
+      .then(function () {
+        showToast(statusToastLabel(), 'success');
+      })
+      .catch(function (e) {
+        showToast('상태 확인 실패: ' + e.message, 'error');
+      });
   }
 
   function startVisit() {
@@ -372,7 +391,7 @@
       return;
     }
     btn.dataset.action = 'primary_action';
-    label.textContent = '상태 확인';
+    label.textContent = '상태 새로고침';
   }
 
   function renderEndButton() {
@@ -404,6 +423,18 @@
     return (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
   }
 
+  function statusToastLabel() {
+    var mode = normalizedMode();
+    if (mode === 'recording') return '녹화 중 ' + elapsedString(glassState.recording_start);
+    if (mode === 'uploading') return '업로드 중';
+    if (mode === 'analyzing') return '분석 중';
+    if (mode === 'success') return '저장 완료';
+    if (mode === 'error' || glassState.error_state) return '확인 필요';
+    if (glassState.visit_session_id) return '세션 진행 중';
+    if (visitCandidate || glassState.patient) return '환자 확인 대기';
+    return '환자 대기 중';
+  }
+
   function setConnected(ok) {
     var dot = document.getElementById('conn-dot');
     var label = document.getElementById('conn-label');
@@ -427,7 +458,7 @@
       select_patient: '환자 선택',
       next_phase: TARGET_CANDIDATE_ID ? '환자 고정' : '다른 환자',
       end_visit_session: '세션 종료',
-      primary_action: '상태 확인',
+      primary_action: '상태 새로고침',
     };
     return labels[command] || command;
   }
@@ -497,7 +528,7 @@
         clearInterval(timerPollTimer);
       } else {
         startTimers();
-        pollState();
+        pollStateQuiet();
       }
     });
   }
@@ -512,7 +543,7 @@
   function startTimers() {
     clearInterval(statePollTimer);
     clearInterval(timerPollTimer);
-    statePollTimer = setInterval(pollState, POLL_MS);
+    statePollTimer = setInterval(pollStateQuiet, POLL_MS);
     timerPollTimer = setInterval(timerTick, 1000);
   }
 
@@ -520,7 +551,7 @@
     setupEvents();
     var btn = document.getElementById('toggle-btn');
     if (btn) btn.focus();
-    pollState();
+    pollStateQuiet();
     loadNextVisitCandidate(0);
     startTimers();
   }

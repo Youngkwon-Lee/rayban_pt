@@ -71,11 +71,14 @@ def main() -> None:
         "renderNextButton",
         "renderEndButton",
         "renderReadiness",
+        "refreshVisibleStatus",
+        "statusToastLabel",
+        "pollStateQuiet",
         "환자 확인",
         "시작 확인",
         "다른 환자",
         "환자 고정",
-        "상태 확인",
+        "상태 새로고침",
         "세션 종료",
         "bridge_url",
         "normalizeBaseUrl",
@@ -84,6 +87,7 @@ def main() -> None:
         require(token in js_text, f"HUD JS should include {token}")
     for token in ["renderCaptureRole", "normalizedCaptureRole", "roleCountsLabel", "next_role", "show_recommendations"]:
         require(token not in js_text, f"HUD JS should not include optional workflow UI token: {token}")
+    require("상태 확인 요청됨" not in js_text, "HUD status button should not enqueue a server request")
     require("querySelectorAll('.focusable')" in js_text, "HUD JS should drive focusable D-pad navigation")
 
     webapp_root = Path(__file__).parent / "static" / "glass-webapp"
