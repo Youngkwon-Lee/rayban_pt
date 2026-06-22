@@ -310,13 +310,14 @@
     var selectedAlias = safePatientAlias(glassState.patient || (visitCandidate && visitCandidate.patient_alias) || '');
     var hasSession = Boolean(glassState.visit_session_id);
     var readiness = String(glassState.readiness || '').toLowerCase();
+    var preview = recordPreview();
     var m = message || '';
     if (!hasSession && selectedAlias) {
       return {
         kicker: TARGET_CANDIDATE_ID ? 'SELECTED' : 'CONFIRM',
-        title: '환자 확인',
-        meta: selectedAlias + ' 방문을 시작할까요?',
-        caption: TARGET_CANDIDATE_ID ? '선택된 오늘 방문입니다. 시작을 눌러 세션을 엽니다.' : '다른 환자면 다음 환자를 누르세요.',
+        title: preview ? '기록 확인' : '환자 확인',
+        meta: preview ? preview.cue : selectedAlias + ' 방문을 시작할까요?',
+        caption: preview ? previewCaption(preview) : (TARGET_CANDIDATE_ID ? '선택된 오늘 방문입니다. 시작을 눌러 세션을 엽니다.' : '다른 환자면 다음 환자를 누르세요.'),
       };
     }
     if (!hasSession && !selectedAlias && (mode === 'standby' || mode === 'ready')) {
@@ -328,7 +329,12 @@
       };
     }
     if (mode === 'pre_review') {
-      return { kicker: 'SESSION', title: '세션 준비', meta: m || '녹화를 시작할 수 있습니다.', caption: '상세 기록은 physio_app encounter에서 검토합니다.' };
+      return {
+        kicker: 'REVIEW',
+        title: '기록 확인',
+        meta: preview ? preview.cue : (m || '녹화를 시작할 수 있습니다.'),
+        caption: preview ? previewCaption(preview) : '상세 기록은 physio_app encounter에서 검토합니다.',
+      };
     }
     if (mode === 'assessment') {
       return { kicker: 'SESSION', title: '세션 진행 중', meta: m || '필요한 장면에서 녹화를 시작하세요.', caption: '기록 분류는 서버와 physio_app에서 정리합니다.' };
@@ -374,6 +380,32 @@
     return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
 
+  function recordPreview() {
+    var candidatePreview = visitCandidate && visitCandidate.record_preview;
+    if (candidatePreview && candidatePreview.lens_safe !== false) return candidatePreview;
+    var insight = glassState.last_insight;
+    if (insight && insight.source === 'moai_web.pre_review' && insight.lens_safe !== false) {
+      return {
+        cue: insight.body || insight.title || '',
+        lines: insight.lines || [],
+        signals: insight.signals || {},
+        lens_safe: true,
+      };
+    }
+    return null;
+  }
+
+  function previewCaption(preview) {
+    var lines = preview && preview.lines;
+    if (lines && lines.length) return lines.slice(0, 2).join(' · ');
+    var signals = (preview && preview.signals) || {};
+    var parts = [];
+    if (signals.notes_count) parts.push('노트 ' + signals.notes_count);
+    if (signals.observations_count) parts.push('평가 ' + signals.observations_count);
+    if (signals.activity_sessions_count) parts.push('중재/과제 ' + signals.activity_sessions_count);
+    return parts.length ? parts.join(' · ') : '요약만 렌즈에 표시합니다.';
+  }
+
   function renderInsight() {
     var card = document.getElementById('insight-card');
     var insight = glassState.last_insight;
@@ -403,6 +435,11 @@
     card.classList.remove('hidden');
     insightStartTime = Date.now();
     progress.style.transform = 'scaleY(1)';
+
+    if (glassState.last_insight && glassState.last_insight.source === 'moai_web.pre_review') {
+      progress.style.transform = 'scaleY(0)';
+      return;
+    }
 
     insightProgressTimer = setInterval(function () {
       var elapsed = Date.now() - insightStartTime;

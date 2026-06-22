@@ -258,6 +258,14 @@ def exercise_remote_visit_candidate() -> None:
             candidate = next_visit.json()["candidate"]
             require(candidate["source"] == "moai_web.encounters", "HUD should prefer moai encounter candidates")
             require(candidate["patient_alias"] == "P-333333", "remote candidate should keep lens-safe alias")
+            preview = candidate["record_preview"]
+            require(preview["lens_safe"] is True, "HUD candidate record preview should be lens-safe")
+            require(preview["signals"]["notes_count"] == 1, "candidate preview should count notes")
+            require(preview["signals"]["pending_notes_count"] == 1, "candidate preview should flag pending notes")
+            require(preview["signals"]["observations_count"] == 1, "candidate preview should count observations")
+            require(preview["signals"]["activity_sessions_count"] == 1, "candidate preview should count activities")
+            require("노트 1" in preview["cue"], "candidate preview should include note count")
+            require("미승인 확인" in preview["cue"], "candidate preview should include pending-note flag")
 
             start = client.post(
                 "/glass/visits/start",

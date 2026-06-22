@@ -4529,6 +4529,107 @@ def _visit_candidate_history_summary(candidate: dict) -> str:
     return f"HUD visit started from {candidate.get('source') or 'visit candidate'} {candidate['encounter_id']}."
 
 
+def _build_subject_record_preview(subject_context: dict) -> dict:
+    notes = _safe_moai_fetch_rows(
+        "encounter_notes",
+        _subject_history_params(
+            subject_context,
+            select="id,encounter_id,note_format,status,approval_status,created_at",
+            order="created_at.desc.nullslast",
+        ),
+    )
+    observations = _safe_moai_fetch_rows(
+        "observations",
+        _subject_history_params(
+            subject_context,
+            select="id,code,code_display,status,interpretation,effective_datetime,created_at",
+            order="effective_datetime.desc.nullslast",
+        ),
+    )
+    activity_sessions = _safe_moai_fetch_rows(
+        "activity_sessions",
+        _subject_history_params(
+            subject_context,
+            select="id,activity_type,status,created_at",
+            order="created_at.desc.nullslast",
+        ),
+    )
+    media_summaries = _safe_moai_fetch_rows(
+        "client_media_summaries",
+        _subject_history_params(
+            subject_context,
+            select="id,title,media_kind,body_region,observed_at,created_at",
+            order="observed_at.desc.nullslast",
+        ),
+    )
+
+    pending_notes = [
+        row
+        for row in notes
+        if str(row.get("approval_status") or "").lower() in {"pending", "none", ""}
+        or str(row.get("status") or "").lower() == "draft"
+    ]
+    signals: list[str] = []
+    if notes:
+        signals.append(f"노트 {len(notes)}")
+    if pending_notes:
+        signals.append("미승인 확인")
+    if observations:
+        signals.append(f"평가 {len(observations)}")
+    if activity_sessions:
+        signals.append(f"중재/과제 {len(activity_sessions)}")
+    if media_summaries:
+        signals.append(f"미디어요약 {len(media_summaries)}")
+    cue = " · ".join(signals[:3]) if signals else "최근 기록 없음"
+    if len(cue) > 44:
+        cue = cue[:41].rstrip() + "..."
+    lines = [
+        f"노트 {len(notes)}" + (f" · 미승인 {len(pending_notes)}" if pending_notes else ""),
+        f"평가 {len(observations)} · 중재/과제 {len(activity_sessions)}",
+        f"미디어 요약 {len(media_summaries)}",
+    ]
+    return {
+        "title": "기록 요약",
+        "cue": cue,
+        "lines": lines,
+        "lens_safe": True,
+        "source": "moai_web.record_preview",
+        "signals": {
+            "notes_count": len(notes),
+            "pending_notes_count": len(pending_notes),
+            "observations_count": len(observations),
+            "activity_sessions_count": len(activity_sessions),
+            "media_summaries_count": len(media_summaries),
+        },
+    }
+
+
+def _attach_record_preview_to_candidate(candidate: Optional[dict]) -> Optional[dict]:
+    if not candidate:
+        return None
+    hydrated = dict(candidate)
+    subject_person_id = str(hydrated.get("subject_person_id") or "").strip()
+    organization_id = str(hydrated.get("organization_id") or "").strip()
+    if subject_person_id and _looks_like_uuid(subject_person_id) and (not organization_id or _looks_like_uuid(organization_id)):
+        hydrated["record_preview"] = _build_subject_record_preview(hydrated)
+    else:
+        hydrated["record_preview"] = {
+            "title": "기록 요약",
+            "cue": "로컬 후보 기록",
+            "lines": ["원격 기록 연결 전", "physio_app 상세에서 전체 확인"],
+            "lens_safe": True,
+            "source": "local.record_preview",
+            "signals": {
+                "notes_count": 0,
+                "pending_notes_count": 0,
+                "observations_count": 0,
+                "activity_sessions_count": 0,
+                "media_summaries_count": 0,
+            },
+        }
+    return hydrated
+
+
 def _safe_moai_fetch_rows(table: str, params: dict[str, str]) -> list[dict]:
     try:
         return _moai_fetch_rows(table, params)
@@ -4551,61 +4652,9 @@ def _subject_history_params(session: dict, *, select: str, order: str, limit: in
 
 
 def _build_visit_pre_review(session: dict) -> dict:
-    notes = _safe_moai_fetch_rows(
-        "encounter_notes",
-        _subject_history_params(
-            session,
-            select="id,encounter_id,note_format,status,approval_status,created_at",
-            order="created_at.desc.nullslast",
-        ),
-    )
-    observations = _safe_moai_fetch_rows(
-        "observations",
-        _subject_history_params(
-            session,
-            select="id,code,code_display,status,interpretation,effective_datetime,created_at",
-            order="effective_datetime.desc.nullslast",
-        ),
-    )
-    activity_sessions = _safe_moai_fetch_rows(
-        "activity_sessions",
-        _subject_history_params(
-            session,
-            select="id,activity_type,status,created_at",
-            order="created_at.desc.nullslast",
-        ),
-    )
-    media_summaries = _safe_moai_fetch_rows(
-        "client_media_summaries",
-        _subject_history_params(
-            session,
-            select="id,title,media_kind,body_region,observed_at,created_at",
-            order="observed_at.desc.nullslast",
-        ),
-    )
-
-    signals: list[str] = []
-    pending_notes = [
-        row
-        for row in notes
-        if str(row.get("approval_status") or "").lower() in {"pending", "none", ""}
-        or str(row.get("status") or "").lower() == "draft"
-    ]
-    if notes:
-        signals.append(f"노트 {len(notes)}")
-    if pending_notes:
-        signals.append("미승인 확인")
-    if observations:
-        signals.append(f"평가 {len(observations)}")
-    if activity_sessions:
-        signals.append(f"중재/과제 {len(activity_sessions)}")
-    if media_summaries:
-        signals.append(f"미디어요약 {len(media_summaries)}")
-
-    cue = " · ".join(signals[:3]) if signals else "기록 확인 후 평가로 진행"
-    if len(cue) > 44:
-        cue = cue[:41].rstrip() + "..."
-    severity = "warning" if pending_notes else "info"
+    preview = _build_subject_record_preview(session)
+    cue = preview["cue"] if preview["cue"] != "최근 기록 없음" else "기록 확인 후 평가로 진행"
+    severity = "warning" if preview["signals"]["pending_notes_count"] else "info"
     return {
         "id": f"pre-review:{session['id']}",
         "title": "Pre-review",
@@ -4613,13 +4662,8 @@ def _build_visit_pre_review(session: dict) -> dict:
         "severity": severity,
         "lens_safe": True,
         "source": "moai_web.pre_review",
-        "signals": {
-            "notes_count": len(notes),
-            "pending_notes_count": len(pending_notes),
-            "observations_count": len(observations),
-            "activity_sessions_count": len(activity_sessions),
-            "media_summaries_count": len(media_summaries),
-        },
+        "signals": preview["signals"],
+        "lines": preview["lines"],
     }
 
 
@@ -5011,6 +5055,7 @@ def glass_visits_next(request: Request, offset: int = 0, candidate_id: Optional[
             offset=max(0, offset),
             scope=scope,
         )
+    candidate = _attach_record_preview_to_candidate(candidate)
     if not candidate:
         return {
             "status": "empty",
