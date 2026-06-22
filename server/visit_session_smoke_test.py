@@ -380,6 +380,20 @@ def main() -> None:
         require(body["glass_state"]["patient"] == "P*", "HUD should receive lens-safe patient alias")
         require(body["glass_state"]["visit_session_id"] == session_id, "HUD should receive active visit session id")
 
+        record_gesture = client.post(
+            "/neural-band/event",
+            headers=headers(),
+            json={"gesture": "swipe_up", "device_id": "band-record-preview"},
+        )
+        require(record_gesture.status_code == 200, f"record preview gesture should succeed: {record_gesture.text}")
+        require(
+            record_gesture.json()["mapped_command"] == "cycle_record_preview",
+            "neural band up gesture should map to record preview",
+        )
+        queued_record = client.get("/glass/command", headers=headers()).json()
+        require(queued_record["command"] == "cycle_record_preview", "record preview command should be queued for HUD")
+        require(queued_record["metadata"]["gesture"] == "swipe_up", "record preview command should preserve gesture")
+
         phase = client.post(
             f"/visit-sessions/{session_id}/phase",
             headers=headers(),

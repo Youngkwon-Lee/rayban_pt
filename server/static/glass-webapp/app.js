@@ -31,6 +31,7 @@
   var insightStartTime = null;
   var statePollTimer = null;
   var timerPollTimer = null;
+  var commandPollTimer = null;
   var visitCandidate = null;
   var visitCandidateOffset = 0;
   var lastCandidateLoadAt = 0;
@@ -97,6 +98,10 @@
       refreshVisibleStatus();
       return;
     }
+    if (command === 'close_hud') {
+      closeHud();
+      return;
+    }
     if (command === 'complete_visit_hud') {
       completeVisitHudSession();
       return;
@@ -135,6 +140,32 @@
       .catch(function (e) {
         showToast('명령 실패: ' + e.message, 'error');
       });
+  }
+
+  function pollPendingCommand() {
+    return fetch(apiUrl('/glass/command'), { headers: apiHeaders(), cache: 'no-store' })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data || !data.command) return;
+        if (data.command === 'cycle_record_preview' || data.command === 'open_capture_history') {
+          cycleRecordPreview();
+          return;
+        }
+        if (data.executed && data.executed.glass_state) {
+          glassState = data.executed.glass_state;
+          render();
+          showToast(commandResultLabel(data.command, data.executed), data.executed.ok === false ? 'error' : 'success');
+          return;
+        }
+        showToast(commandLabel(data.command) + ' 수신', 'success');
+      });
+  }
+
+  function pollPendingCommandQuiet() {
+    pollPendingCommand().catch(function () {});
   }
 
   function loadNextVisitCandidate(offset) {
@@ -234,6 +265,24 @@
       .catch(function (e) {
         showToast('완료 실패: ' + e.message, 'error');
       });
+  }
+
+  function closeHud() {
+    clearInterval(statePollTimer);
+    clearInterval(timerPollTimer);
+    clearInterval(commandPollTimer);
+    document.body.classList.add('hud-closed');
+    showToast('HUD 닫힘', 'success');
+    window.setTimeout(function () {
+      window.close();
+      if (!window.closed) {
+        try {
+          window.location.replace('about:blank');
+        } catch (e) {
+          document.body.innerHTML = '';
+        }
+      }
+    }, 120);
   }
 
   function startVisit() {
@@ -591,8 +640,8 @@
     var hasSession = Boolean(glassState.visit_session_id);
     if (!hasSession) {
       label.textContent = '닫기';
-      btn.dataset.action = 'primary_action';
-      btn.classList.add('disabled-look');
+      btn.dataset.action = 'close_hud';
+      btn.classList.remove('disabled-look');
       return;
     }
     if (readiness === 'sync_pending') {
@@ -665,6 +714,7 @@
       end_visit_session: '세션 종료',
       complete_visit_hud: '완료',
       primary_action: '상태',
+      close_hud: '닫기',
     };
     return labels[command] || command;
   }
@@ -725,7 +775,7 @@
         return;
       }
       if (e.key === 'Escape') {
-        sendCommand('primary_action');
+        sendCommand(glassState.visit_session_id ? 'primary_action' : 'close_hud');
         e.preventDefault();
       }
     });
@@ -734,9 +784,11 @@
       if (document.hidden) {
         clearInterval(statePollTimer);
         clearInterval(timerPollTimer);
+        clearInterval(commandPollTimer);
       } else {
         startTimers();
         pollStateQuiet();
+        pollPendingCommandQuiet();
       }
     });
   }
@@ -751,8 +803,10 @@
   function startTimers() {
     clearInterval(statePollTimer);
     clearInterval(timerPollTimer);
+    clearInterval(commandPollTimer);
     statePollTimer = setInterval(pollStateQuiet, POLL_MS);
     timerPollTimer = setInterval(timerTick, 1000);
+    commandPollTimer = setInterval(pollPendingCommandQuiet, POLL_MS);
   }
 
   function init() {

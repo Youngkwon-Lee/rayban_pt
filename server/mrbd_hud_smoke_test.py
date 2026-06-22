@@ -56,6 +56,8 @@ def main() -> None:
     require("min-height: 88px;" in css_text, "HUD commands should use MRBD button height")
     require(".record-list" in css_text, "HUD CSS should include record preview list")
     require("white-space: nowrap;" in css_text, "HUD text should avoid uncontrolled wrapping")
+    require("transform: scale(0.94)" not in css_text, "HUD focus should not resize command buttons")
+    require("transform: scale(0.90)" not in css_text, "HUD press should not resize command buttons")
 
     glass_js = client.get("/glass-app/app.js")
     require(glass_js.status_code == 200, "glass webapp JS should load")
@@ -78,6 +80,11 @@ def main() -> None:
         "refreshVisibleStatus",
         "completeVisitHudSession",
         "complete_visit_hud",
+        "closeHud",
+        "close_hud",
+        "window.close",
+        "pollPendingCommand",
+        "/glass/command",
         "recordPreview",
         "sessionRecordPreview",
         "recordPreviewOpen",
