@@ -46,7 +46,7 @@ body {
   width: 584px;
   height: 584px;
   display: grid;
-  grid-template-rows: 68px 72px 56px 1fr minmax(0, auto) 104px;
+  grid-template-rows: 68px 82px 1fr minmax(0, auto) 104px;
   gap: 8px;
 }
 
@@ -171,38 +171,6 @@ h1 {
   color: var(--danger);
   background: rgba(255, 59, 102, 0.12);
   border: 1px solid rgba(255, 59, 102, 0.25);
-}
-
-.phase-panel {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 6px;
-  padding: 6px;
-}
-
-.phase-chip {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: 14px;
-  font-weight: 900;
-  background: var(--bg-muted);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: var(--radius);
-}
-
-.phase-chip.active {
-  color: #061015;
-  background: var(--accent-primary);
-  border-color: var(--accent-primary);
-}
-
-.phase-chip.done {
-  color: var(--success);
-  background: rgba(32, 215, 164, 0.10);
-  border-color: rgba(32, 215, 164, 0.24);
 }
 
 .status-panel {
@@ -362,7 +330,7 @@ h2 {
 
 .command-rail {
   display: grid;
-  grid-template-columns: 1.35fr repeat(5, 1fr);
+  grid-template-columns: 1.4fr 1.05fr 1.05fr 0.9fr 0.9fr;
   gap: 6px;
 }
 

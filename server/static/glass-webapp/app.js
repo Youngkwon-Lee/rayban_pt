@@ -180,10 +180,10 @@
     renderPatient();
     renderCaptureRole();
     renderReadiness();
-    renderPhase();
     renderStatus();
     renderInsight();
     renderToggleButton();
+    renderNextButton();
   }
 
   function renderPatient() {
@@ -209,18 +209,6 @@
     label.classList.toggle('ready', !hasError && ready === 'ready');
     label.classList.toggle('error', hasError || ready === 'error');
     label.textContent = hasError ? '오류' : (ready === 'ready' ? '준비' : '확인');
-  }
-
-  function renderPhase() {
-    var mode = normalizedMode();
-    var phase = phaseFromMode(mode);
-    var activeIndex = VISIT_PHASES.indexOf(phase);
-    var chips = document.querySelectorAll('.phase-chip');
-    Array.prototype.forEach.call(chips, function (chip) {
-      var chipIndex = VISIT_PHASES.indexOf(chip.dataset.phase);
-      chip.classList.toggle('active', chip.dataset.phase === phase);
-      chip.classList.toggle('done', activeIndex > 0 && chipIndex >= 0 && chipIndex < activeIndex);
-    });
   }
 
   function renderStatus() {
@@ -267,22 +255,22 @@
     var patientReady = Boolean(glassState.patient);
     var m = message || '';
     if (mode === 'pre_review') {
-      return { kicker: 'REVIEW', title: '기록 확인', meta: m || '이전 기록과 금기 사항을 확인하세요.', caption: '환자 식별 정보는 최소 alias만 표시합니다.' };
+      return { kicker: 'READY', title: '방문 준비', meta: m || '기록할 환자와 오늘 세션을 확인하세요.', caption: '상세 기록은 physio_app encounter에서 검토합니다.' };
     }
     if (mode === 'assessment') {
-      return { kicker: 'ASSESS', title: '평가', meta: m || '관찰, 신체검사, 기능평가를 진행하세요.', caption: '결과는 자동 라벨 후보로 저장됩니다.' };
+      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || roleLabel(normalizedCaptureRole()) + ' 라벨로 기록합니다.', caption: '라벨 버튼으로 기록 종류만 바꿉니다.' };
     }
     if (mode === 'intervention') {
-      return { kicker: 'TREAT', title: '중재', meta: m || '수행한 중재와 반응을 짧게 캡처하세요.', caption: '세부 기록은 서버에서 초안으로 정리합니다.' };
+      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || roleLabel(normalizedCaptureRole()) + ' 라벨로 기록합니다.', caption: '평가/중재/과제 구분은 라벨만 사용합니다.' };
     }
     if (mode === 'home_program') {
-      return { kicker: 'HOME', title: '과제', meta: m || '가정 과제와 보호자 cue를 확인하세요.', caption: '렌즈에는 짧은 cue만 표시합니다.' };
+      return { kicker: 'CAPTURE', title: '캡처 준비', meta: m || roleLabel(normalizedCaptureRole()) + ' 라벨로 기록합니다.', caption: '상세 편집은 physio_app에서 합니다.' };
     }
     if (mode === 'summary') {
-      return { kicker: 'NOTE', title: '노트 초안', meta: m || '진행 노트 초안 검토가 필요합니다.', caption: '전송 전 iPhone/physio 앱에서 승인하세요.' };
+      return { kicker: 'DONE', title: '초안 준비', meta: m || '진행 노트 초안이 준비되었습니다.', caption: 'physio_app에서 검토하고 서명하세요.' };
     }
     if (mode === 'recording') {
-      return { kicker: 'REC', title: '녹화 중', meta: m || '세션 캡처를 저장 중입니다.', caption: '민감 정보는 앱과 서버에서만 처리합니다.' };
+      return { kicker: 'REC', title: '녹화 중', meta: m || roleLabel(normalizedCaptureRole()) + ' 라벨로 저장 중입니다.', caption: '라벨만 렌즈에서 바꾸고 내용은 자동 정리합니다.' };
     }
     if (mode === 'uploading') {
       return { kicker: 'SEND', title: '업로드', meta: m || '브리지로 전송 중입니다.', caption: '렌즈에는 업로드 상태만 표시합니다.' };
@@ -299,13 +287,13 @@
     if (mode === 'ready') {
       return {
         kicker: 'READY',
-        title: '녹화 준비',
-        meta: m || (patientReady ? '선택 환자 세션을 시작할 수 있습니다.' : '환자를 먼저 선택하세요.'),
-        caption: patientReady ? 'Neural Band Enter로 시작합니다.' : '환자명은 렌즈에 축약 표시됩니다.',
+        title: '방문 시작',
+        meta: m || (patientReady ? '선택 환자의 encounter로 시작합니다.' : '환자를 먼저 선택하세요.'),
+        caption: patientReady ? '확인하면 캡처 리모컨으로 전환됩니다.' : '렌즈에는 alias만 표시합니다.',
       };
     }
     if (mode === 'standby' && visitCandidate && !glassState.visit_session_id) {
-      return { kicker: 'NEXT', title: '방문 시작', meta: visitCandidate.session_label || '대기 방문을 시작할 수 있습니다.', caption: 'Neural Band confirm 또는 시작 버튼.' };
+      return { kicker: 'NEXT', title: '방문 시작', meta: visitCandidate.session_label || '오늘 방문 encounter가 준비되었습니다.', caption: TARGET_CANDIDATE_ID ? '이 방문으로 고정되어 있습니다.' : '다음 환자로 후보를 넘길 수 있습니다.' };
     }
     return { kicker: 'STANDBY', title: '화면 준비', meta: m || '라이브 연결을 기다리는 중입니다.', caption: 'iPhone 앱 또는 브리지 연결 후 시작하세요.' };
   }
@@ -400,6 +388,19 @@
     }
   }
 
+  function renderNextButton() {
+    var btn = document.getElementById('next-btn');
+    var label = document.getElementById('next-label');
+    if (!btn || !label) return;
+    if (!glassState.visit_session_id) {
+      btn.dataset.action = 'next_phase';
+      label.textContent = TARGET_CANDIDATE_ID ? '고정됨' : '다음 환자';
+      return;
+    }
+    btn.dataset.action = 'show_recommendations';
+    label.textContent = '다음 큐';
+  }
+
   function safePatientAlias(name) {
     var clean = String(name || '').trim();
     if (!clean) return '';
@@ -442,8 +443,8 @@
       toggle_recording: glassState.is_recording ? '녹화 중지' : '녹화 시작',
       start_visit: '방문 시작',
       select_patient: '환자 선택',
-      next_phase: '다음 단계',
-      next_role: '기록 역할',
+      next_phase: TARGET_CANDIDATE_ID ? '오늘 방문 고정' : '다음 환자',
+      next_role: '기록 라벨',
       end_visit_session: '세션 종료',
       show_recommendations: '큐 표시',
       open_capture_history: '기록 열기',
@@ -457,8 +458,8 @@
     var labels = {
       toggle_recording: (glassState.is_recording || glassState.mode === 'recording') ? '녹화 시작됨' : '녹화 중지됨',
       start_visit: '방문 시작됨',
-      next_phase: '단계 변경됨',
-      next_role: '기록 역할 변경됨',
+      next_phase: TARGET_CANDIDATE_ID ? '오늘 방문 고정됨' : '다음 환자',
+      next_role: '기록 라벨 변경됨',
       end_visit_session: '세션 종료됨',
     };
     return labels[command] || commandLabel(command) + ' 완료';

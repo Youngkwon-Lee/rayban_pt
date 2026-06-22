@@ -44,14 +44,6 @@
         </div>
       </section>
 
-      <section class="phase-panel panel" aria-label="Visit phase">
-        <div class="phase-chip" data-phase="pre_review">기록</div>
-        <div class="phase-chip" data-phase="assessment">평가</div>
-        <div class="phase-chip" data-phase="intervention">중재</div>
-        <div class="phase-chip" data-phase="home_program">과제</div>
-        <div class="phase-chip" data-phase="summary">요약</div>
-      </section>
-
       <section class="status-panel panel" id="status-card" aria-label="Capture state">
         <div class="status-row">
           <span class="rec-dot hidden" id="rec-dot" aria-hidden="true"></span>
@@ -79,21 +71,17 @@
           <span class="command-icon" aria-hidden="true">●</span>
           <span id="toggle-label">녹화 시작</span>
         </button>
-        <button class="focusable command-button" data-action="next_phase">
+        <button class="focusable command-button" id="next-btn" data-action="next_phase">
           <span class="command-icon" aria-hidden="true">›</span>
-          <span>다음</span>
+          <span id="next-label">다음 환자</span>
         </button>
         <button class="focusable command-button" data-action="next_role">
           <span class="command-icon" aria-hidden="true">◇</span>
-          <span>역할</span>
+          <span>라벨</span>
         </button>
         <button class="focusable command-button" data-action="show_recommendations">
           <span class="command-icon" aria-hidden="true">+</span>
           <span>큐</span>
-        </button>
-        <button class="focusable command-button" data-action="open_capture_history">
-          <span class="command-icon" aria-hidden="true">≡</span>
-          <span>기록</span>
         </button>
         <button class="focusable command-button danger" id="end-btn" data-action="end_visit_session">
           <span class="command-icon" aria-hidden="true">✓</span>

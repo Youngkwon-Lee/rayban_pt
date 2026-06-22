@@ -25,15 +25,15 @@ def main() -> None:
     require('name="viewport" content="width=600, height=600' in glass_html, "MRBD viewport meta missing")
     require('name="mrbd-web-app-capable" content="yes"' in glass_html, "MRBD capability meta missing")
     require('aria-label="HUD commands"' in glass_html, "HUD command rail missing")
-    require('aria-label="Visit phase"' in glass_html, "HUD visit phase strip missing")
+    require('aria-label="Visit phase"' not in glass_html, "HUD should not duplicate encounter workflow phases")
     require('id="readiness-label"' in glass_html, "HUD readiness indicator missing")
     require('id="capture-role-label"' in glass_html, "HUD capture role indicator missing")
     require('id="role-counts-label"' in glass_html, "HUD role counts indicator missing")
-    for phase in ["pre_review", "assessment", "intervention", "home_program", "summary"]:
-        require(f'data-phase="{phase}"' in glass_html, f"HUD phase chip missing: {phase}")
-    for command in ["toggle_recording", "next_phase", "next_role", "show_recommendations", "open_capture_history", "end_visit_session"]:
+    require("phase-chip" not in glass_html, "HUD should use capture labels instead of phase chips")
+    for command in ["toggle_recording", "next_phase", "next_role", "show_recommendations", "end_visit_session"]:
         require(f'data-action="{command}"' in glass_html, f"HUD command missing: {command}")
-    require(glass_html.count("focusable command-button") == 6, "HUD should expose six focusable commands")
+    require('data-action="open_capture_history"' not in glass_html, "HUD should not expose full history navigation")
+    require(glass_html.count("focusable command-button") == 5, "HUD should expose five focusable commands")
 
     glass_css = client.get("/glass-app/styles.css")
     require(glass_css.status_code == 200, "glass webapp CSS should load")
@@ -54,10 +54,11 @@ def main() -> None:
         "startVisit",
         "/glass/visits/start",
         "/glass/visits/next",
+        "TARGET_CANDIDATE_ID",
         "commandResultLabel",
         "safePatientAlias",
-        "renderPhase",
         "renderCaptureRole",
+        "renderNextButton",
         "normalizedCaptureRole",
         "roleCountsLabel",
         "capture_role",
