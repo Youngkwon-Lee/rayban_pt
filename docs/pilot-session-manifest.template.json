@@ -1,0 +1,107 @@
+{
+  "schema_version": "rayban_pt_pilot_session_manifest/v0",
+  "operating_mode": "design/dry_run",
+  "session": {
+    "pilot_session_id": "pilot-001",
+    "captured_at": "YYYY-MM-DDTHH:MM:SSZ",
+    "capture_device": "rayban",
+    "capture_context": "internal_non_production",
+    "notes": ""
+  },
+  "identity": {
+    "organization_id": "",
+    "provider_person_id": "",
+    "subject_person_id": "",
+    "physio_client_id": "",
+    "encounter_id": "",
+    "identity_resolution_status": "unresolved",
+    "identity_resolution_notes": ""
+  },
+  "consent": {
+    "status": "unknown",
+    "scope": "capture_analysis_storage",
+    "checked_by": "",
+    "checked_at": "",
+    "notes": ""
+  },
+  "modalities": {
+    "text_note": {
+      "captured": false,
+      "event_id": "",
+      "usable": null,
+      "notes": ""
+    },
+    "audio": {
+      "captured": false,
+      "event_id": "",
+      "transcript_available": false,
+      "usable": null,
+      "notes": ""
+    },
+    "image": {
+      "captured": false,
+      "event_id": "",
+      "masked_artifact_available": false,
+      "usable_for_pose_context": null,
+      "notes": ""
+    },
+    "video": {
+      "captured": false,
+      "event_id": "",
+      "masked_or_sampled_artifact_available": false,
+      "usable_for_temporal_context": null,
+      "notes": ""
+    }
+  },
+  "therapist_labels_v0": {
+    "session_type": "",
+    "core_task": "",
+    "custom_task": "",
+    "body_position": "",
+    "assist_level": "",
+    "performance_level": "",
+    "review_status": "unreviewed",
+    "reviewer_person_id": "",
+    "usable_for_training": false,
+    "label_confidence": null,
+    "repetition_count": null,
+    "hold_duration_seconds": null,
+    "tolerance": "",
+    "fatigue_level": "",
+    "compensations": [],
+    "safety_flags": [],
+    "caregiver_present": null,
+    "notes": ""
+  },
+  "ai_outputs": {
+    "soap_draft_generated": false,
+    "label_draft_generated": false,
+    "pose_or_visual_analysis_generated": false,
+    "accepted_corrected_rejected": "not_generated",
+    "unsupported_detail_observed": false,
+    "notes": ""
+  },
+  "review": {
+    "reviewer_person_id": "",
+    "reviewed_at": "",
+    "chart_review_status": "unreviewed",
+    "label_review_status": "unreviewed",
+    "media_quality": "unknown",
+    "corrections_summary": ""
+  },
+  "agent_dry_run": {
+    "moai_export_checked": false,
+    "moai_write_plan_checked": false,
+    "sync_job_enqueued": false,
+    "operation_count": null,
+    "skipped_count": null,
+    "blocked_reasons": [],
+    "phi_safe_log_confirmed": false
+  },
+  "readiness": {
+    "usable_for_schema_eval": false,
+    "eligible_for_gold_dataset": false,
+    "gate": "gate_1_pilot",
+    "missing_requirements": []
+  }
+}
