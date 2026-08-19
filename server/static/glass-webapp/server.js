@@ -9,6 +9,7 @@ var mimeTypes = {
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml',
@@ -16,7 +17,8 @@ var mimeTypes = {
 
 var server = http.createServer(function (req, res) {
   var requestPath = req.url.split('?')[0];
-  var filePath = '.' + (requestPath === '/' ? '/index.html' : requestPath);
+  var isConnectPath = requestPath.indexOf('/connect/') === 0;
+  var filePath = '.' + (requestPath === '/' || isConnectPath ? '/index.html' : requestPath);
   var resolved = path.resolve(filePath);
   var root = path.resolve('.');
 

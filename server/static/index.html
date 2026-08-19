@@ -3,23 +3,43 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Rayban Local Bridge</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2318221d'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial' font-size='22' font-weight='700' fill='white'%3ERB%3C/text%3E%3C/svg%3E" />
+  <title>Kinelo AR</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230f172a'/%3E%3Ctext x='32' y='40' text-anchor='middle' font-family='Arial' font-size='22' font-weight='700' fill='%2300e5ff'%3ERB%3C/text%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root {
-      color-scheme: light;
-      --bg: #f6f7f4;
-      --surface: #ffffff;
-      --surface-soft: #f1f5f2;
-      --line: #d9ded8;
-      --text: #17201b;
-      --muted: #68736d;
-      --primary: #2563eb;
-      --primary-dark: #1d4ed8;
-      --green: #0f766e;
-      --amber: #b45309;
-      --red: #b91c1c;
-      --shadow: 0 14px 36px rgba(23, 32, 27, 0.08);
+      color-scheme: dark;
+      --bg-base: #06090e;
+      --bg-surface: rgba(13, 18, 25, 0.7);
+      --bg-surface-solid: #0d1219;
+      --bg-control: rgba(22, 29, 39, 0.85);
+      --bg-control-focus: rgba(30, 41, 56, 0.95);
+      --border-subtle: rgba(255, 255, 255, 0.06);
+      --border-active: rgba(0, 229, 255, 0.35);
+      --border-active-glow: rgba(0, 229, 255, 0.12);
+
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+
+      --accent-cyan: #00e5ff;
+      --accent-cyan-hover: #33ebff;
+      --accent-cyan-glow: rgba(0, 229, 255, 0.12);
+
+      --accent-violet: #a855f7;
+      --accent-violet-glow: rgba(168, 85, 247, 0.12);
+
+      --accent-success: #10b981;
+      --accent-success-bg: rgba(16, 185, 129, 0.1);
+      --accent-warning: #f59e0b;
+      --accent-warning-bg: rgba(245, 158, 11, 0.1);
+      --accent-danger: #ef4444;
+      --accent-danger-bg: rgba(239, 68, 68, 0.1);
+
+      --shadow-premium: 0 20px 40px -15px rgba(0, 0, 0, 0.5), 0 0 50px -10px rgba(0, 212, 255, 0.03);
+      --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'Fira Code', 'SF Mono', monospace;
     }
 
     * { box-sizing: border-box; }
@@ -27,195 +47,320 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background: var(--bg);
-      color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.5;
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      position: relative;
+      overflow-x: hidden;
     }
 
-    button, input, textarea {
-      font: inherit;
+    /* Ambient glow blobs */
+    body::before {
+      content: "";
+      position: absolute;
+      top: -10%;
+      right: -5%;
+      width: 45vw;
+      height: 45vw;
+      background: radial-gradient(circle, var(--accent-violet-glow) 0%, transparent 70%);
+      z-index: -1;
+      pointer-events: none;
+      filter: blur(80px);
+    }
+    body::after {
+      content: "";
+      position: absolute;
+      bottom: -10%;
+      left: -5%;
+      width: 50vw;
+      height: 50vw;
+      background: radial-gradient(circle, var(--accent-cyan-glow) 0%, transparent 75%);
+      z-index: -1;
+      pointer-events: none;
+      filter: blur(100px);
+    }
+
+    .app-shell {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 32px 24px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 36px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-violet));
+      color: #06090e;
+      font-weight: 850;
+      font-size: 20px;
+      box-shadow: 0 0 20px rgba(0, 229, 255, 0.35);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #ffffff, #e2e8f0);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .subtitle {
+      margin-top: 4px;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .status-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      height: 38px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      background: rgba(22, 29, 39, 0.5);
+      padding: 0 16px;
+      color: var(--text-main);
+      font-size: 13px;
+      font-weight: 650;
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-warning);
+      box-shadow: 0 0 8px var(--accent-warning);
+      position: relative;
+    }
+
+    .status-pill.ok .status-dot {
+      background: var(--accent-success);
+      box-shadow: 0 0 10px var(--accent-success);
+    }
+    .status-pill.ok .status-dot::after {
+      content: "";
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: var(--accent-success);
+      animation: pulse-ring 1.8s cubic-bezier(0.215, 0.610, 0.355, 1) infinite;
+    }
+
+    .status-pill.error .status-dot {
+      background: var(--accent-danger);
+      box-shadow: 0 0 10px var(--accent-danger);
+    }
+
+    @keyframes pulse-ring {
+      0% { transform: scale(0.95); opacity: 0.8; }
+      100% { transform: scale(2.5); opacity: 0; }
     }
 
     button {
       min-height: 40px;
       border: 1px solid transparent;
-      border-radius: 8px;
-      padding: 9px 14px;
-      background: #18221d;
-      color: #fff;
+      border-radius: 10px;
+      padding: 8px 16px;
+      font-size: 13.5px;
+      font-weight: 650;
       cursor: pointer;
-      transition: transform 120ms ease, background 120ms ease, border-color 120ms ease;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
     }
 
-    button:hover { transform: translateY(-1px); }
-    button:disabled { cursor: not-allowed; opacity: 0.55; transform: none; }
+    button:hover {
+      transform: translateY(-1px);
+    }
 
-    input[type="text"], input[type="password"], textarea, input[type="file"] {
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+      transform: none !important;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-violet));
+      color: #06090e;
+      font-weight: 750;
+      box-shadow: 0 4px 15px rgba(0, 229, 255, 0.25);
+    }
+
+    .btn-primary:hover {
+      box-shadow: 0 6px 20px rgba(0, 229, 255, 0.4);
+      filter: brightness(1.05);
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+      border-color: var(--border-subtle);
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.1);
+      border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-muted);
+      border-color: var(--border-subtle);
+    }
+
+    .btn-ghost:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+    }
+
+    input[type="text"], input[type="password"], input[type="number"], textarea, input[type="file"], select {
       width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fff;
-      color: var(--text);
-      padding: 10px 12px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      background: var(--bg-control);
+      color: var(--text-main);
+      padding: 12px 16px;
+      font-size: 14px;
+      transition: all 0.2s ease;
+      box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+
+    input[type="text"]:focus, input[type="password"]:focus, input[type="number"]:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 0 3px var(--border-active-glow), inset 0 2px 4px rgba(0, 0, 0, 0.1);
+      background: var(--bg-control-focus);
+    }
+
+    input[type="file"] {
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+
+    input[type="file"]::file-selector-button {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      color: var(--text-main);
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-right: 12px;
+      transition: background 0.15s ease;
+    }
+
+    input[type="file"]::file-selector-button:hover {
+      background: rgba(255, 255, 255, 0.15);
     }
 
     textarea {
-      min-height: 124px;
+      min-height: 120px;
       resize: vertical;
+      font-family: inherit;
     }
 
     label {
-      display: grid;
-      gap: 6px;
-      color: var(--muted);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      color: var(--text-muted);
       font-size: 13px;
       font-weight: 650;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     pre {
       margin: 0;
       overflow: auto;
       white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 13px;
-      line-height: 1.55;
-    }
-
-    .app-shell {
-      width: min(1440px, 100%);
-      margin: 0 auto;
-      padding: 18px;
-    }
-
-    .topbar {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: center;
-      gap: 18px;
-      margin-bottom: 18px;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-    }
-
-    .brand-mark {
-      display: grid;
-      place-items: center;
-      width: 42px;
-      height: 42px;
-      border-radius: 8px;
-      background: #18221d;
-      color: #fff;
-      font-weight: 800;
-      letter-spacing: 0;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 21px;
-      line-height: 1.2;
-      letter-spacing: 0;
-    }
-
-    .subtitle {
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: 13px;
-    }
-
-    .top-actions {
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .status-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      min-height: 34px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--surface);
-      padding: 7px 12px;
-      color: var(--muted);
-      font-size: 13px;
-      font-weight: 700;
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 999px;
-      background: var(--amber);
-    }
-
-    .status-pill.ok .status-dot { background: var(--green); }
-    .status-pill.error .status-dot { background: var(--red); }
-
-    .btn-secondary {
-      background: var(--surface);
-      color: var(--text);
-      border-color: var(--line);
-    }
-
-    .btn-primary {
-      background: var(--primary);
-    }
-
-    .btn-primary:hover {
-      background: var(--primary-dark);
-    }
-
-    .btn-ghost {
-      background: transparent;
-      color: var(--text);
-      border-color: var(--line);
+      word-break: break-all;
+      font-size: 13.5px;
+      line-height: 1.6;
     }
 
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
-      gap: 18px;
+      grid-template-columns: 1.25fr 1fr;
+      gap: 32px;
       align-items: start;
     }
 
     .panel {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
+      border: 1px solid var(--border-subtle);
+      border-radius: 16px;
+      background: var(--bg-surface);
+      box-shadow: var(--shadow-premium);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      overflow: hidden;
+      transition: transform 0.2s ease, border-color 0.2s ease;
     }
 
     .panel-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      border-bottom: 1px solid var(--line);
-      padding: 16px;
+      gap: 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 20px 24px;
+      background: rgba(255, 255, 255, 0.01);
     }
 
     .panel-title {
       margin: 0;
-      font-size: 16px;
-      letter-spacing: 0;
+      font-size: 18px;
+      font-weight: 750;
+      letter-spacing: -0.3px;
+      color: var(--text-main);
     }
 
     .panel-body {
-      padding: 16px;
+      padding: 24px;
     }
 
     .grid {
       display: grid;
-      gap: 14px;
+      gap: 20px;
     }
 
     .grid.two {
@@ -230,38 +375,54 @@
       display: flex;
       align-items: center;
       flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 14px;
+      gap: 10px;
+      margin-top: 8px;
     }
 
     .tabs {
       display: flex;
-      gap: 6px;
-      border-bottom: 1px solid var(--line);
-      padding: 10px 10px 0;
-      background: var(--surface-soft);
-      border-radius: 8px 8px 0 0;
+      gap: 4px;
+      background: rgba(0, 0, 0, 0.3);
+      padding: 6px;
+      border-radius: 12px;
+      border: 1px solid var(--border-subtle);
+      margin-bottom: 24px;
     }
 
     .tab {
-      border-color: transparent;
-      border-radius: 8px 8px 0 0;
+      flex: 1;
+      min-height: 38px;
+      border: none;
+      border-radius: 8px;
       background: transparent;
-      color: var(--muted);
-      font-weight: 800;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 13px;
+      padding: 6px 12px;
+      transition: all 0.2s ease;
+    }
+
+    .tab:hover {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.03);
+      transform: none;
     }
 
     .tab.is-active {
-      background: var(--surface);
-      color: var(--text);
-      border-color: var(--line);
-      border-bottom-color: var(--surface);
+      background: rgba(255, 255, 255, 0.1);
+      color: var(--text-main);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.1);
       transform: none;
     }
 
     .tab-panel {
       display: none;
-      padding: 16px;
+      animation: fadeIn 0.25s ease-out;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
     }
 
     .tab-panel.is-active {
@@ -271,87 +432,114 @@
     .ops-grid {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
+      gap: 14px;
     }
 
     .metric {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface);
-      padding: 13px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.02);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: border-color 0.2s ease, background-color 0.2s ease;
+    }
+
+    .metric:hover {
+      border-color: rgba(255, 255, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .metric label {
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
     }
 
     .metric-value {
       display: block;
-      margin-top: 4px;
-      color: var(--text);
-      font-size: 18px;
+      color: var(--text-main);
+      font-size: 20px;
       font-weight: 800;
+      font-family: var(--font-mono);
     }
 
     .switch-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface-soft);
-      padding: 12px;
+      gap: 16px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.15);
+      padding: 14px 18px;
     }
 
     .switch-row label {
-      display: flex;
+      flex-direction: row;
       align-items: center;
-      gap: 10px;
-      color: var(--text);
+      gap: 12px;
       font-size: 14px;
-      font-weight: 750;
+      cursor: pointer;
+      color: var(--text-main);
+      text-transform: none;
+      letter-spacing: normal;
     }
 
     .switch-row input {
       width: 18px;
       height: 18px;
-      accent-color: var(--green);
+      accent-color: var(--accent-success);
+      cursor: pointer;
     }
 
     .notice {
-      border-left: 4px solid var(--amber);
+      border-left: 3px solid var(--accent-warning);
       border-radius: 8px;
-      background: #fff7ed;
-      color: #7c2d12;
-      padding: 10px 12px;
+      background: var(--accent-warning-bg);
+      color: #ffc043;
+      padding: 12px 16px;
       font-size: 13px;
+      line-height: 1.5;
     }
 
     .result-panel {
       position: sticky;
-      top: 18px;
-    }
-
-    .result-meta {
-      color: var(--muted);
-      font-size: 12px;
+      top: 32px;
     }
 
     .result-box {
-      min-height: 420px;
-      max-height: 640px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #101815;
-      color: #eef7f0;
-      padding: 14px;
+      min-height: 380px;
+      max-height: 520px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      background: #03070c;
+      color: #a5f3fc;
+      padding: 16px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      overflow: auto;
+      box-shadow: inset 0 4px 12px rgba(0, 0, 0, 0.5);
+      border-left: 3px solid var(--accent-cyan);
     }
 
     .chart-box {
       display: none;
-      margin-top: 12px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #fbfdfb;
-      color: var(--text);
-      padding: 14px;
+      margin-top: 16px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      background: #020617;
+      color: #e2e8f0;
+      padding: 16px;
+      font-family: var(--font-mono);
+      font-size: 13px;
+      overflow: auto;
+      max-height: 480px;
+      box-shadow: inset 0 4px 12px rgba(0, 0, 0, 0.5);
+      border-left: 3px solid var(--accent-violet);
     }
 
     .chart-box.is-visible {
@@ -361,67 +549,156 @@
     .events-table {
       width: 100%;
       border-collapse: collapse;
-      font-size: 13px;
+      font-size: 13.5px;
+      margin-top: 12px;
     }
 
     .events-table th,
     .events-table td {
-      border-bottom: 1px solid var(--line);
-      padding: 10px 8px;
+      border-bottom: 1px solid var(--border-subtle);
+      padding: 12px 10px;
       text-align: left;
       vertical-align: middle;
     }
 
     .events-table th {
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 800;
+      color: var(--text-muted);
+      font-size: 11px;
+      font-weight: 700;
       text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .events-table tbody tr {
+      transition: background-color 0.15s ease;
+    }
+
+    .events-table tbody tr:hover {
+      background-color: rgba(255, 255, 255, 0.02);
     }
 
     .events-table button {
-      min-height: 32px;
-      padding: 6px 9px;
+      min-height: 30px;
+      padding: 4px 10px;
       font-size: 12px;
+      border-radius: 6px;
     }
 
     .tag {
       display: inline-flex;
       align-items: center;
-      border-radius: 999px;
-      background: #e8f4ef;
-      color: #0f5f59;
-      padding: 3px 8px;
-      font-size: 12px;
-      font-weight: 800;
+      border-radius: 6px;
+      background: rgba(0, 229, 255, 0.1);
+      color: var(--accent-cyan);
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid rgba(0, 229, 255, 0.15);
     }
 
     .tag.warn {
-      background: #fff1df;
-      color: #8a4a05;
+      background: var(--accent-warning-bg);
+      color: var(--accent-warning);
+      border-color: rgba(245, 158, 11, 0.15);
+    }
+
+    .tag.good {
+      background: var(--accent-success-bg);
+      color: var(--accent-success);
+      border-color: rgba(16, 185, 129, 0.18);
+    }
+
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .preset-grid button {
+      justify-content: flex-start;
+      min-height: 46px;
+      background: rgba(0, 229, 255, 0.06);
+      border-color: rgba(0, 229, 255, 0.16);
+      color: var(--text-main);
+    }
+
+    .readiness-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .identity-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .identity-card {
+      border: 1px solid var(--border-subtle);
+      border-radius: 12px;
+      background: rgba(0, 0, 0, 0.14);
+      padding: 16px;
+    }
+
+    .identity-card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .identity-card h3 {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: -0.2px;
     }
 
     .section-gap {
-      margin-top: 18px;
+      margin-top: 20px;
     }
 
     details {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--surface-soft);
-      padding: 10px 12px;
+      border: 1px solid var(--border-subtle);
+      border-radius: 10px;
+      background: rgba(0, 0, 0, 0.2);
+      padding: 12px 16px;
     }
 
     summary {
       cursor: pointer;
-      color: var(--text);
-      font-weight: 750;
+      color: var(--text-main);
+      font-weight: 650;
+      font-size: 14px;
+      outline: none;
+    }
+
+    summary:hover {
+      color: var(--accent-cyan);
     }
 
     .visually-small {
-      color: var(--muted);
+      color: var(--text-muted);
       font-size: 12px;
       font-weight: 500;
+    }
+
+    /* Scrollbars styling */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(0, 0, 0, 0.2);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.12);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.25);
     }
 
     @media (max-width: 980px) {
@@ -433,23 +710,30 @@
         position: static;
       }
 
-      .ops-grid,
+      .ops-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
       .grid.two,
-      .grid.three {
+      .grid.three,
+      .identity-grid {
         grid-template-columns: 1fr;
       }
     }
 
     @media (max-width: 640px) {
       .app-shell {
-        padding: 12px;
+        padding: 16px;
       }
 
       .topbar {
-        grid-template-columns: 1fr;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 16px;
       }
 
       .top-actions {
+        width: 100%;
         justify-content: flex-start;
       }
 
@@ -469,7 +753,7 @@
       <div class="brand">
         <div class="brand-mark">RB</div>
         <div>
-          <h1>Rayban Local Bridge</h1>
+          <h1>Kinelo AR</h1>
           <div class="subtitle">캡처 입력, 이벤트 조회, 라벨링을 한 화면에서 처리합니다.</div>
         </div>
       </div>
@@ -512,12 +796,113 @@
                 API Key
                 <input id="apiKey" type="password" placeholder="BRIDGE_API_KEY" autocomplete="off" />
               </label>
+              <label>
+                Bridge URL
+                <input id="bridgeBaseUrl" type="text" value="http://127.0.0.1:8000" autocomplete="off" />
+              </label>
+            </div>
+            <div class="grid">
               <div class="switch-row">
                 <label>
                   <input id="pairingReady" type="checkbox" />
                   Ray-Ban 촬영 준비 완료
                 </label>
                 <span id="pairingStatus" class="tag warn">미확인</span>
+              </div>
+            </div>
+            <div class="identity-card">
+              <header>
+                <h3>iOS App Setup</h3>
+                <span class="tag">Deep Link</span>
+              </header>
+              <div class="grid">
+                <label>
+                  App setup link
+                  <input id="appSetupLink" type="text" readonly />
+                </label>
+                <div class="toolbar">
+                  <button class="btn-secondary" type="button" onclick="refreshAppSetupLink()">링크 갱신</button>
+                  <button class="btn-primary" type="button" onclick="copyAppSetupLink()">링크 복사</button>
+                  <button class="btn-ghost" type="button" onclick="openAppSetupLink()">앱 열기</button>
+                </div>
+                <div class="visually-small">
+                  iPhone에서 열면 Bridge URL, API key, provider/subject/session context가 앱 UserDefaults에 저장됩니다.
+                </div>
+              </div>
+            </div>
+            <div class="identity-card">
+              <header>
+                <h3>Meta HUD Setup</h3>
+                <span class="tag">Scoped Token</span>
+              </header>
+              <div class="grid">
+                <label>
+                  Glass HUD URL
+                  <input id="hudScopedLink" type="text" readonly />
+                </label>
+                <div class="toolbar">
+                  <button class="btn-secondary" type="button" onclick="issueHudScopedLink()">토큰 URL 생성</button>
+                  <button class="btn-primary" type="button" onclick="copyHudScopedLink()">링크 복사</button>
+                  <button class="btn-ghost" type="button" onclick="openHudScopedLink()">HUD 열기</button>
+                </div>
+                <div class="visually-small">
+                  Meta Web App/QR에는 API key 대신 provider/org 범위의 만료 토큰 URL을 사용합니다.
+                </div>
+              </div>
+            </div>
+            <div class="identity-card">
+              <header>
+                <h3>Pilot Identity Context</h3>
+                <span id="identityStatus" class="tag warn">미완성</span>
+              </header>
+              <div class="identity-grid">
+                <label>
+                  Org ID
+                  <input id="ownerOrgId" type="text" placeholder="owner_org_id" autocomplete="off" />
+                </label>
+                <label>
+                  Provider Person ID
+                  <input id="ownerProviderPersonId" type="text" placeholder="owner_provider_person_id" autocomplete="off" />
+                </label>
+                <label>
+                  Subject Person ID
+                  <input id="subjectPersonId" type="text" placeholder="subject_person_id" autocomplete="off" />
+                </label>
+                <label>
+                  Client ID
+                  <input id="physioClientId" type="text" placeholder="physio_client_id" autocomplete="off" />
+                </label>
+                <label>
+                  Session / Encounter ID
+                  <input id="physioSessionId" type="text" placeholder="physio_session_id" autocomplete="off" />
+                </label>
+              </div>
+              <div id="identityHint" class="visually-small section-gap">
+                이 값들은 새 text/audio 이벤트에 자동 포함됩니다. gold dataset 후보는 subject_person_id까지 있어야 안정적입니다. 실제 Supabase write는 여전히 dry-run 게이트 뒤에 있습니다.
+              </div>
+            </div>
+            <div class="identity-card">
+              <header>
+                <h3>Consent</h3>
+                <span id="consentStatus" class="tag warn">미확인</span>
+              </header>
+              <div class="grid two">
+                <label>
+                  Consent Patient
+                  <input id="consentPatientName" type="text" placeholder="patient_name" autocomplete="off" />
+                </label>
+                <label>
+                  Granted By
+                  <input id="consentGrantedBy" type="text" value="therapist" autocomplete="off" />
+                </label>
+              </div>
+              <div class="toolbar">
+                <button class="btn-secondary" type="button" onclick="checkConsent()">동의 조회</button>
+                <button class="btn-primary" type="button" onclick="recordConsent()">동의 등록</button>
+                <button class="btn-ghost" type="button" onclick="revokeConsent()">동의 철회</button>
+              </div>
+              <div id="consentHint" class="visually-small section-gap">
+                환자명 기준으로 capture/analysis/storage 동의를 확인합니다.
               </div>
             </div>
           </div>
@@ -529,6 +914,7 @@
             <button id="tabAudio" class="tab" type="button" onclick="switchPanel('audioPanel')">오디오</button>
             <button id="tabLookup" class="tab" type="button" onclick="switchPanel('lookupPanel')">조회</button>
             <button id="tabLabel" class="tab" type="button" onclick="switchPanel('labelPanel')">라벨</button>
+            <button id="tabHud" class="tab" type="button" onclick="switchPanel('hudPanel')">HUD</button>
           </div>
 
           <section id="textPanel" class="tab-panel is-active">
@@ -579,7 +965,7 @@
                   <input type="hidden" name="event_type" value="audio" />
                   <label>Source<input type="text" name="source" value="iphone" /></label>
                   <label>오디오 파일<input type="file" name="audio" /></label>
-                  <button type="submit">폼으로 업로드</button>
+                  <button type="submit" class="btn-secondary">폼으로 업로드</button>
                 </form>
               </details>
             </div>
@@ -595,6 +981,7 @@
                 <button class="btn-primary" type="button" onclick="checkEvent()">이벤트 조회</button>
                 <button class="btn-secondary" type="button" onclick="getChart()">차트 보기</button>
                 <button class="btn-secondary" type="button" onclick="listRecent()">최근 이벤트</button>
+                <button class="btn-secondary" type="button" onclick="pilotDryRun()">Pilot Dry-run</button>
               </div>
               <div id="recentEventsWrap" class="section-gap"></div>
             </div>
@@ -606,27 +993,147 @@
                 Event ID
                 <input id="labelEventId" type="text" placeholder="라벨링할 event_id" />
               </label>
+              <div class="notice">
+                Pilot taxonomy v0 기준으로 선택하세요. 새 값이 필요하면 임의로 추가하지 말고 Notes에 적은 뒤 taxonomy를 따로 검토합니다.
+              </div>
+              <div id="labelPresetWrap" class="preset-grid"></div>
               <div class="grid three">
-                <label>Session<input id="sessionType" type="text" value="기립훈련" /></label>
-                <label>Assist<input id="assistLevel" type="text" value="mod" /></label>
-                <label>Performance<input id="performance" type="text" value="보통" /></label>
+                <label>
+                  Session
+                  <select id="sessionType">
+                    <option value="neuromotor_training">neuromotor_training</option>
+                  </select>
+                </label>
+                <label>
+                  Assist
+                  <select id="assistLevel">
+                    <option value="moderate_assist">moderate_assist</option>
+                  </select>
+                </label>
+                <label>
+                  Performance
+                  <select id="performance">
+                    <option value="stable">stable</option>
+                  </select>
+                </label>
               </div>
               <label>
                 Core task
-                <input id="coreTask" type="text" value="경부 회전+중립 유지" />
+                <select id="coreTask">
+                  <option value="prone_head_control">prone_head_control</option>
+                </select>
               </label>
+              <div class="grid two">
+                <label>
+                  Custom task
+                  <input id="customTask" type="text" placeholder="supported_kneeling when core_task=other" />
+                </label>
+                <label>
+                  Body position
+                  <select id="bodyPosition">
+                    <option value="unknown">unknown</option>
+                  </select>
+                </label>
+              </div>
+              <div class="grid three">
+                <label>
+                  Review status
+                  <select id="reviewStatus">
+                    <option value="reviewed">reviewed</option>
+                  </select>
+                </label>
+                <label>
+                  Label confidence
+                  <input id="labelConfidence" type="number" min="0" max="1" step="0.01" placeholder="0.95" />
+                </label>
+                <label>
+                  Reviewer person ID
+                  <input id="reviewerPersonId" type="text" placeholder="provider person id" />
+                </label>
+              </div>
+              <div class="grid three">
+                <label>
+                  Reps
+                  <input id="repetitionCount" type="number" min="0" step="1" placeholder="7" />
+                </label>
+                <label>
+                  Hold seconds
+                  <input id="holdDurationSeconds" type="number" min="0" step="0.1" placeholder="20" />
+                </label>
+                <label>
+                  Tolerance
+                  <select id="tolerance">
+                    <option value="">not set</option>
+                  </select>
+                </label>
+              </div>
+              <div class="grid three">
+                <label>
+                  Fatigue
+                  <select id="fatigueLevel">
+                    <option value="">not set</option>
+                  </select>
+                </label>
+                <label>
+                  Compensations
+                  <input id="compensations" type="text" placeholder="right_weight_shift,left_weight_shift" />
+                </label>
+                <div class="switch-row">
+                  <label>
+                    <input id="caregiverPresent" type="checkbox" />
+                    Caregiver present
+                  </label>
+                </div>
+              </div>
+              <div class="switch-row">
+                <label>
+                  <input id="usableForTraining" type="checkbox" />
+                  Explicitly mark usable for training/eval dataset
+                </label>
+              </div>
               <label>
                 Flags
-                <input id="flags" type="text" value="피로,자세흔들림" />
+                <input id="flags" type="text" value="fatigue,postural_sway" placeholder="comma separated taxonomy flags" />
               </label>
               <label>
                 Notes
-                <textarea id="labelNotes" rows="3">후반부 집중도 저하</textarea>
+                <textarea id="labelNotes" rows="3">Therapist reviewed label.</textarea>
               </label>
+              <div id="labelReadiness" class="readiness-strip"></div>
               <div class="toolbar">
                 <button class="btn-primary" type="button" onclick="saveLabel()">라벨 저장</button>
                 <button class="btn-secondary" type="button" onclick="getLabel()">라벨 조회</button>
+                <button class="btn-secondary" type="button" onclick="getPilotReadiness()">준비도 확인</button>
+                <button class="btn-secondary" type="button" onclick="pilotDryRun()">Pilot Dry-run</button>
               </div>
+            </div>
+          </section>
+
+          <section id="hudPanel" class="tab-panel">
+            <div class="grid">
+              <div class="notice">
+                STT transcript를 HUD 후보로 만든 뒤 승인/폐기 write-plan을 확인합니다. Supabase write는 하지 않고 bridge local DB에만 후보가 생성됩니다.
+              </div>
+              <label>
+                Transcript
+                <textarea id="hudTranscript" rows="3">좌측 SLR 45도에서 posterior thigh pain</textarea>
+              </label>
+              <div class="grid two">
+                <label>
+                  Source
+                  <input id="hudSource" type="text" value="browser_hud_rehearsal" />
+                </label>
+                <label>
+                  Confidence
+                  <input id="hudConfidence" type="number" min="0" max="1" step="0.01" placeholder="optional" />
+                </label>
+              </div>
+              <div class="toolbar">
+                <button class="btn-primary" type="button" onclick="createHudCandidate()">후보 생성</button>
+                <button class="btn-secondary" type="button" onclick="listHudCandidates()">후보 목록</button>
+                <button class="btn-secondary" type="button" onclick="runHudRehearsal()">생성+승인+폐기</button>
+              </div>
+              <div id="hudCandidateWrap" class="section-gap"></div>
             </div>
           </section>
         </section>
@@ -653,20 +1160,72 @@
       textPanel: "tabText",
       audioPanel: "tabAudio",
       lookupPanel: "tabLookup",
-      labelPanel: "tabLabel"
+      labelPanel: "tabLabel",
+      hudPanel: "tabHud"
     };
 
     const apiKeyEl = document.getElementById("apiKey");
+    const bridgeBaseUrlEl = document.getElementById("bridgeBaseUrl");
     const pairingReadyEl = document.getElementById("pairingReady");
     const pairingStatusEl = document.getElementById("pairingStatus");
     const outEl = document.getElementById("out");
     const chartOutEl = document.getElementById("chartOut");
     const outputTitleEl = document.getElementById("outputTitle");
     const outputMetaEl = document.getElementById("outputMeta");
+    const appSetupLinkEl = document.getElementById("appSetupLink");
+    const hudScopedLinkEl = document.getElementById("hudScopedLink");
+    const identityInputIds = ["ownerOrgId", "ownerProviderPersonId", "subjectPersonId", "physioClientId", "physioSessionId"];
+    const consentPatientEl = document.getElementById("consentPatientName");
+    const consentGrantedByEl = document.getElementById("consentGrantedBy");
+    let labelTaxonomy = null;
 
-    apiKeyEl.value = localStorage.getItem("bridge_api_key") || "";
+    const queryParams = new URLSearchParams(window.location.search);
+    const queryApiKey = queryParams.get("api_key") || "";
+    const queryBridgeBaseUrl = queryParams.get("bridge_base_url") || queryParams.get("base_url") || "";
+    if (queryApiKey) {
+      localStorage.setItem("bridge_api_key", queryApiKey);
+    }
+    if (queryBridgeBaseUrl) {
+      localStorage.setItem("rayban_bridge_base_url", queryBridgeBaseUrl);
+    }
+    apiKeyEl.value = queryApiKey || localStorage.getItem("bridge_api_key") || "";
     apiKeyEl.addEventListener("input", () => {
       localStorage.setItem("bridge_api_key", apiKeyEl.value || "");
+      refreshAppSetupLink();
+    });
+    bridgeBaseUrlEl.value = queryBridgeBaseUrl || localStorage.getItem("rayban_bridge_base_url") || "http://127.0.0.1:8000";
+    bridgeBaseUrlEl.addEventListener("input", () => {
+      localStorage.setItem("rayban_bridge_base_url", bridgeBaseUrlEl.value || "");
+      refreshAppSetupLink();
+    });
+
+    const nativeFetch = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (typeof input === "string" && input.startsWith("/") && window.location.protocol === "file:") {
+        const base = (bridgeBaseUrlEl.value || "http://127.0.0.1:8000").replace(/\/+$/, "");
+        return nativeFetch(`${base}${input}`, init);
+      }
+      return nativeFetch(input, init);
+    };
+
+    identityInputIds.forEach(id => {
+      const el = document.getElementById(id);
+      el.value = localStorage.getItem(`rayban_${id}`) || "";
+      el.addEventListener("input", () => {
+        localStorage.setItem(`rayban_${id}`, el.value || "");
+        updateIdentityStatus();
+        refreshAppSetupLink();
+      });
+    });
+
+    consentPatientEl.value = localStorage.getItem("rayban_consent_patient_name") || "";
+    consentGrantedByEl.value = localStorage.getItem("rayban_consent_granted_by") || "therapist";
+    consentPatientEl.addEventListener("input", () => {
+      localStorage.setItem("rayban_consent_patient_name", consentPatientEl.value || "");
+      updateConsentStatus(null);
+    });
+    consentGrantedByEl.addEventListener("input", () => {
+      localStorage.setItem("rayban_consent_granted_by", consentGrantedByEl.value || "");
     });
 
     pairingReadyEl.checked = (localStorage.getItem("rayban_pairing_ready") || "") === "1";
@@ -689,12 +1248,268 @@
       pairingStatusEl.className = pairingReadyEl.checked ? "tag" : "tag warn";
     }
 
+    function buildAppSetupLink() {
+      const identity = collectIdentityPayload();
+      const params = new URLSearchParams();
+      const bridgeBaseUrl = (bridgeBaseUrlEl.value || "").trim();
+      const apiKey = (apiKeyEl.value || "").trim();
+      if (bridgeBaseUrl) params.set("bridge_base_url", bridgeBaseUrl);
+      if (apiKey) params.set("api_key", apiKey);
+      if (identity.owner_org_id) params.set("owner_org_id", identity.owner_org_id);
+      if (identity.owner_provider_person_id) params.set("owner_provider_person_id", identity.owner_provider_person_id);
+      if (identity.subject_person_id) params.set("subject_person_id", identity.subject_person_id);
+      if (identity.physio_client_id) params.set("physio_client_id", identity.physio_client_id);
+      if (identity.physio_session_id) params.set("physio_session_id", identity.physio_session_id);
+      params.set("patient_name", document.getElementById("patientName")?.value?.trim() || "FixturePatient");
+      return `raybanpt://launch?${params}`;
+    }
+
+    function refreshAppSetupLink() {
+      appSetupLinkEl.value = buildAppSetupLink();
+      return appSetupLinkEl.value;
+    }
+
+    async function copyAppSetupLink() {
+      const link = refreshAppSetupLink();
+      try {
+        await navigator.clipboard.writeText(link);
+        outputMetaEl.textContent = "iOS app setup link를 클립보드에 복사했습니다.";
+      } catch {
+        appSetupLinkEl.select();
+        document.execCommand("copy");
+        outputMetaEl.textContent = "iOS app setup link를 선택/복사했습니다.";
+      }
+      renderOutput("iOS App Setup Link", { link });
+    }
+
+    function openAppSetupLink() {
+      const link = refreshAppSetupLink();
+      window.location.href = link;
+    }
+
+    async function issueHudScopedLink() {
+      const identity = collectIdentityPayload();
+      const bridgeBaseUrl = (bridgeBaseUrlEl.value || "").trim();
+      if (!identity.owner_org_id || !identity.owner_provider_person_id) {
+        outputMetaEl.textContent = "Org ID와 Provider Person ID가 필요합니다.";
+        renderOutput("HUD scoped token 생성 실패", {
+          required: ["owner_org_id", "owner_provider_person_id"],
+        });
+        return "";
+      }
+      const res = await fetch("/glass/hud-token", {
+        method: "POST",
+        headers: authHeaders(true),
+        body: JSON.stringify({
+          organization_id: identity.owner_org_id,
+          provider_person_id: identity.owner_provider_person_id,
+          expires_in_minutes: 720,
+          bridge_url: bridgeBaseUrl,
+          app_path: "/glass-app/",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw data;
+      hudScopedLinkEl.value = data.glass_app_url || "";
+      outputMetaEl.textContent = `HUD scoped URL 생성됨 · 만료 ${data.expires_at || ""}`;
+      renderOutput("HUD Scoped Link", data);
+      return hudScopedLinkEl.value;
+    }
+
+    async function copyHudScopedLink() {
+      let link = hudScopedLinkEl.value || "";
+      if (!link) link = await issueHudScopedLink();
+      if (!link) return;
+      try {
+        await navigator.clipboard.writeText(link);
+        outputMetaEl.textContent = "HUD scoped URL을 클립보드에 복사했습니다.";
+      } catch {
+        hudScopedLinkEl.select();
+        document.execCommand("copy");
+        outputMetaEl.textContent = "HUD scoped URL을 선택/복사했습니다.";
+      }
+    }
+
+    async function openHudScopedLink() {
+      let link = hudScopedLinkEl.value || "";
+      if (!link) link = await issueHudScopedLink();
+      if (link) window.open(link, "_blank", "noopener");
+    }
+
     function authHeaders(isJson = false) {
       const headers = {};
       const key = (apiKeyEl.value || "").trim();
       if (isJson) headers["Content-Type"] = "application/json";
       if (key) headers["x-api-key"] = key;
       return headers;
+    }
+
+    function collectIdentityPayload() {
+      return {
+        owner_org_id: document.getElementById("ownerOrgId").value.trim(),
+        owner_provider_person_id: document.getElementById("ownerProviderPersonId").value.trim(),
+        subject_person_id: document.getElementById("subjectPersonId").value.trim(),
+        physio_client_id: document.getElementById("physioClientId").value.trim(),
+        physio_session_id: document.getElementById("physioSessionId").value.trim()
+      };
+    }
+
+    function identityGaps(identity = collectIdentityPayload()) {
+      const gaps = [];
+      if (!identity.owner_org_id) gaps.push("owner_org_id");
+      if (!identity.owner_provider_person_id) gaps.push("owner_provider_person_id");
+      if (!identity.physio_session_id) gaps.push("physio_session_id");
+      if (!identity.subject_person_id && !identity.physio_client_id) {
+        gaps.push("subject_person_id_or_physio_client_id");
+      }
+      return gaps;
+    }
+
+    function updateIdentityStatus() {
+      const gaps = identityGaps();
+      const status = document.getElementById("identityStatus");
+      const hint = document.getElementById("identityHint");
+      if (!gaps.length) {
+        const hasSubject = Boolean(collectIdentityPayload().subject_person_id);
+        status.textContent = hasSubject ? "Gold ready" : "Schema ready";
+        status.className = hasSubject ? "tag good" : "tag";
+        hint.textContent = hasSubject
+          ? "새 이벤트가 canonical subject_person_id와 함께 저장되어 gold/readiness 매핑이 안정적입니다."
+          : "schema eval은 가능하지만 gold dataset 후보로 쓰려면 subject_person_id를 추가하는 것이 좋습니다.";
+        return;
+      }
+      status.textContent = "미완성";
+      status.className = "tag warn";
+      hint.textContent = `누락: ${gaps.join(", ")}. Pilot capture mode에서는 이 값들이 없으면 저장이 막힙니다.`;
+    }
+
+    function fillIdentityContext(event) {
+      if (!event) return;
+      const mapping = {
+        ownerOrgId: event.owner_org_id,
+        ownerProviderPersonId: event.owner_provider_person_id,
+        subjectPersonId: event.subject_person_id,
+        physioClientId: event.physio_client_id,
+        physioSessionId: event.physio_session_id
+      };
+      Object.entries(mapping).forEach(([id, value]) => {
+        if (!value) return;
+        const el = document.getElementById(id);
+        el.value = value;
+        localStorage.setItem(`rayban_${id}`, value);
+      });
+      updateIdentityStatus();
+    }
+
+    function patientNameForConsent() {
+      const value =
+        consentPatientEl.value.trim() ||
+        document.getElementById("patientName").value.trim() ||
+        document.getElementById("audioPatientName").value.trim();
+      if (value) {
+        consentPatientEl.value = value;
+        localStorage.setItem("rayban_consent_patient_name", value);
+      }
+      return value;
+    }
+
+    function updateConsentStatus(consentPayload) {
+      const status = document.getElementById("consentStatus");
+      const hint = document.getElementById("consentHint");
+      if (consentPayload?.active) {
+        status.textContent = "활성";
+        status.className = "tag good";
+        hint.textContent = `동의 확인됨: ${consentPayload.patient_name} · ${consentPayload.consent?.created_at || ""}`;
+        return;
+      }
+      const patient = consentPatientEl.value.trim();
+      status.textContent = patient ? "미등록" : "미확인";
+      status.className = "tag warn";
+      hint.textContent = patient
+        ? `${patient} 동의가 아직 활성 상태로 확인되지 않았습니다.`
+        : "환자명을 입력하거나 text/audio 환자명을 먼저 채우세요.";
+    }
+
+    async function checkConsent(updateOutput = true) {
+      const patient = patientNameForConsent();
+      if (!patient) {
+        renderOutput("동의 조회", "환자명을 입력하세요.");
+        updateConsentStatus(null);
+        return null;
+      }
+      try {
+        const identity = collectIdentityPayload();
+        const res = await fetch("/consents/status", {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify({
+            patient_name: patient,
+            owner_org_id: identity.owner_org_id,
+            owner_provider_person_id: identity.owner_provider_person_id,
+            subject_person_id: identity.subject_person_id
+          })
+        });
+        const data = await res.json();
+        updateConsentStatus(data);
+        if (updateOutput) renderOutput("동의 조회", { status: res.status, data });
+        return data;
+      } catch (e) {
+        renderOutput("동의 조회 오류", String(e));
+        return null;
+      }
+    }
+
+    async function recordConsent() {
+      const patient = patientNameForConsent();
+      if (!patient) {
+        renderOutput("동의 등록", "환자명을 입력하세요.");
+        return;
+      }
+      try {
+        const identity = collectIdentityPayload();
+        const res = await fetch("/consents", {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify({
+            patient_name: patient,
+            owner_org_id: identity.owner_org_id,
+            owner_provider_person_id: identity.owner_provider_person_id,
+            subject_person_id: identity.subject_person_id,
+            granted_by: consentGrantedByEl.value.trim() || "therapist"
+          })
+        });
+        const data = await res.json();
+        renderOutput("동의 등록", { status: res.status, data });
+        await checkConsent(false);
+      } catch (e) {
+        renderOutput("동의 등록 오류", String(e));
+      }
+    }
+
+    async function revokeConsent() {
+      const patient = patientNameForConsent();
+      if (!patient) {
+        renderOutput("동의 철회", "환자명을 입력하세요.");
+        return;
+      }
+      try {
+        const identity = collectIdentityPayload();
+        const res = await fetch("/consents", {
+          method: "DELETE",
+          headers: authHeaders(true),
+          body: JSON.stringify({
+            patient_name: patient,
+            owner_org_id: identity.owner_org_id,
+            owner_provider_person_id: identity.owner_provider_person_id,
+            subject_person_id: identity.subject_person_id
+          })
+        });
+        const data = await res.json();
+        updateConsentStatus(null);
+        renderOutput("동의 철회", { status: res.status, data });
+      } catch (e) {
+        renderOutput("동의 철회 오류", String(e));
+      }
     }
 
     function setBusy(title, message) {
@@ -726,6 +1541,136 @@
       document.getElementById("labelEventId").value = eventId;
     }
 
+    function optionLabel(option) {
+      if (typeof option === "string") return option;
+      return `${option.value} · ${option.label || option.value}`;
+    }
+
+    function optionValue(option) {
+      return typeof option === "string" ? option : option.value;
+    }
+
+    function populateSelect(id, options, preferredValue) {
+      const el = document.getElementById(id);
+      const current = preferredValue || el.value;
+      el.innerHTML = "";
+      (options || []).forEach(option => {
+        const value = optionValue(option);
+        const node = document.createElement("option");
+        node.value = value;
+        node.textContent = optionLabel(option);
+        el.appendChild(node);
+      });
+      if (current && [...el.options].some(option => option.value === current)) {
+        el.value = current;
+      }
+    }
+
+    async function loadLabelTaxonomy() {
+      try {
+        const res = await fetch("/label-taxonomy", { headers: authHeaders(false) });
+        const data = await res.json();
+        labelTaxonomy = data.taxonomy || null;
+        if (!labelTaxonomy) return;
+        populateSelect("sessionType", labelTaxonomy.session_type, "neuromotor_training");
+        populateSelect("coreTask", labelTaxonomy.core_task, "prone_head_control");
+        populateSelect("bodyPosition", labelTaxonomy.body_position, "unknown");
+        populateSelect("assistLevel", labelTaxonomy.assist_level, "moderate_assist");
+        populateSelect("performance", labelTaxonomy.performance, "stable");
+        populateSelect("reviewStatus", labelTaxonomy.review_status, "reviewed");
+        populateSelect("tolerance", [{ value: "", label: "Not set" }, ...(labelTaxonomy.tolerance || [])], "");
+        populateSelect("fatigueLevel", [{ value: "", label: "Not set" }, ...(labelTaxonomy.fatigue_level || [])], "");
+        renderLabelPresets(labelTaxonomy.presets || []);
+      } catch (e) {
+        renderOutput("라벨 taxonomy 로드 오류", String(e));
+      }
+    }
+
+    function renderLabelPresets(presets) {
+      const wrap = document.getElementById("labelPresetWrap");
+      if (!presets.length) {
+        wrap.innerHTML = "";
+        return;
+      }
+      wrap.innerHTML = presets.map((preset, index) => `
+        <button class="btn-secondary" type="button" onclick="applyLabelPreset(${index})">
+          ${escapeHtml(preset.name || `Preset ${index + 1}`)}
+        </button>
+      `).join("");
+    }
+
+    function applyLabelPreset(index) {
+      const preset = labelTaxonomy?.presets?.[index];
+      if (!preset) return;
+      document.getElementById("sessionType").value = preset.session_type || "";
+      document.getElementById("coreTask").value = preset.core_task || "";
+      document.getElementById("customTask").value = preset.custom_task || "";
+      document.getElementById("bodyPosition").value = preset.body_position || "";
+      document.getElementById("assistLevel").value = preset.assist_level || "";
+      document.getElementById("performance").value = preset.performance_level || preset.performance || "";
+      document.getElementById("reviewStatus").value = preset.review_status || "reviewed";
+      document.getElementById("labelConfidence").value = preset.label_confidence ?? "";
+      document.getElementById("reviewerPersonId").value = preset.reviewer_person_id || document.getElementById("ownerProviderPersonId").value || "";
+      document.getElementById("repetitionCount").value = preset.repetition_count ?? "";
+      document.getElementById("holdDurationSeconds").value = preset.hold_duration_seconds ?? "";
+      document.getElementById("tolerance").value = preset.tolerance || "";
+      document.getElementById("fatigueLevel").value = preset.fatigue_level || "";
+      document.getElementById("compensations").value = (preset.compensations || []).join(",");
+      document.getElementById("caregiverPresent").checked = Boolean(preset.caregiver_present);
+      document.getElementById("usableForTraining").checked = Boolean(preset.usable_for_training);
+      document.getElementById("flags").value = (preset.flags || []).join(",");
+      document.getElementById("labelNotes").value = preset.notes || "";
+      renderLabelReadiness(null);
+      outputMetaEl.textContent = `${preset.name} preset applied`;
+    }
+
+    function fillLabelForm(label) {
+      if (!label) return;
+      populateSelect("sessionType", labelTaxonomy?.session_type || [{ value: label.session_type }], label.session_type);
+      populateSelect("coreTask", labelTaxonomy?.core_task || [{ value: label.core_task }], label.core_task);
+      document.getElementById("customTask").value = label.custom_task || "";
+      populateSelect("bodyPosition", labelTaxonomy?.body_position || [{ value: label.body_position }], label.body_position);
+      populateSelect("assistLevel", labelTaxonomy?.assist_level || [{ value: label.assist_level }], label.assist_level);
+      populateSelect("performance", labelTaxonomy?.performance || [{ value: label.performance_level || label.performance }], label.performance_level || label.performance);
+      populateSelect("reviewStatus", labelTaxonomy?.review_status || [{ value: label.review_status }], label.review_status || "reviewed");
+      document.getElementById("reviewerPersonId").value = label.reviewer_person_id || "";
+      document.getElementById("usableForTraining").checked = Boolean(label.usable_for_training);
+      document.getElementById("labelConfidence").value = label.label_confidence ?? "";
+      document.getElementById("repetitionCount").value = label.repetition_count ?? "";
+      document.getElementById("holdDurationSeconds").value = label.hold_duration_seconds ?? "";
+      populateSelect("tolerance", [{ value: "", label: "Not set" }, ...(labelTaxonomy?.tolerance || [{ value: label.tolerance }])], label.tolerance || "");
+      populateSelect("fatigueLevel", [{ value: "", label: "Not set" }, ...(labelTaxonomy?.fatigue_level || [{ value: label.fatigue_level }])], label.fatigue_level || "");
+      document.getElementById("compensations").value = (label.compensations || []).join(",");
+      document.getElementById("caregiverPresent").checked = Boolean(label.caregiver_present);
+      document.getElementById("flags").value = (label.flags || []).join(",");
+      document.getElementById("labelNotes").value = label.notes || "";
+    }
+
+    function renderLabelReadiness(readiness) {
+      const wrap = document.getElementById("labelReadiness");
+      if (!readiness) {
+        wrap.innerHTML = "";
+        return;
+      }
+      const schemaClass = readiness.usable_for_schema_eval ? "tag good" : "tag warn";
+      const goldClass = readiness.eligible_for_gold_dataset ? "tag good" : "tag warn";
+      const missing = readiness.missing_requirements?.length
+        ? `Missing: ${readiness.missing_requirements.join(", ")}`
+        : "Schema ready";
+      wrap.innerHTML = `
+        <span class="${schemaClass}">Schema ${readiness.usable_for_schema_eval ? "ready" : "blocked"}</span>
+        <span class="${goldClass}">Gold ${readiness.eligible_for_gold_dataset ? "ready" : "blocked"}</span>
+        <span class="tag">${escapeHtml(missing)}</span>
+      `;
+    }
+
+    async function startLabel(eventId) {
+      document.getElementById("eventId").value = eventId;
+      document.getElementById("labelEventId").value = eventId;
+      switchPanel("labelPanel");
+      await getLabel(eventId);
+    }
+
     function useSampleText() {
       document.getElementById("text").value = "환아 김민수 MRN:12345678 보행 안정, 통증 2점, ROM 90도";
     }
@@ -751,12 +1696,18 @@
     async function sendText() {
       setBusy("텍스트 전송", "전송 중...");
       try {
+        const identity = collectIdentityPayload();
         const payload = {
           source: document.getElementById("source").value || "iphone",
           event_type: "text",
           text: document.getElementById("text").value || "",
-          patient_name: document.getElementById("patientName").value || ""
+          patient_name: document.getElementById("patientName").value || "",
+          ...identity
         };
+        if (payload.patient_name) {
+          consentPatientEl.value = payload.patient_name;
+          localStorage.setItem("rayban_consent_patient_name", payload.patient_name);
+        }
         const res = await fetch("/ingest", {
           method: "POST",
           headers: authHeaders(true),
@@ -779,10 +1730,17 @@
 
       setBusy("오디오 업로드", "업로드 중...");
       try {
+        const identity = collectIdentityPayload();
         const fd = new FormData();
         fd.append("source", document.getElementById("audioSource").value || "iphone");
         fd.append("event_type", "audio");
-        fd.append("patient_name", document.getElementById("audioPatientName").value || "");
+        const audioPatientName = document.getElementById("audioPatientName").value || "";
+        fd.append("patient_name", audioPatientName);
+        if (audioPatientName) {
+          consentPatientEl.value = audioPatientName;
+          localStorage.setItem("rayban_consent_patient_name", audioPatientName);
+        }
+        Object.entries(identity).forEach(([key, value]) => fd.append(key, value));
         fd.append("audio", file);
 
         const res = await fetch("/ingest-upload", {
@@ -815,11 +1773,14 @@
         renderOutput("이벤트 조회", "event_id를 입력하세요.");
         return;
       }
+      document.getElementById("eventId").value = eventId;
+      document.getElementById("labelEventId").value = eventId;
 
       setBusy("이벤트 조회", "조회 중...");
       try {
         const res = await fetch(`/events/${eventId}`, { headers: authHeaders(false) });
         const data = await res.json();
+        fillIdentityContext(data?.result?.event);
         renderOutput("이벤트 조회", { status: res.status, data });
       } catch (e) {
         renderOutput("이벤트 조회 오류", String(e));
@@ -871,9 +1832,13 @@
           <td>${escapeHtml(item.patient_name || "-")}</td>
           <td>${escapeHtml(item.created_at || "-")}</td>
           <td>${item.has_label ? "있음" : "없음"}</td>
+          <td><span class="${item.identity_completeness?.complete ? "tag good" : "tag warn"}">${item.identity_completeness?.complete ? "완성" : `${item.identity_completeness?.present ?? 0}/${item.identity_completeness?.required ?? 4}`}</span></td>
           <td>
             <button class="btn-secondary" type="button" onclick="checkEvent('${item.id}')">조회</button>
             <button class="btn-secondary" type="button" onclick="getChart('${item.id}')">차트</button>
+            <button class="btn-secondary" type="button" onclick="startLabel('${item.id}')">라벨</button>
+            <button class="btn-secondary" type="button" onclick="getPilotReadiness('${item.id}')">준비도</button>
+            <button class="btn-secondary" type="button" onclick="pilotDryRun('${item.id}')">Dry-run</button>
           </td>
         </tr>
       `).join("");
@@ -886,6 +1851,7 @@
               <th>환자</th>
               <th>생성</th>
               <th>라벨</th>
+              <th>Identity</th>
               <th>동작</th>
             </tr>
           </thead>
@@ -902,12 +1868,28 @@
       }
 
       const flagsRaw = (document.getElementById("flags").value || "").trim();
+      const compensationsRaw = (document.getElementById("compensations").value || "").trim();
+      const labelConfidenceRaw = (document.getElementById("labelConfidence").value || "").trim();
+      const repetitionRaw = (document.getElementById("repetitionCount").value || "").trim();
+      const holdRaw = (document.getElementById("holdDurationSeconds").value || "").trim();
       const payload = {
         session_type: document.getElementById("sessionType").value || "",
         core_task: document.getElementById("coreTask").value || "",
+        custom_task: document.getElementById("customTask").value || "",
+        body_position: document.getElementById("bodyPosition").value || "",
         assist_level: document.getElementById("assistLevel").value || "",
-        performance: document.getElementById("performance").value || "",
-        flags: flagsRaw ? flagsRaw.split(",").map(value => value.trim()).filter(Boolean) : [],
+        performance_level: document.getElementById("performance").value || "",
+        review_status: document.getElementById("reviewStatus").value || "reviewed",
+        reviewer_person_id: document.getElementById("reviewerPersonId").value || "",
+        usable_for_training: document.getElementById("usableForTraining").checked,
+        label_confidence: labelConfidenceRaw ? Number(labelConfidenceRaw) : null,
+        repetition_count: repetitionRaw ? Number(repetitionRaw) : null,
+        hold_duration_seconds: holdRaw ? Number(holdRaw) : null,
+        tolerance: document.getElementById("tolerance").value || "",
+        fatigue_level: document.getElementById("fatigueLevel").value || "",
+        compensations: compensationsRaw ? compensationsRaw.split(",").map(value => value.trim()).filter(Boolean) : [],
+        caregiver_present: document.getElementById("caregiverPresent").checked,
+        safety_flags: flagsRaw ? flagsRaw.split(",").map(value => value.trim()).filter(Boolean) : [],
         notes: document.getElementById("labelNotes").value || ""
       };
 
@@ -919,6 +1901,7 @@
           body: JSON.stringify(payload)
         });
         const data = await res.json();
+        renderLabelReadiness(data.readiness);
         renderOutput("라벨 저장", { status: res.status, data });
         await listRecent(false, false);
       } catch (e) {
@@ -926,19 +1909,106 @@
       }
     }
 
-    async function getLabel() {
-      const eventId = (document.getElementById("labelEventId").value || document.getElementById("eventId").value || "").trim();
+    async function getLabel(id) {
+      const eventId = (id || document.getElementById("labelEventId").value || document.getElementById("eventId").value || "").trim();
       if (!eventId) {
         renderOutput("라벨 조회", "event_id를 입력하세요.");
         return;
       }
+      document.getElementById("eventId").value = eventId;
+      document.getElementById("labelEventId").value = eventId;
 
       try {
         const res = await fetch(`/labels/${eventId}`, { headers: authHeaders(false) });
         const data = await res.json();
+        fillLabelForm(data.label);
         renderOutput("라벨 조회", { status: res.status, data });
+        await getPilotReadiness(eventId, false);
       } catch (e) {
         renderOutput("라벨 조회 오류", String(e));
+      }
+    }
+
+    async function getPilotReadiness(id, updateOutput = true) {
+      const eventId = (id || document.getElementById("labelEventId").value || document.getElementById("eventId").value || "").trim();
+      if (!eventId) {
+        renderOutput("준비도 확인", "event_id를 입력하세요.");
+        return null;
+      }
+      document.getElementById("eventId").value = eventId;
+      document.getElementById("labelEventId").value = eventId;
+
+      try {
+        const res = await fetch(`/events/${eventId}/pilot-readiness?resolve_identity=false`, { headers: authHeaders(false) });
+        const data = await res.json();
+        renderLabelReadiness(data.readiness);
+        if (updateOutput) renderOutput("파일럿 준비도", { status: res.status, data });
+        return data;
+      } catch (e) {
+        renderOutput("준비도 확인 오류", String(e));
+        return null;
+      }
+    }
+
+    function summarizePilotDryRun(readinessPayload, planPayload) {
+      const readiness = readinessPayload?.readiness || {};
+      const identity = readinessPayload?.identity || {};
+      const agentDryRun = readinessPayload?.agent_dry_run || {};
+      const plan = planPayload?.result || {};
+      return {
+        gate: readiness.gate || "gate_1_pilot",
+        schema_eval: readiness.usable_for_schema_eval ? "ready" : "blocked",
+        gold_dataset: readiness.eligible_for_gold_dataset ? "ready" : "blocked",
+        missing_schema: readiness.missing_requirements || [],
+        missing_gold: readiness.gold_missing_requirements || [],
+        identity: {
+          organization_id: Boolean(identity.organization_id),
+          provider_person_id: Boolean(identity.provider_person_id),
+          subject_person_id: Boolean(identity.subject_person_id),
+          physio_client_id: Boolean(identity.physio_client_id),
+          encounter_id: Boolean(identity.encounter_id),
+          resolution_status: identity.identity_resolution_status
+        },
+        dry_run: {
+          mode: "no_write",
+          sync_job_enqueued: Boolean(agentDryRun.sync_job_enqueued),
+          operation_count: plan.summary?.operation_count ?? 0,
+          skipped_count: plan.summary?.skipped_count ?? 0,
+          skipped: plan.skipped || []
+        }
+      };
+    }
+
+    async function pilotDryRun(id) {
+      const eventId = (id || document.getElementById("labelEventId").value || document.getElementById("eventId").value || "").trim();
+      if (!eventId) {
+        renderOutput("Pilot Dry-run", "event_id를 입력하세요.");
+        return;
+      }
+      setBusy("Pilot Dry-run", "readiness와 moai write-plan을 확인 중...");
+      try {
+        const [readinessRes, planRes] = await Promise.all([
+          fetch(`/events/${eventId}/pilot-readiness?resolve_identity=false`, { headers: authHeaders(false) }),
+          fetch(`/events/${eventId}/moai-write-plan?resolve_identity=false`, { headers: authHeaders(false) })
+        ]);
+        const readinessData = await readinessRes.json();
+        const planData = await planRes.json();
+        renderLabelReadiness(readinessData.readiness);
+        renderOutput("Pilot Dry-run", {
+          status: {
+            readiness: readinessRes.status,
+            write_plan: planRes.status
+          },
+          event_id: eventId,
+          summary: summarizePilotDryRun(readinessData, planData),
+          raw: {
+            readiness: readinessData,
+            write_plan_summary: planData.result?.summary || {},
+            write_plan_skipped: planData.result?.skipped || []
+          }
+        });
+      } catch (e) {
+        renderOutput("Pilot Dry-run 오류", String(e));
       }
     }
 
@@ -952,6 +2022,179 @@
       outputMetaEl.textContent = "event_id를 클립보드에 복사했습니다.";
     }
 
+    function hudIdentityPayload() {
+      const identity = collectIdentityPayload();
+      return {
+        organization_id: identity.owner_org_id || "org-browser-fixture",
+        provider_person_id: identity.owner_provider_person_id || "provider-browser-fixture",
+        subject_person_id: identity.subject_person_id || "person-browser-fixture",
+        encounter_id: identity.physio_session_id || "enc-browser-hud"
+      };
+    }
+
+    function hudCandidateSummary(candidate) {
+      const parts = [candidate?.test, candidate?.side, candidate?.value].filter(Boolean);
+      return parts.length ? parts.join(" / ") : "HUD candidate";
+    }
+
+    function renderHudCandidates(items = []) {
+      const wrap = document.getElementById("hudCandidateWrap");
+      if (!items.length) {
+        wrap.innerHTML = `<div class="notice">대기 중인 HUD 후보가 없습니다.</div>`;
+        return;
+      }
+      wrap.innerHTML = items.map(item => `
+        <div class="identity-card">
+          <header>
+            <div>
+              <h3>${escapeHtml(hudCandidateSummary(item))}</h3>
+              <div class="visually-small">${escapeHtml(item.symptom || "symptom 없음")}</div>
+            </div>
+            <span class="tag">${escapeHtml(item.status || "candidate")}</span>
+          </header>
+          <div class="toolbar">
+            <button class="btn-primary" type="button" onclick="approveHudCandidate('${escapeHtml(item.id)}')">승인</button>
+            <button class="btn-ghost" type="button" onclick="discardHudCandidate('${escapeHtml(item.id)}')">폐기</button>
+            <button class="btn-secondary" type="button" onclick="getHudCandidatePlan('${escapeHtml(item.id)}')">Plan</button>
+          </div>
+        </div>
+      `).join("");
+    }
+
+    function hudExtractPayload(createCandidate = true) {
+      const identity = hudIdentityPayload();
+      const confidenceRaw = document.getElementById("hudConfidence").value.trim();
+      return {
+        ...identity,
+        text: document.getElementById("hudTranscript").value.trim(),
+        source: document.getElementById("hudSource").value.trim() || "browser_hud_rehearsal",
+        confidence: confidenceRaw ? Number(confidenceRaw) : null,
+        create_candidate: createCandidate
+      };
+    }
+
+    async function createHudCandidate(updateOutput = true) {
+      setBusy("HUD 후보 생성", "transcript를 후보로 추출하는 중...");
+      try {
+        const res = await fetch("/hud/candidates/extract", {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify(hudExtractPayload(true))
+        });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        await listHudCandidates(false);
+        if (updateOutput) renderOutput("HUD 후보 생성", data);
+        return data;
+      } catch (err) {
+        renderOutput("HUD 후보 생성 실패", err);
+        throw err;
+      }
+    }
+
+    async function listHudCandidates(updateOutput = true) {
+      const identity = hudIdentityPayload();
+      const params = new URLSearchParams({
+        encounter_id: identity.encounter_id,
+        status: "candidate",
+        limit: "10"
+      });
+      try {
+        const res = await fetch(`/hud/candidates?${params}`, { headers: authHeaders(false) });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        renderHudCandidates(data.items || []);
+        if (updateOutput) renderOutput("HUD 후보 목록", data);
+        return data;
+      } catch (err) {
+        renderOutput("HUD 후보 목록 실패", err);
+        throw err;
+      }
+    }
+
+    async function approveHudCandidate(candidateId) {
+      const identity = hudIdentityPayload();
+      setBusy("HUD 후보 승인", candidateId);
+      try {
+        const res = await fetch(`/hud/candidates/${encodeURIComponent(candidateId)}/approve`, {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify({ reviewer_person_id: identity.provider_person_id })
+        });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        await listHudCandidates(false);
+        renderOutput("HUD 후보 승인", data);
+        return data;
+      } catch (err) {
+        renderOutput("HUD 후보 승인 실패", err);
+        throw err;
+      }
+    }
+
+    async function discardHudCandidate(candidateId) {
+      const identity = hudIdentityPayload();
+      setBusy("HUD 후보 폐기", candidateId);
+      try {
+        const res = await fetch(`/hud/candidates/${encodeURIComponent(candidateId)}/discard`, {
+          method: "POST",
+          headers: authHeaders(true),
+          body: JSON.stringify({
+            reviewer_person_id: identity.provider_person_id,
+            reason: "discarded_from_browser"
+          })
+        });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        await listHudCandidates(false);
+        renderOutput("HUD 후보 폐기", data);
+        return data;
+      } catch (err) {
+        renderOutput("HUD 후보 폐기 실패", err);
+        throw err;
+      }
+    }
+
+    async function getHudCandidatePlan(candidateId) {
+      setBusy("HUD 후보 Plan", candidateId);
+      try {
+        const res = await fetch(`/hud/candidates/${encodeURIComponent(candidateId)}/moai-write-plan`, {
+          headers: authHeaders(false)
+        });
+        const data = await res.json();
+        if (!res.ok) throw data;
+        renderOutput("HUD 후보 Plan", data);
+        return data;
+      } catch (err) {
+        renderOutput("HUD 후보 Plan 실패", err);
+        throw err;
+      }
+    }
+
+    async function runHudRehearsal() {
+      setBusy("HUD 리허설", "후보 생성, 승인, 폐기를 순서대로 실행합니다.");
+      try {
+        const created = await createHudCandidate(false);
+        const approved = await approveHudCandidate(created.candidate.id);
+        const discardCreated = await createHudCandidate(false);
+        const discarded = await discardHudCandidate(discardCreated.candidate.id);
+        const approvedTargets = (approved.plan?.operations || []).map(op => op.target_table);
+        const discardedTargets = (discarded.plan?.operations || []).map(op => op.target_table);
+        renderOutput("HUD 리허설 완료", {
+          status: "done",
+          checks: {
+            approved_emits_observation: approvedTargets.includes("observations"),
+            discarded_skips_observation: !discardedTargets.includes("observations"),
+            discarded_keeps_review_trace: discardedTargets.includes("clinical_extraction_reviews")
+          },
+          approved_targets: approvedTargets,
+          discarded_targets: discardedTargets
+        });
+      } catch (err) {
+        renderOutput("HUD 리허설 실패", err);
+      }
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -962,6 +2205,10 @@
     }
 
     updatePairing();
+    updateIdentityStatus();
+    updateConsentStatus(null);
+    refreshAppSetupLink();
+    loadLabelTaxonomy();
     refreshHealth();
     listRecent(false, false);
   </script>
