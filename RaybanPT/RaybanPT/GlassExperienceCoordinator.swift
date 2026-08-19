@@ -7,6 +7,7 @@ struct GlassExperienceLaunchContext: Equatable {
     let subjectPersonId: String?
     let physioClientId: String?
     let physioSessionId: String?
+    let automaticCaptureRequested: Bool
 }
 
 @Observable
@@ -83,7 +84,8 @@ final class GlassExperienceCoordinator {
                 sessionLabel: nil,
                 subjectPersonId: nil,
                 physioClientId: nil,
-                physioSessionId: nil
+                physioSessionId: nil,
+                automaticCaptureRequested: false
             )
         }
 
@@ -100,12 +102,24 @@ final class GlassExperienceCoordinator {
             return nil
         }
 
+        func boolValue(_ names: [String]) -> Bool {
+            for name in names {
+                if let raw = items.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })?.value?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !raw.isEmpty {
+                    return ["1", "true", "yes", "on"].contains(raw.lowercased())
+                }
+            }
+            return false
+        }
+
         return GlassExperienceLaunchContext(
             patientName: value("patient_name", "patient", "patientName", "client_name", "clientName"),
             sessionLabel: value("session_type", "session", "sessionName", "session_name", "program"),
             subjectPersonId: value("subject_person_id", "person_id", "patient_person_id"),
             physioClientId: value("physio_client_id", "client_id", "clientId"),
-            physioSessionId: value("physio_session_id", "session_id", "encounter_id", "sessionId")
+            physioSessionId: value("physio_session_id", "session_id", "encounter_id", "sessionId"),
+            automaticCaptureRequested: boolValue(["session_auto_capture", "auto_capture", "automatic_capture"])
         )
     }
 

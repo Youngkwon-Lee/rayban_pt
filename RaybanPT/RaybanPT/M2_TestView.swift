@@ -296,9 +296,10 @@ struct M2_TestView: View {
                 return
             }
 
-            guard needsServerSetup else { return }
-            try? await Task.sleep(nanoseconds: 260_000_000)
-            showServerSetup = true
+            // Keep the capture/HUD surface available even before the bridge is
+            // configured. The server sheet remains reachable from the settings
+            // affordance; auto-presenting it here blocks DAT registration and
+            // makes physical glasses validation impossible.
         }
     }
 
@@ -959,7 +960,7 @@ private struct CheckupTab: View {
                     Label(deviceManager.statusMessage, systemImage: deviceManager.linkState == .connected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
                         .foregroundStyle(deviceManager.linkState == .connected ? DS.ColorToken.success : DS.ColorToken.warning)
                     Spacer()
-                    Button("재연결") {
+                    Button(deviceManager.registrationState == .registered ? "재연결" : "Meta AI 연결") {
                         deviceManager.retryConnection()
                     }
                     .buttonStyle(.bordered)
@@ -1501,7 +1502,7 @@ private struct DeviceStatusBanner: View {
                     .lineLimit(2)
                     .minimumScaleFactor(0.86)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Button("재연결") {
+                Button(deviceManager.registrationState == .registered ? "재연결" : "Meta AI 연결") {
                     deviceManager.retryConnection()
                 }
                 .font(.system(size: 12, weight: .bold))

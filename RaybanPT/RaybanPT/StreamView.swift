@@ -112,9 +112,9 @@ struct StreamView: View {
         var uploadSource: String {
             switch self {
             case .rayban:
-                return "rayban-camera"
+                return "rayban_dat_camera"
             case .phone:
-                return "iphone-camera"
+                return "iphone_camera"
             }
         }
     }
@@ -124,6 +124,7 @@ struct StreamView: View {
             case photo(UIImage)
             case video(URL)
             case audio(URL)
+            case sessionAutoCapture
         }
 
         let id = UUID()
@@ -193,6 +194,8 @@ struct StreamView: View {
     }
 
     @AppStorage("rayban_pt.auto_save_captures") private var autoSaveCaptures = false
+    @AppStorage("rayban_pt.session_auto_capture") private var sessionAutoCaptureEnabled = false
+    @AppStorage("rayban_pt.provider_role") private var providerRole = "physical_therapist"
     @State private var vm = StreamViewModel()
     @State private var deviceSession = DeviceSessionManager.shared
     @State private var glassHUD = GlassHUDManager.shared
@@ -207,6 +210,7 @@ struct StreamView: View {
     @State private var showPhotoSheet = false
     @State private var showChartSheet = false
     @State private var showLabelSheet = false
+    @State private var showCaptureTagSheet = false
     @State private var showVideoSheet = false
     @State private var showPhoneCamera = false
     @State private var lastEventId: String? = nil
@@ -221,7 +225,10 @@ struct StreamView: View {
     @State private var photoSource: PhotoSource = .rayban
     @State private var pendingConsentAction: PendingConsentAction?
     @State private var handsFreeRecordingSession = false
+    @State private var sessionAutoCaptureActive = false
+    @State private var sessionAutoAudioCaptureActive = false
     @State private var shouldAutoProcessNextRecordedVideo = false
+    @State private var automaticCaptureProcessingTask: Task<Void, Never>? = nil
     @State private var isEndingVisitSession = false
 
     // STT
@@ -230,6 +237,9 @@ struct StreamView: View {
     @State private var isTranscribing = false
     @State private var toastTask: Task<Void, Never>? = nil
     @State private var handledLaunchToken: UUID? = nil
+    @State private var hudCandidates: [BridgeClient.HudCandidate] = []
+    @State private var isLoadingHudCandidates = false
+    @State private var hudCandidateDecisionId: String? = nil
 
     private static let captureHistoryTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -241,6 +251,10 @@ struct StreamView: View {
     private var needsServerSetup: Bool {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url") ?? ""
         return stored.isEmpty
+    }
+
+    private var videoCaptureOrigin: String {
+        DemoConfig.isGlassDemoEnabled ? "ios_demo_synthetic" : "rayban_dat_camera"
     }
 
     private var serverSettingsToolbarButton: some View {
@@ -353,6 +367,9 @@ struct StreamView: View {
             .onChange(of: deviceSession.linkState) { _, newState in
                 handleDeviceLinkStateChanged(newState)
             }
+            .onChange(of: sessionAutoCaptureEnabled) { _, enabled in
+                handleSessionAutoCaptureSettingChanged(enabled)
+            }
             .onAppear(perform: handleViewAppear)
             .onAppear(perform: handleDeviceSessionAppear)
             .onAppear(perform: handleHUDAutoTestAppear)
@@ -419,16 +436,14 @@ struct StreamView: View {
                 handleRecordedVideoChange(newURL)
             }
             .onChange(of: vm.isStreaming) { _, streaming in
-                Task {
-                    if streaming {
-                        await GlassHUDManager.shared.startContext(patient: currentPatient?.name)
-                    } else {
-                        await GlassHUDManager.shared.stopContext()
-                    }
-                }
+                handleStreamingStateChanged(streaming)
             }
             .onChange(of: vm.recorder.isRecording) { _, recording in
                 handleRecorderStateChanged(recording)
+            }
+            .onChange(of: audioRecorder.isRecording) { _, recording in
+                guard sessionAutoCaptureActive else { return }
+                sessionAutoAudioCaptureActive = recording
             }
     }
 
@@ -436,6 +451,18 @@ struct StreamView: View {
         content
             .onReceive(NotificationCenter.default.publisher(for: .glassCaptouchRecordToggle)) { note in
                 handleGlassCaptureToggleNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassRecordingStateRequested)) { note in
+                handleGlassRecordingStateNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassCapturePhotoRequested)) { _ in
+                handleGlassPhotoCaptureNotification()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassAudioStartRequested)) { _ in
+                handleGlassAudioStartNotification()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .glassAudioStopRequested)) { _ in
+                handleGlassAudioStopNotification()
             }
             .onReceive(NotificationCenter.default.publisher(for: .glassStandbyStartRequested)) { _ in
                 handleGlassStandbyStartNotification()
@@ -556,6 +583,12 @@ struct StreamView: View {
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
+            if shouldShowHudCandidatePill {
+                hudCandidatePill
+                    .padding(.horizontal, 16)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
             if let message = saveStatus.message {
                 saveStatusPill(message: message, tint: saveStatus.tint)
                     .padding(.horizontal, 16)
@@ -618,6 +651,10 @@ struct StreamView: View {
         !sttText.isEmpty || isTranscribing
     }
 
+    private var shouldShowHudCandidatePill: Bool {
+        !hudCandidates.isEmpty || isLoadingHudCandidates
+    }
+
     // MARK: - 카메라 피드
 
     private var cameraFeed: some View {
@@ -632,6 +669,7 @@ struct StreamView: View {
                         .scaledToFill()
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
+                        .accessibilityIdentifier("raybanDATFrame")
                 } else {
                     EmptyCameraState(
                         isStreaming: vm.isStreaming,
@@ -653,9 +691,14 @@ struct StreamView: View {
                         .ignoresSafeArea()
                         .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true),
                                    value: vm.recorder.isRecording)
+                    }
                 }
             }
-        }
+            .sheet(isPresented: $showCaptureTagSheet) {
+                CaptureTagSheet { option in
+                    await recordCaptureTag(option)
+                }
+            }
     }
 
     private func consentPrompt(for patientName: String) -> String {
@@ -790,9 +833,14 @@ struct StreamView: View {
             Text(deviceSession.statusMessage)
                 .font(.system(size: DS.FontSize.caption, weight: .medium))
                 .foregroundStyle(.white)
-            Spacer()
+            Button("DAT 업데이트") {
+                Task { await vm.openDATGlassesAppUpdate() }
+            }
+            .font(.caption2)
+            .buttonStyle(.bordered)
+            .tint(DS.ColorToken.primary)
             if deviceSession.linkState != .connected {
-                Button("재연결") {
+                Button(deviceSession.registrationState == .registered ? "재연결" : "Meta AI 연결") {
                     deviceSession.retryConnection()
                 }
                 .font(.caption2)
@@ -840,6 +888,99 @@ struct StreamView: View {
         .padding(.horizontal, DS.Spacing.sm)
         .padding(.vertical, DS.Spacing.xs)
         .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
+    }
+
+    private var hudCandidatePill: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: DS.Spacing.xs) {
+                Image(systemName: "checklist")
+                    .font(.caption)
+                    .foregroundStyle(DS.ColorToken.primary)
+                Text("기록 후보")
+                    .font(.system(size: DS.FontSize.caption, weight: .semibold))
+                    .foregroundStyle(.white)
+                Spacer()
+                if isLoadingHudCandidates {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.65)
+                        .tint(.white)
+                }
+                Button {
+                    Task { await refreshHudCandidates() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.72))
+                }
+                Button {
+                    withAnimation { hudCandidates = [] }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+            }
+
+            ForEach(hudCandidates.prefix(2), id: \.id) { candidate in
+                hudCandidateRow(candidate)
+            }
+        }
+        .padding(.horizontal, DS.Spacing.sm)
+        .padding(.vertical, DS.Spacing.xs)
+        .background(DS.ColorToken.surface, in: RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
+                .stroke(DS.ColorToken.primary.opacity(0.24), lineWidth: 1)
+        )
+    }
+
+    private func hudCandidateRow(_ candidate: BridgeClient.HudCandidate) -> some View {
+        let summary = hudCandidateSummary(candidate)
+        let candidateId = candidate.id ?? ""
+        let isBusy = hudCandidateDecisionId == candidateId
+
+        return HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(summary)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                if let symptom = candidate.symptom, !symptom.isEmpty {
+                    Text(symptom)
+                        .font(.system(size: 10, weight: .regular))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            if isBusy {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(0.65)
+                    .tint(.white)
+            } else {
+                Button {
+                    Task { await decideHudCandidate(candidate, approve: true) }
+                } label: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(DS.ColorToken.success)
+                }
+                .disabled(candidateId.isEmpty)
+
+                Button {
+                    Task { await decideHudCandidate(candidate, approve: false) }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(DS.ColorToken.danger)
+                }
+                .disabled(candidateId.isEmpty)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     // MARK: - 하단 컨트롤바
@@ -892,7 +1033,7 @@ struct StreamView: View {
                             if audioRecorder.isRecording {
                                 await stopAndTranscribe()
                             } else {
-                                await audioRecorder.startRecording()
+                                await startAudioRecording()
                             }
                         }
                     } label: {
@@ -1015,15 +1156,31 @@ struct StreamView: View {
         )
         await ensureVisitSessionForCurrentPatient(historySummary: launch.context?.sessionLabel ?? "")
 
+        // A physio_app launch explicitly requests automatic capture. Set the
+        // toggle only after the launch has selected a patient, so the
+        // consent-gated handler cannot reset it while the patient is nil.
+        print("[SessionAutoCapture] launch_request=\(launch.context?.automaticCaptureRequested == true)")
+        if launch.context?.automaticCaptureRequested == true {
+            sessionAutoCaptureEnabled = true
+        }
+
         if !vm.isStreaming {
             await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
         }
 
+        // If the link is still negotiating, handleDeviceLinkStateChanged()
+        // owns the single retry after MWDAT reports .connected. Starting here
+        // as well can create two DeviceSession instances and make the glasses
+        // report "Device unavailable". A launch that arrives after the link
+        // is already connected is covered by that same callback in the normal
+        // foreground lifecycle.
         guard !vm.isStreaming else { return }
-        await vm.startStreaming()
     }
 
     private func handleViewAppear() {
+        if DemoConfig.isDATMockPatientBootstrapEnabled, currentPatient == nil {
+            currentPatient = store.touch(name: "DAT Mock QA")
+        }
         vm.setup()
         Task {
             await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
@@ -1036,12 +1193,21 @@ struct StreamView: View {
     }
 
     private func handlePatientSelectionChanged() {
-        withAnimation { sttText = "" }
+        withAnimation {
+            sttText = ""
+            hudCandidates = []
+        }
         Task {
             await ensureVisitSessionForCurrentPatient()
+            await refreshHudCandidates()
             if vm.isStreaming {
                 guard !vm.recorder.isRecording else { return }
                 await GlassHUDManager.shared.updateContextPatient(currentPatient?.name)
+                // The setting can persist across launches. If the live stream
+                // was already running before a patient was selected, retry
+                // the consent/session-gated automatic capture now that the
+                // required context exists.
+                await startAutomaticSessionCaptureIfNeeded()
                 return
             }
 
@@ -1060,7 +1226,11 @@ struct StreamView: View {
            active.subject_person_id == bridgeVm.client.subjectPersonId {
             return
         }
-        await bridgeVm.startVisitSession(patientAlias: patient.name, historySummary: historySummary)
+        await bridgeVm.startVisitSession(
+            patientAlias: patient.name,
+            historySummary: historySummary,
+            providerRole: providerRole
+        )
     }
 
     private func handleDeviceLinkStateChanged(_ newState: LinkState) {
@@ -1068,6 +1238,32 @@ struct StreamView: View {
             guard !vm.isStreaming else { return }
             guard newState == .connected else { return }
             await vm.prepareStandbyDisplay(patientName: currentPatient?.name)
+
+            // A Care Live launch can arrive while MWDAT is still negotiating
+            // the BLE link. In that window the first automatic-capture attempt
+            // is rejected with PermissionError.noDeviceWithConnection. Retry
+            // only after the link is genuinely connected; manual launches
+            // still remain standby-only until the clinician starts live.
+            guard sessionAutoCaptureEnabled, currentPatient != nil else { return }
+            await vm.startStreaming()
+        }
+    }
+
+    private func handleStreamingStateChanged(_ streaming: Bool) {
+        Task {
+            if streaming {
+                await GlassHUDManager.shared.startContext(patient: currentPatient?.name)
+                await startAutomaticSessionCaptureIfNeeded()
+            } else {
+                await GlassHUDManager.shared.stopContext()
+                // A device/session error can stop the stream without going
+                // through the phone stop button. Close the automatic capture
+                // window here as well so a partial but valid session is not
+                // left recording forever.
+                if sessionAutoCaptureActive || sessionAutoAudioCaptureActive {
+                    await stopAutomaticSessionCapture()
+                }
+            }
         }
     }
 
@@ -1084,7 +1280,11 @@ struct StreamView: View {
 
     private func handleHUDAutoTestAppear() {
         guard DemoConfig.isHUDAutoTestEnabled else { return }
-        runHUDAutoTest()
+        if DemoConfig.isSessionAutoCaptureAutoTestEnabled {
+            runAutomaticSessionCaptureAutoTest()
+        } else {
+            runHUDAutoTest()
+        }
     }
 
     private func handlePhotoSave() async {
@@ -1111,7 +1311,7 @@ struct StreamView: View {
         if shouldAutoProcessNextRecordedVideo {
             shouldAutoProcessNextRecordedVideo = false
             showVideoSheet = false
-            Task {
+            automaticCaptureProcessingTask = Task {
                 await processHandsFreeRecordedVideo(newURL)
             }
             return
@@ -1145,6 +1345,14 @@ struct StreamView: View {
     private var rightActionButton: some View {
         if vm.isStreaming {
             HStack(spacing: 10) {
+                Button {
+                    showCaptureTagSheet = true
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                } label: {
+                    DockActionButton(title: "태그", systemImage: "tag.fill", tint: DS.ColorToken.warning)
+                }
+                .buttonStyle(TactileScaleButtonStyle())
+
                 Button {
                     Task { await toggleRecording(triggeredBy: .phoneUI) }
                 } label: {
@@ -1262,15 +1470,28 @@ struct StreamView: View {
             try? await Task.sleep(nanoseconds: 500_000_000)
             print("[HUDAutoTest] ① context: \(hud.demoHUDSummary ?? "nil")")
 
-            // 2) 녹화 시작 (HUD 상태만, 실제 VideoRecorder 건드리지 않음)
+            // 2) HUD 상태와 실제 VideoRecorder를 함께 시작한다.
+            //    Demo 모드에서도 live frame이 들어오므로 MP4 산출물까지 검증할 수 있다.
             await hud.startRecording(patient: "테스트 김철수")
+            vm.startRecording()
+            print("[HUDAutoTest] recorder-start streaming=\(vm.isStreaming) frame=\(vm.currentFrame != nil) recording=\(vm.recorder.isRecording) status=\(vm.recorder.statusMessage)")
             try? await Task.sleep(nanoseconds: 3_000_000_000)
-            print("[HUDAutoTest] ② recording: \(hud.demoHUDSummary ?? "nil")")
+            print("[HUDAutoTest] ② recording: \(hud.demoHUDSummary ?? "nil") frames=\(vm.recorder.frameCount) recording=\(vm.recorder.isRecording) status=\(vm.recorder.statusMessage)")
 
             // 3) 녹화 중지 → context 복귀
+            await vm.stopRecording()
+            let recordedURL = vm.recordedVideoURL
             await hud.stopRecording()
             try? await Task.sleep(nanoseconds: 1_000_000_000)
-            print("[HUDAutoTest] ③ context after stop: \(hud.demoHUDSummary ?? "nil")")
+            if let recordedURL,
+               let attributes = try? FileManager.default.attributesOfItem(atPath: recordedURL.path),
+               let fileSize = attributes[.size] as? NSNumber {
+                print("[HUDAutoTest] ③ context after stop: \(hud.demoHUDSummary ?? "nil") media=mp4 bytes=\(fileSize.intValue) path=\(recordedURL.path)")
+            } else {
+                print("[HUDAutoTest] ③ context after stop: \(hud.demoHUDSummary ?? "nil") media=missing")
+            }
+
+            await runMediaUploadAutoTestIfRequested(recordedURL)
 
             // 4) AI 인사이트
             await hud.showSuccess(title: "차트 생성됨", body: "환자: 테스트 김철수")
@@ -1281,6 +1502,116 @@ struct StreamView: View {
             try? await Task.sleep(nanoseconds: 7_000_000_000)
             print("[HUDAutoTest] ⑤ after insight: \(hud.demoHUDSummary ?? "nil")")
             print("[HUDAutoTest] ✅ 완료")
+        }
+    }
+
+    private func runAutomaticSessionCaptureAutoTest() {
+        Task {
+            for _ in 0..<30 {
+                if vm.isStreaming, currentPatient != nil, bridgeVm.visitSession?.status == "active" {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+
+            guard vm.isStreaming, currentPatient != nil else {
+                print("[SessionAutoCaptureAutoTest] skipped reason=stream_or_patient_missing")
+                return
+            }
+
+            sessionAutoCaptureEnabled = true
+            for _ in 0..<50 {
+                if sessionAutoCaptureActive || !sessionAutoCaptureEnabled { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+            guard sessionAutoCaptureActive else {
+                print("[SessionAutoCaptureAutoTest] skipped reason=consent_or_visit_gate")
+                sessionAutoCaptureEnabled = false
+                return
+            }
+
+            print("[SessionAutoCaptureAutoTest] start streaming=\(vm.isStreaming) recording=\(vm.recorder.isRecording) audio=\(sessionAutoAudioCaptureActive)")
+            // Physical Ray-Ban Display links can reach `.started` before the
+            // first video frame is delivered. Keep the deterministic QA
+            // window long enough to observe a real frame after negotiation.
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            print("[SessionAutoCaptureAutoTest] recording frames=\(vm.recorder.frameCount) audio=\(sessionAutoAudioCaptureActive)")
+
+            await stopAutomaticSessionCapture(processAutomatically: false)
+            let recordedURL = vm.recordedVideoURL
+            if let recordedURL,
+               let attributes = try? FileManager.default.attributesOfItem(atPath: recordedURL.path),
+               let fileSize = attributes[.size] as? NSNumber {
+                print("[SessionAutoCaptureAutoTest] stop media=mp4 bytes=\(fileSize.intValue) path=\(recordedURL.path)")
+            } else {
+                print("[SessionAutoCaptureAutoTest] stop media=missing")
+            }
+
+            await runMediaUploadAutoTestIfRequested(recordedURL)
+            // Close the DAT session as part of the physical QA harness. This
+            // prevents a test process termination from leaving the glasses'
+            // broadcast slot occupied for the next run.
+            if vm.isStreaming {
+                await vm.stopStreaming()
+            }
+            sessionAutoCaptureEnabled = false
+            print("[SessionAutoCaptureAutoTest] ✅ 완료")
+        }
+    }
+
+    private func runMediaUploadAutoTestIfRequested(_ recordedURL: URL?) async {
+        guard DemoConfig.isMediaUploadAutoTestEnabled else { return }
+        guard let recordedURL else {
+            print("[MediaUploadAutoTest] skipped reason=missing_mp4")
+            return
+        }
+        guard let patient = currentPatient,
+              !patient.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            print("[MediaUploadAutoTest] skipped reason=patient_not_selected")
+            return
+        }
+        guard !bridgeVm.client.apiKey.isEmpty else {
+            print("[MediaUploadAutoTest] skipped reason=bridge_api_key_missing")
+            return
+        }
+
+        do {
+            guard try await bridgeVm.client.hasActiveConsent(patientName: patient.name) else {
+                print("[MediaUploadAutoTest] skipped reason=active_consent_missing")
+                return
+            }
+
+            let accepted = try await bridgeVm.client.uploadVideo(
+                fileURL: recordedURL,
+                patientName: patient.name,
+                // The same deterministic auto-stop harness is used on the
+                // physical device. Preserve the actual capture origin rather
+                // than labeling a real Ray-Ban frame as synthetic demo data.
+                source: videoCaptureOrigin
+            )
+            let final = try await bridgeVm.client.waitUntilDone(
+                eventId: accepted.event_id,
+                maxTries: 180,
+                intervalSec: 1.0
+            )
+            guard final.status == "done" else {
+                print("[MediaUploadAutoTest] status=\(final.status) outer_event_id=\(accepted.event_id) error=\(final.error ?? final.message ?? "unknown")")
+                return
+            }
+
+            let eventId = final.eventId ?? accepted.event_id
+            await bridgeVm.attachVisitEventIfActive(eventId)
+            await bridgeVm.recordMediaCaptureEvent(
+                eventId: eventId,
+                sourceType: "video",
+                candidateType: "video_evidence",
+                fileName: recordedURL.lastPathComponent,
+                captureOrigin: videoCaptureOrigin
+            )
+            print("[MediaUploadAutoTest] status=done outer_event_id=\(accepted.event_id) clinical_event_id=\(eventId)")
+        } catch {
+            print("[MediaUploadAutoTest] failed error=\(bridgeErrorMessage(error))")
         }
     }
 
@@ -1299,6 +1630,11 @@ struct StreamView: View {
     }
 
     private var controlHintText: String {
+        if sessionAutoCaptureActive {
+            return sessionAutoAudioCaptureActive
+                ? "세션 자동기록 중입니다. 영상과 글래스 음성을 세션 종료 시 자동 처리합니다."
+                : "세션 자동기록 중입니다. 영상은 기록되고 글래스 마이크 연결 후 음성이 추가됩니다."
+        }
         switch liveStage {
         case .uploading:
             return "캡처를 전송하고 있습니다. 잠시만 기다려주세요."
@@ -1391,8 +1727,26 @@ struct StreamView: View {
     private func finishVisitSession() async {
         guard bridgeVm.visitSession?.status == "active" else { return }
         isEndingVisitSession = true
+        defer { isEndingVisitSession = false }
+
+        if sessionAutoCaptureActive || sessionAutoAudioCaptureActive {
+            await stopAutomaticSessionCapture()
+        }
+
+        if let processingTask = automaticCaptureProcessingTask {
+            await processingTask.value
+            automaticCaptureProcessingTask = nil
+        }
+
+        // Audio is finalized by stopAutomaticSessionCapture. This guard also
+        // covers an unexpected stream termination path that is still waiting
+        // for consent-gated transcription to settle.
+        if isTranscribing {
+            showToast("음성 기록 처리 중입니다. 잠시 후 다시 종료하세요")
+            return
+        }
+
         await bridgeVm.endVisitSession()
-        isEndingVisitSession = false
 
         if bridgeVm.visitSession?.status == "ended" {
             showToast("방문 세션 종료 · 진행 노트 초안 생성")
@@ -1442,6 +1796,9 @@ struct StreamView: View {
             await uploadVideo(url)
         case .audio(let url):
             await transcribeAudio(fileURL: url)
+        case .sessionAutoCapture:
+            sessionAutoCaptureEnabled = true
+            await startAutomaticSessionCaptureIfNeeded()
         }
     }
 
@@ -1534,6 +1891,7 @@ struct StreamView: View {
     }
 
     private func processHandsFreeRecordedVideo(_ url: URL) async {
+        defer { automaticCaptureProcessingTask = nil }
         let saveSucceeded = await saveCurrentVideo(triggeredAutomatically: true)
         if !saveSucceeded {
             showToast("⚠️ 영상 저장은 실패했지만 업로드는 계속합니다")
@@ -1561,6 +1919,77 @@ struct StreamView: View {
             return
         }
         await toggleRecording(triggeredBy: .glass(source))
+    }
+
+    private func handleGlassRecordingStateNotification(_ note: Notification) {
+        guard let recording = note.userInfo?["recording"] as? Bool else { return }
+        let source = GlassRecordToggleSource(notification: note)
+        Task {
+            await handleGlassRecordingState(recording, source: source)
+        }
+    }
+
+    private func handleGlassRecordingState(_ recording: Bool, source: GlassRecordToggleSource) async {
+        guard currentPatient != nil else {
+            await handleGlassPatientPickerRequested()
+            return
+        }
+
+        if recording {
+            guard !vm.recorder.isRecording else { return }
+            if !vm.isStreaming {
+                await handleGlassStandbyStartRequested()
+            }
+            guard vm.isStreaming else { return }
+            handsFreeRecordingSession = source.isHandsFreeGlassPath
+            vm.startRecording()
+            showToast("🔴 \(source.toastLabel) · 녹화 시작")
+        } else {
+            guard vm.recorder.isRecording else { return }
+            await toggleRecording(triggeredBy: .glass(source))
+        }
+    }
+
+    private func handleGlassPhotoCaptureNotification() {
+        Task {
+            guard currentPatient != nil else {
+                await handleGlassPatientPickerRequested()
+                return
+            }
+            if !vm.isStreaming {
+                await handleGlassStandbyStartRequested()
+            }
+            guard vm.isStreaming else { return }
+            isCapturing = true
+            photoSource = .rayban
+            vm.capturePhoto()
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            isCapturing = false
+        }
+    }
+
+    private func handleGlassAudioStartNotification() {
+        Task {
+            guard currentPatient != nil else {
+                await handleGlassPatientPickerRequested()
+                return
+            }
+            if audioRecorder.isRecording {
+                return
+            }
+            if sessionAutoCaptureActive {
+                showToast("세션 자동기록 중입니다")
+                return
+            }
+            await startAudioRecording()
+        }
+    }
+
+    private func handleGlassAudioStopNotification() {
+        Task {
+            guard audioRecorder.isRecording else { return }
+            await stopAndTranscribe()
+        }
     }
 
     private func handleGlassPrimaryActionNotification(_ note: Notification) {
@@ -1667,6 +2096,95 @@ struct StreamView: View {
         await vm.startStreaming()
     }
 
+    private func handleSessionAutoCaptureSettingChanged(_ enabled: Bool) {
+        Task {
+            if enabled {
+                guard currentPatient != nil else {
+                    sessionAutoCaptureEnabled = false
+                    showPatientPicker = true
+                    showToast("환자를 먼저 선택하세요")
+                    return
+                }
+                await ensureVisitSessionForCurrentPatient()
+                await startAutomaticSessionCaptureIfNeeded()
+            } else {
+                await stopAutomaticSessionCapture()
+            }
+        }
+    }
+
+    private func startAutomaticSessionCaptureIfNeeded() async {
+        guard sessionAutoCaptureEnabled,
+              !sessionAutoCaptureActive,
+              currentPatient != nil,
+              vm.isStreaming
+        else { return }
+
+        if bridgeVm.visitSession?.status != "active" {
+            await ensureVisitSessionForCurrentPatient()
+            guard bridgeVm.visitSession?.status == "active" else {
+                showToast("방문 세션을 시작할 수 없어 자동기록을 대기합니다")
+                return
+            }
+        }
+
+        do {
+            guard try await bridgeVm.client.hasActiveConsent(patientName: currentPatient?.name ?? "") else {
+                sessionAutoCaptureEnabled = false
+                showToast("자동기록은 환자 동의 확인 후 사용할 수 있습니다")
+                print("[SessionAutoCapture] blocked reason=active_consent_missing")
+                if let patient = currentPatient {
+                    pendingConsentAction = PendingConsentAction(
+                        patientName: patient.name,
+                        kind: .sessionAutoCapture
+                    )
+                }
+                await GlassHUDManager.shared.showError(
+                    title: "동의 확인 필요",
+                    body: "촬영·녹음·분석 동의를 먼저 기록해 주세요."
+                )
+                return
+            }
+        } catch {
+            showToast("동의 상태를 확인할 수 없습니다")
+            await GlassHUDManager.shared.showError(title: "자동기록 대기", body: bridgeErrorMessage(error))
+            return
+        }
+
+        sessionAutoCaptureActive = true
+        handsFreeRecordingSession = true
+        vm.startRecording()
+        showToast("🔴 세션 자동기록 시작 · 영상 준비 중")
+
+        // HFP route가 실제로 선택되는 경우에만 음성 기록을 유지한다.
+        // 글래스 마이크가 없으면 영상 세션은 계속되고, 음성만 안전하게 건너뛴다.
+        await startAudioRecording(preservingGlassesStream: true)
+        sessionAutoAudioCaptureActive = audioRecorder.isRecording
+        if sessionAutoAudioCaptureActive {
+            showToast("🔴 세션 자동기록 · 영상+글래스 음성")
+        } else {
+            showToast("🔴 세션 자동기록 · 영상만 기록 중")
+        }
+    }
+
+    private func stopAutomaticSessionCapture(processAutomatically: Bool = true) async {
+        guard sessionAutoCaptureActive || sessionAutoAudioCaptureActive else { return }
+
+        sessionAutoCaptureActive = false
+        let shouldStopAudio = sessionAutoAudioCaptureActive
+        sessionAutoAudioCaptureActive = false
+
+        if vm.recorder.isRecording, handsFreeRecordingSession {
+            handsFreeRecordingSession = false
+            shouldAutoProcessNextRecordedVideo = processAutomatically
+            await vm.stopRecording()
+        }
+
+        if shouldStopAudio {
+            await stopAndTranscribe()
+        }
+    }
+
     private func handleOpenCaptureHistoryRequested(_ note: Notification? = nil) async {
         let shouldOpenPhone = (note?.userInfo?["open_phone"] as? String) == "true"
         if shouldOpenPhone {
@@ -1720,11 +2238,17 @@ struct StreamView: View {
     private func stopStreamingFlow() async {
         let wasRecording = vm.recorder.isRecording
         let shouldAutoProcess = wasRecording && handsFreeRecordingSession
+        let shouldFinishAutomaticAudio = sessionAutoAudioCaptureActive
+        sessionAutoCaptureActive = false
+        sessionAutoAudioCaptureActive = false
         if shouldAutoProcess {
             shouldAutoProcessNextRecordedVideo = true
         }
         handsFreeRecordingSession = false
         await vm.stopStreaming()
+        if shouldFinishAutomaticAudio {
+            await stopAndTranscribe()
+        }
         if isGuidedModeActive {
             glassExperience.endGuidedMode()
         }
@@ -1747,10 +2271,10 @@ struct StreamView: View {
             // 1) 업로드 → outer event_id 수신
             let accepted = try await bridgeVm.client.uploadVideo(
                 fileURL: url,
-                patientName: currentPatient?.name
+                patientName: currentPatient?.name,
+                source: videoCaptureOrigin
             )
             lastEventId = accepted.event_id          // 우선 outer id로 차트 버튼 활성화
-            await bridgeVm.attachVisitEventIfActive(accepted.event_id)
             analysisText = "영상 분석 업로드 완료\n⚙️ 처리 중... (\(accepted.size_kb ?? 0)KB)"
             showToast("⚙️ 영상 분석 중...")
             processingPhase = .analyzing
@@ -1775,6 +2299,13 @@ struct StreamView: View {
                             lastEventId = innerId
                             Task {
                                 await bridgeVm.attachVisitEventIfActive(innerId)
+                                await bridgeVm.recordMediaCaptureEvent(
+                                    eventId: innerId,
+                                    sourceType: "video",
+                                    candidateType: "video_evidence",
+                                    fileName: url.lastPathComponent,
+                                    captureOrigin: videoCaptureOrigin
+                                )
                             }
                         }
                         analysisText = "✅ 영상 분석 완료\n📄 차트 생성됨"
@@ -1805,8 +2336,32 @@ struct StreamView: View {
 
     // MARK: - STT
 
+    private func startAudioRecording(preservingGlassesStream: Bool = false) async {
+        guard preservingGlassesStream || !sessionAutoCaptureActive else {
+            showToast("세션 자동기록 중입니다")
+            return
+        }
+        let shouldResumeGlassesStream = vm.isStreaming
+        if shouldResumeGlassesStream && !preservingGlassesStream {
+            if vm.recorder.isRecording {
+                showToast("영상 녹화를 먼저 중지하세요")
+                return
+            }
+            await vm.stopStreaming()
+        }
+        let audioStarted = await audioRecorder.startRecording()
+        await GlassHUDManager.shared.setAudioMemoRecording(audioStarted)
+        if !audioStarted, preservingGlassesStream {
+            showToast("글래스 마이크를 찾지 못해 영상만 기록합니다")
+        }
+        if shouldResumeGlassesStream && !preservingGlassesStream {
+            await vm.startStreaming()
+        }
+    }
+
     private func stopAndTranscribe() async {
         audioRecorder.stopRecording()
+        await GlassHUDManager.shared.setAudioMemoRecording(false)
         guard let fileURL = audioRecorder.recordedFileURL else { return }
         await runWithConsent(.audio(fileURL))
     }
@@ -1817,13 +2372,23 @@ struct StreamView: View {
 
         do {
             await GlassHUDManager.shared.showUploading(patient: currentPatient?.name)
-            let accepted = try await bridgeVm.client.uploadAudio(fileURL: fileURL, patientName: currentPatient?.name)
-            await bridgeVm.attachVisitEventIfActive(accepted.event_id)
+            let accepted = try await bridgeVm.client.uploadAudio(
+                fileURL: fileURL,
+                patientName: currentPatient?.name,
+                source: "rayban_hfp_microphone"
+            )
             processingPhase = .analyzing
             await GlassHUDManager.shared.showAnalyzing(patient: currentPatient?.name)
             let final = try await bridgeVm.client.waitUntilDone(eventId: accepted.event_id)
             if let eventId = final.eventId {
                 await bridgeVm.attachVisitEventIfActive(eventId)
+                await bridgeVm.recordMediaCaptureEvent(
+                    eventId: eventId,
+                    sourceType: "audio",
+                    candidateType: "transcript",
+                    fileName: fileURL.lastPathComponent,
+                    captureOrigin: "rayban_hfp_microphone"
+                )
             }
             let transcript = final.result?.event?.raw_text ?? ""
 
@@ -1837,6 +2402,7 @@ struct StreamView: View {
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 showToast("🎙 변환 완료")
                 await GlassHUDManager.shared.showSuccess(title: "음성 기록됨", body: "SOAP 초안에 반영할 준비가 됐습니다.")
+                await stageHudCandidateIfPossible(transcript: transcript)
             }
         } catch {
             let message = bridgeErrorMessage(error)
@@ -1847,6 +2413,123 @@ struct StreamView: View {
 
         isTranscribing = false
         processingPhase = .none
+    }
+
+    private func stageHudCandidateIfPossible(transcript: String) async {
+        guard !bridgeVm.client.physioSessionId.isEmpty,
+              !bridgeVm.client.subjectPersonId.isEmpty,
+              !bridgeVm.client.ownerOrgId.isEmpty,
+              !bridgeVm.client.ownerProviderPersonId.isEmpty
+        else { return }
+
+        do {
+            let response = try await bridgeVm.client.extractHudCandidate(
+                fromTranscript: transcript,
+                source: "ios_audio_transcript",
+                createCandidate: true
+            )
+            guard response.status == "done", let candidate = response.candidate else { return }
+
+            let parts = [candidate.test, candidate.side, candidate.value]
+                .compactMap { value -> String? in
+                    guard let value, !value.isEmpty else { return nil }
+                    return value
+                }
+            let summary = parts.isEmpty ? "승인 대기" : parts.joined(separator: " / ")
+            showToast("기록 후보 생성: \(summary)")
+            await GlassHUDManager.shared.showSuccess(title: "기록 후보", body: summary)
+            await refreshHudCandidates()
+        } catch {
+            // Candidate extraction is advisory. Keep the completed STT note available.
+            print("HUD candidate extraction skipped: \(bridgeErrorMessage(error))")
+        }
+    }
+
+    private func refreshHudCandidates() async {
+        guard !bridgeVm.client.physioSessionId.isEmpty else {
+            withAnimation { hudCandidates = [] }
+            return
+        }
+
+        isLoadingHudCandidates = true
+        defer { isLoadingHudCandidates = false }
+
+        do {
+            let response = try await bridgeVm.client.listHudCandidates(status: "candidate", limit: 5)
+            withAnimation {
+                hudCandidates = response.items.filter { $0.id?.isEmpty == false }
+            }
+        } catch {
+            print("HUD candidate refresh failed: \(bridgeErrorMessage(error))")
+        }
+    }
+
+    private func decideHudCandidate(_ candidate: BridgeClient.HudCandidate, approve: Bool) async {
+        guard let candidateId = candidate.id, !candidateId.isEmpty else { return }
+        hudCandidateDecisionId = candidateId
+        defer { hudCandidateDecisionId = nil }
+
+        do {
+            if approve {
+                _ = try await bridgeVm.client.approveHudCandidate(candidateId)
+                showToast("기록 후보 승인됨")
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                await GlassHUDManager.shared.showSuccess(title: "후보 승인", body: hudCandidateSummary(candidate))
+            } else {
+                _ = try await bridgeVm.client.discardHudCandidate(candidateId)
+                showToast("기록 후보 폐기됨")
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            }
+            await refreshHudCandidates()
+        } catch {
+            let message = bridgeErrorMessage(error)
+            showToast("후보 처리 실패: \(message)")
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+        }
+    }
+
+    private func hudCandidateSummary(_ candidate: BridgeClient.HudCandidate) -> String {
+        let parts = [candidate.test, candidate.side, candidate.value]
+            .compactMap { value -> String? in
+                guard let value, !value.isEmpty else { return nil }
+                return value
+            }
+        return parts.isEmpty ? "후보" : parts.joined(separator: " / ")
+    }
+
+    private func recordCaptureTag(_ option: CaptureTagOption) async {
+        guard let session = bridgeVm.visitSession else {
+            showToast("방문 세션을 먼저 시작하세요")
+            return
+        }
+        do {
+            _ = try await bridgeVm.client.createCaptureEvent(
+                visitSessionId: session.id,
+                encounterId: session.encounter_id,
+                eventType: option.eventType,
+                sourceType: "therapist_tag",
+                candidateType: option.eventType,
+                startMs: sessionElapsedMilliseconds(session.started_at),
+                confidence: 1,
+                status: "draft",
+                payload: [
+                    "label": option.title,
+                    "phase": session.phase,
+                    "surface": "ios_stream_view"
+                ]
+            )
+            showCaptureTagSheet = false
+            showToast("시간축 이벤트 기록: \(option.title)")
+        } catch {
+            showToast("이벤트 기록 실패: \(bridgeErrorMessage(error))")
+        }
+    }
+
+    private func sessionElapsedMilliseconds(_ startedAt: String?) -> Int? {
+        guard let startedAt,
+              let startedDate = ISO8601DateFormatter().date(from: startedAt)
+        else { return nil }
+        return max(0, Int(Date().timeIntervalSince(startedDate) * 1000))
     }
 
     private func showToast(_ message: String) {
@@ -1878,6 +2561,16 @@ struct StreamView: View {
     private var captureOptionsMenu: some View {
         Menu {
             Toggle("촬영 즉시 저장", isOn: $autoSaveCaptures)
+            Toggle("세션 자동기록", isOn: $sessionAutoCaptureEnabled)
+            Text("동의된 환자의 글래스 영상·음성을 라이브 시작부터 세션 종료까지 기록합니다.")
+            Picker("세션 직군", selection: $providerRole) {
+                Text("물리치료사").tag("physical_therapist")
+                Text("작업치료사").tag("occupational_therapist")
+                Text("필라테스 강사").tag("pilates_instructor")
+                Text("퍼스널 트레이너").tag("personal_trainer")
+                Text("보호자").tag("caregiver")
+                Text("기타").tag("other")
+            }
             Button("저장 기록 보기") {
                 showCaptureHistory = true
             }
@@ -2545,6 +3238,73 @@ private struct PhoneCameraPicker: UIViewControllerRepresentable {
 
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             dismiss()
+        }
+    }
+}
+
+private struct CaptureTagOption: Identifiable {
+    let id: String
+    let eventType: String
+    let title: String
+    let systemImage: String
+    let tint: Color
+}
+
+private let captureTagOptions: [CaptureTagOption] = [
+    CaptureTagOption(id: "safety_check", eventType: "safety_check", title: "안전·의학적 안정성", systemImage: "exclamationmark.shield.fill", tint: DS.ColorToken.primary),
+    CaptureTagOption(id: "assessment_started", eventType: "assessment_started", title: "평가 시작", systemImage: "stethoscope", tint: DS.ColorToken.primary),
+    CaptureTagOption(id: "assessment_finding", eventType: "assessment_finding", title: "평가 소견", systemImage: "waveform.path.ecg", tint: DS.ColorToken.primary),
+    CaptureTagOption(id: "positioning_alignment", eventType: "positioning_alignment", title: "자세·정렬", systemImage: "figure.stand", tint: DS.ColorToken.primary),
+    CaptureTagOption(id: "rom_measurement", eventType: "rom_measurement", title: "ROM·측정", systemImage: "ruler.fill", tint: DS.ColorToken.primary),
+    CaptureTagOption(id: "functional_task", eventType: "functional_task", title: "기능 과제", systemImage: "figure.walk", tint: DS.ColorToken.warning),
+    CaptureTagOption(id: "intervention_started", eventType: "intervention_started", title: "중재 시작", systemImage: "hands.sparkles.fill", tint: DS.ColorToken.warning),
+    CaptureTagOption(id: "movement_correction", eventType: "movement_correction", title: "동작 교정·촉진", systemImage: "figure.mixed.cardio", tint: DS.ColorToken.warning),
+    CaptureTagOption(id: "orthosis_assistive_device", eventType: "orthosis_assistive_device", title: "보조기·도구", systemImage: "bandage.fill", tint: DS.ColorToken.warning),
+    CaptureTagOption(id: "exercise_instruction", eventType: "exercise_instruction", title: "운동·과제 설명", systemImage: "figure.strengthtraining.traditional", tint: DS.ColorToken.success),
+    CaptureTagOption(id: "response_tolerance", eventType: "response_tolerance", title: "반응·내약성", systemImage: "heart.text.square.fill", tint: DS.ColorToken.success),
+    CaptureTagOption(id: "caregiver_education", eventType: "caregiver_education", title: "보호자 교육", systemImage: "person.2.fill", tint: DS.ColorToken.success),
+    CaptureTagOption(id: "reassessment_outcome", eventType: "reassessment_outcome", title: "재평가·결과", systemImage: "checkmark.seal.fill", tint: DS.ColorToken.success),
+    CaptureTagOption(id: "home_program", eventType: "home_program", title: "홈프로그램 지시", systemImage: "house.and.flag.fill", tint: DS.ColorToken.success)
+]
+
+private struct CaptureTagSheet: View {
+    let onSelect: (CaptureTagOption) async -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var isSubmitting = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("현재 시점에 기록할 이벤트") {
+                    ForEach(captureTagOptions) { option in
+                        Button {
+                            isSubmitting = true
+                            Task { @MainActor in
+                                await onSelect(option)
+                                isSubmitting = false
+                            }
+                        } label: {
+                            Label(option.title, systemImage: option.systemImage)
+                                .foregroundStyle(option.tint)
+                        }
+                        .disabled(isSubmitting)
+                    }
+                }
+            }
+            .navigationTitle("시간축 태그")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("닫기") { dismiss() }
+                }
+            }
+            .overlay {
+                if isSubmitting {
+                    ProgressView("기록 중…")
+                        .padding(20)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                }
+            }
         }
     }
 }

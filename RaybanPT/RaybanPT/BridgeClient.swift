@@ -74,6 +74,17 @@ struct ConsentPayload: Codable {
     let scope: String
     let consent_text: String?
     let granted_by: String?
+    let owner_org_id: String?
+    let owner_provider_person_id: String?
+    let subject_person_id: String?
+}
+
+struct ConsentLookupPayload: Codable {
+    let patient_name: String
+    let scope: String
+    let owner_org_id: String?
+    let owner_provider_person_id: String?
+    let subject_person_id: String?
 }
 
 struct ConsentRecord: Codable {
@@ -115,6 +126,7 @@ struct ConsentRevokeResponse: Codable {
     let patient_name: String
     let scope: String
     let revoked: Int
+    let purged_raw_files: Int?
 }
 
 struct MergeEventsRequest: Codable {
@@ -283,13 +295,20 @@ final class BridgeClient {
     func hasActiveConsent(patientName: String, scope: String = "capture_analysis_storage") async throws -> Bool {
         let trimmed = patientName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              let encodedName = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "/consents/\(encodedName)?scope=\(scope)", relativeTo: baseURL)
+              let url = URL(string: "/consents/status", relativeTo: baseURL)
         else { throw BridgeError.invalidURL }
 
         var req = URLRequest(url: url)
-        req.httpMethod = "GET"
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         addAuth(&req)
+        req.httpBody = try JSONEncoder().encode(ConsentLookupPayload(
+            patient_name: trimmed,
+            scope: scope,
+            owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId
+        ))
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -316,7 +335,10 @@ final class BridgeClient {
             patient_name: patientName.trimmingCharacters(in: .whitespacesAndNewlines),
             scope: scope,
             consent_text: nil,
-            granted_by: grantedBy
+            granted_by: grantedBy,
+            owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId
         )
         req.httpBody = try JSONEncoder().encode(body)
 
@@ -334,13 +356,20 @@ final class BridgeClient {
     func revokeConsent(patientName: String, scope: String = "capture_analysis_storage") async throws -> ConsentRevokeResponse {
         let trimmed = patientName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              let encodedName = trimmed.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "/consents/\(encodedName)?scope=\(scope)", relativeTo: baseURL)
+              let url = URL(string: "/consents", relativeTo: baseURL)
         else { throw BridgeError.invalidURL }
 
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         addAuth(&req)
+        req.httpBody = try JSONEncoder().encode(ConsentLookupPayload(
+            patient_name: trimmed,
+            scope: scope,
+            owner_org_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            owner_provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId
+        ))
 
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.network("no response") }
@@ -389,7 +418,7 @@ final class BridgeClient {
     }
 
     /// 오디오 파일 업로드 (비동기 accepted 반환)
-    func uploadAudio(fileURL: URL, patientName: String? = nil, source: String = "iphone-rayban") async throws -> UploadAccepted {
+    func uploadAudio(fileURL: URL, patientName: String? = nil, source: String = "rayban_hfp_microphone") async throws -> UploadAccepted {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { throw BridgeError.fileNotFound }
         guard let url = URL(string: "/ingest-upload", relativeTo: baseURL) else { throw BridgeError.invalidURL }
 
@@ -477,7 +506,7 @@ final class BridgeClient {
     }
 
     /// 이미지 + 분석 설명을 서버에 업로드 (JSON base64 — Tailscale multipart 502 우회)
-    func uploadImage(_ image: UIImage, description: String, patientName: String? = nil, source: String = "rayban-camera") async throws -> IngestResponse {
+    func uploadImage(_ image: UIImage, description: String, patientName: String? = nil, source: String = "rayban_dat_camera") async throws -> IngestResponse {
         guard let url = URL(string: "/ingest", relativeTo: baseURL) else { throw BridgeError.invalidURL }
         guard let imageData = image.jpegData(compressionQuality: 0.6) else { throw BridgeError.network("이미지 변환 실패") }
         let base64Str = imageData.base64EncodedString()
@@ -517,7 +546,7 @@ final class BridgeClient {
     }
 
     /// MP4 영상 파일을 서버에 업로드 (multipart)
-    func uploadVideo(fileURL: URL, patientName: String? = nil, source: String = "rayban-camera") async throws -> UploadAccepted {
+    func uploadVideo(fileURL: URL, patientName: String? = nil, source: String = "rayban_dat_camera") async throws -> UploadAccepted {
         guard let url = URL(string: "/ingest-video", relativeTo: baseURL) else { throw BridgeError.invalidURL }
 
         let boundary = "Boundary-\(UUID().uuidString)"
@@ -753,6 +782,53 @@ final class BridgeClient {
     struct MoaiWritePlanResponse: Codable {
         let status: String
         let result: MoaiWritePlanResult
+    }
+
+    struct HudCandidate: Codable {
+        let id: String?
+        let encounter_id: String?
+        let organization_id: String?
+        let subject_person_id: String?
+        let provider_person_id: String?
+        let event_type: String?
+        let test: String?
+        let side: String?
+        let value: String?
+        let symptom: String?
+        let source: String?
+        let status: String?
+        let review_status: String?
+        let confidence: Double?
+        let source_text: String?
+        let reviewer_person_id: String?
+        let discarded_reason: String?
+        let reviewed_at: String?
+        let created_at: String?
+        let updated_at: String?
+    }
+
+    struct HudCandidateWritePlan: Codable {
+        let summary: MoaiWritePlanSummary?
+    }
+
+    struct HudCandidateExtractResponse: Codable {
+        let status: String
+        let reason: String?
+        let source_text: String?
+        let candidate: HudCandidate?
+        let plan: HudCandidateWritePlan?
+    }
+
+    struct HudCandidateListResponse: Codable {
+        let status: String
+        let count: Int
+        let items: [HudCandidate]
+    }
+
+    struct HudCandidateDecisionResponse: Codable {
+        let status: String
+        let candidate: HudCandidate
+        let plan: HudCandidateWritePlan?
     }
 
     func fetchLabel(eventId: String) async throws -> RehabLabel? {
@@ -1053,6 +1129,9 @@ final class BridgeClient {
         let id: String
         let organization_id: String
         let provider_person_id: String
+        // Older bridge deployments may omit this field; the start request still
+        // sends the selected role when the current deployment supports it.
+        let provider_role: String?
         let subject_person_id: String
         let encounter_id: String
         let patient_alias: String
@@ -1071,6 +1150,38 @@ final class BridgeClient {
         let draft_progress_note: DraftProgressNote?
         let created_at: String?
         let updated_at: String?
+    }
+
+    struct CaptureEvent: Codable, Identifiable {
+        let id: String
+        let visit_session_id: String?
+        let encounter_id: String?
+        let organization_id: String?
+        let provider_person_id: String?
+        let subject_person_id: String?
+        let source_media_id: String?
+        let source_event_id: String?
+        let source_type: String
+        let event_type: String
+        let candidate_type: String
+        let start_ms: Int?
+        let end_ms: Int?
+        let confidence: Double?
+        let status: String
+        let payload: [String: String]
+        let reviewed_by: String?
+        let reviewed_at: String?
+        let created_at: String
+        let updated_at: String
+    }
+
+    struct CaptureEventResponse: Codable {
+        let status: String
+        let event: CaptureEvent
+    }
+
+    struct CaptureEventsResponse: Codable {
+        let items: [CaptureEvent]
     }
 
     struct DraftProgressNote: Codable {
@@ -1096,6 +1207,7 @@ final class BridgeClient {
     private struct VisitSessionStartPayload: Encodable {
         let organization_id: String
         let provider_person_id: String
+        let provider_role: String
         let subject_person_id: String
         let encounter_id: String?
         let patient_alias: String
@@ -1119,6 +1231,25 @@ final class BridgeClient {
         let update_glass: Bool
     }
 
+    private struct CaptureEventPayload: Encodable {
+        let visit_session_id: String?
+        let encounter_id: String?
+        let organization_id: String?
+        let provider_person_id: String?
+        let subject_person_id: String?
+        let source_media_id: String?
+        let source_event_id: String?
+        let source_type: String
+        let event_type: String
+        let candidate_type: String?
+        let start_ms: Int?
+        let end_ms: Int?
+        let confidence: Double?
+        let status: String
+        let payload: [String: String]
+        let reviewed_by: String?
+    }
+
     struct VisitSessionResponse: Codable {
         let status: String
         let session: VisitSession
@@ -1140,6 +1271,7 @@ final class BridgeClient {
     func startVisitSession(
         organizationId: String? = nil,
         providerPersonId: String? = nil,
+        providerRole: String? = nil,
         subjectPersonId: String? = nil,
         encounterId: String? = nil,
         patientAlias: String,
@@ -1148,6 +1280,8 @@ final class BridgeClient {
     ) async throws -> VisitSessionResponse {
         let orgId = (organizationId ?? ownerOrgId).trimmingCharacters(in: .whitespacesAndNewlines)
         let providerId = (providerPersonId ?? ownerProviderPersonId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let role = (providerRole ?? UserDefaults.standard.string(forKey: "rayban_pt.provider_role") ?? "unspecified")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let subjectId = (subjectPersonId ?? self.subjectPersonId).trimmingCharacters(in: .whitespacesAndNewlines)
         let encounter = (encounterId ?? physioSessionId).trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -1158,6 +1292,7 @@ final class BridgeClient {
         let payload = VisitSessionStartPayload(
             organization_id: orgId,
             provider_person_id: providerId,
+            provider_role: role.isEmpty ? "unspecified" : role,
             subject_person_id: subjectId,
             encounter_id: encounter.isEmpty ? nil : encounter,
             patient_alias: patientAlias.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1196,8 +1331,149 @@ final class BridgeClient {
     }
 
     @discardableResult
+    func createCaptureEvent(
+        visitSessionId: String? = nil,
+        encounterId: String? = nil,
+        eventType: String,
+        sourceType: String = "therapist_tag",
+        candidateType: String? = nil,
+        sourceMediaId: String? = nil,
+        sourceEventId: String? = nil,
+        startMs: Int? = nil,
+        endMs: Int? = nil,
+        confidence: Double? = 1,
+        status: String = "draft",
+        payload: [String: String] = [:],
+        reviewedBy: String? = nil
+    ) async throws -> CaptureEventResponse {
+        let body = CaptureEventPayload(
+            visit_session_id: visitSessionId,
+            encounter_id: encounterId ?? (physioSessionId.isEmpty ? nil : physioSessionId),
+            organization_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            subject_person_id: subjectPersonId.isEmpty ? nil : subjectPersonId,
+            source_media_id: sourceMediaId,
+            source_event_id: sourceEventId,
+            source_type: sourceType,
+            event_type: eventType,
+            candidate_type: candidateType,
+            start_ms: startMs,
+            end_ms: endMs,
+            confidence: confidence,
+            status: status,
+            payload: payload,
+            reviewed_by: reviewedBy
+        )
+        return try await postJSON(path: "/capture-events", body: body)
+    }
+
+    func captureEvents(sessionId: String, limit: Int = 100) async throws -> [CaptureEvent] {
+        guard let url = URL(string: "/visit-sessions/\(sessionId)/capture-events?limit=\(limit)", relativeTo: baseURL) else {
+            throw BridgeError.invalidURL
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+        let response: CaptureEventsResponse = try await decodeResponse(req)
+        return response.items
+    }
+
+    @discardableResult
     func endVisitSession(sessionId: String, updateGlass: Bool = true) async throws -> VisitSessionEndResponse {
         return try await postJSON(path: "/visit-sessions/\(sessionId)/end?update_glass=\(updateGlass ? "true" : "false")", body: EmptyPayload())
+    }
+
+    private struct HudCandidateExtractPayload: Encodable {
+        let encounter_id: String
+        let organization_id: String?
+        let subject_person_id: String?
+        let provider_person_id: String?
+        let text: String
+        let source: String
+        let confidence: Double?
+        let create_candidate: Bool
+    }
+
+    private struct HudCandidateDecisionPayload: Encodable {
+        let reviewer_person_id: String?
+        let reason: String?
+    }
+
+    @discardableResult
+    func extractHudCandidate(
+        fromTranscript text: String,
+        encounterId: String? = nil,
+        subjectPersonId: String? = nil,
+        source: String = "ios_audio_transcript",
+        confidence: Double? = nil,
+        createCandidate: Bool = true
+    ) async throws -> HudCandidateExtractResponse {
+        let transcript = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encounter = (encounterId ?? physioSessionId).trimmingCharacters(in: .whitespacesAndNewlines)
+        let subjectId = (subjectPersonId ?? self.subjectPersonId).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !transcript.isEmpty else {
+            throw BridgeError.network("HUD candidate extraction requires transcript text.")
+        }
+        guard !encounter.isEmpty else {
+            throw BridgeError.network("HUD candidate extraction requires an encounter/session ID.")
+        }
+
+        let payload = HudCandidateExtractPayload(
+            encounter_id: encounter,
+            organization_id: ownerOrgId.isEmpty ? nil : ownerOrgId,
+            subject_person_id: subjectId.isEmpty ? nil : subjectId,
+            provider_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            text: transcript,
+            source: source,
+            confidence: confidence,
+            create_candidate: createCandidate
+        )
+        return try await postJSON(path: "/hud/candidates/extract", body: payload)
+    }
+
+    func listHudCandidates(
+        encounterId: String? = nil,
+        status: String = "candidate",
+        limit: Int = 10
+    ) async throws -> HudCandidateListResponse {
+        let encounter = (encounterId ?? physioSessionId).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let base = URL(string: "/hud/candidates", relativeTo: baseURL),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: true)
+        else { throw BridgeError.invalidURL }
+
+        var items = [
+            URLQueryItem(name: "status", value: status),
+            URLQueryItem(name: "limit", value: String(limit))
+        ]
+        if !encounter.isEmpty {
+            items.append(URLQueryItem(name: "encounter_id", value: encounter))
+        }
+        components.queryItems = items
+        guard let url = components.url else { throw BridgeError.invalidURL }
+
+        var req = URLRequest(url: url)
+        req.httpMethod = "GET"
+        addAuth(&req)
+        return try await decodeResponse(req)
+    }
+
+    @discardableResult
+    func approveHudCandidate(_ candidateId: String) async throws -> HudCandidateDecisionResponse {
+        let payload = HudCandidateDecisionPayload(
+            reviewer_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            reason: nil
+        )
+        return try await postJSON(path: "/hud/candidates/\(candidateId)/approve", body: payload)
+    }
+
+    @discardableResult
+    func discardHudCandidate(_ candidateId: String, reason: String = "discarded_in_ios") async throws -> HudCandidateDecisionResponse {
+        let payload = HudCandidateDecisionPayload(
+            reviewer_person_id: ownerProviderPersonId.isEmpty ? nil : ownerProviderPersonId,
+            reason: reason
+        )
+        return try await postJSON(path: "/hud/candidates/\(candidateId)/discard", body: payload)
     }
 
     private struct EmptyPayload: Encodable {}
@@ -1334,7 +1610,11 @@ final class BridgeClient {
     }
 
     func pollGlassCommand() async -> String? {
-        guard let url = URL(string: "/glass/command", relativeTo: baseURL) else { return nil }
+        // Native camera/microphone commands use a dedicated queue. The Web
+        // App consumes /glass/command, so sharing that queue would race the
+        // iPhone and could make a tap update HUD state without starting the
+        // physical recorder.
+        guard let url = URL(string: "/glass/device-command", relativeTo: baseURL) else { return nil }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         addAuth(&req)

@@ -10,6 +10,7 @@
 		832812D82F8B94400074213F /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA000002DEADBEEF00000002 /* MWDATCore */; };
 		832812D92F8B94400074213F /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = AA000003DEADBEEF00000003 /* MWDATCamera */; };
 		AA000006DEADBEEF00000006 /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = AA000007DEADBEEF00000007 /* MWDATDisplay */; };
+		AA000009DEADBEEF00000009 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; platformFilters = (simulator, ); productRef = AA00000ADEADBEEF0000000A /* MWDATMockDevice */; };
 		A10000012F9B000100000001 /* TextSendUITest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000022F9B000100000001 /* TextSendUITest.swift */; };
 /* End PBXBuildFile section */
 
@@ -25,6 +26,7 @@
 
 /* Begin PBXFileReference section */
 		83F9597B2F8A7C5100267708 /* RaybanPT.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RaybanPT.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000012F9C000100000001 /* Secrets.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Secrets.xcconfig; sourceTree = SOURCE_ROOT; };
 		A10000022F9B000100000001 /* TextSendUITest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextSendUITest.swift; sourceTree = "<group>"; };
 		A10000032F9B000100000001 /* RaybanPTUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RaybanPTUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -65,6 +67,7 @@
 				832812D92F8B94400074213F /* MWDATCamera in Frameworks */,
 				832812D82F8B94400074213F /* MWDATCore in Frameworks */,
 				AA000006DEADBEEF00000006 /* MWDATDisplay in Frameworks */,
+				AA000009DEADBEEF00000009 /* MWDATMockDevice in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -138,6 +141,7 @@
 				AA000002DEADBEEF00000002 /* MWDATCore */,
 				AA000003DEADBEEF00000003 /* MWDATCamera */,
 				AA000007DEADBEEF00000007 /* MWDATDisplay */,
+				AA00000ADEADBEEF0000000A /* MWDATMockDevice */,
 			);
 			productName = RaybanPT;
 			productReference = 83F9597B2F8A7C5100267708 /* RaybanPT.app */;
@@ -396,6 +400,7 @@
 		};
 		83F959872F8A7C5100267708 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A20000012F9C000100000001 /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -428,6 +433,7 @@
 		};
 		83F959882F8A7C5100267708 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A20000012F9C000100000001 /* Secrets.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -496,7 +502,7 @@
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
 			requirement = {
 				kind = exactVersion;
-				version = 0.7.0;
+				version = 0.9.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
@@ -516,6 +522,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA000001DEADBEEF00000001 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATDisplay;
+		};
+		AA00000ADEADBEEF0000000A /* MWDATMockDevice */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001DEADBEEF00000001 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATMockDevice;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

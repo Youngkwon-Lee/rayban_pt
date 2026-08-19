@@ -5,6 +5,10 @@ import MWDATDisplay
 
 extension Notification.Name {
     static let glassCaptouchRecordToggle = Notification.Name("glassCaptouchRecordToggle")
+    static let glassRecordingStateRequested = Notification.Name("glassRecordingStateRequested")
+    static let glassCapturePhotoRequested = Notification.Name("glassCapturePhotoRequested")
+    static let glassAudioStartRequested = Notification.Name("glassAudioStartRequested")
+    static let glassAudioStopRequested = Notification.Name("glassAudioStopRequested")
 }
 
 enum GlassRecordToggleSource: String {
@@ -95,6 +99,7 @@ final class GlassHUDManager {
     private var selectedAssessment: String? = nil
     private var sessionCount = 0
     private var recordingStart: Date? = nil
+    private var isAudioMemoRecording = false
 
     private init() {}
 
@@ -117,6 +122,7 @@ final class GlassHUDManager {
             let (stream, continuation) = AsyncStream.makeStream(of: DisplayState.self)
             displayStateContinuation = continuation
             stateListenerToken = capability.statePublisher.listen { state in
+                print("[GlassHUD] display state: \(state)")
                 continuation.yield(state)
             }
             displayStateTask = Task { [weak self] in
@@ -138,8 +144,10 @@ final class GlassHUDManager {
                     }
                 }
             }
-            await capability.start()
+            print("[GlassHUD] display capability added; starting")
+            capability.start()
             await pushHUD()
+            print("[GlassHUD] initial HUD push requested")
         } catch {
             print("[GlassHUD] attachDisplay failed: \(error)")
             await resetDisplayTransport()
@@ -176,7 +184,7 @@ final class GlassHUDManager {
         displayStateContinuation = nil
         displayStateTask?.cancel()
         displayStateTask = nil
-        await display?.stop()
+        display?.stop()
         display = nil
         isDisplayConnected = false
     }
@@ -255,7 +263,13 @@ final class GlassHUDManager {
         insightTask?.cancel()
         insightTask = nil
         recordingStart = nil
+        isAudioMemoRecording = false
         hudMode = .ready
+        await pushHUD()
+    }
+
+    func setAudioMemoRecording(_ active: Bool) async {
+        isAudioMemoRecording = active
         await pushHUD()
     }
 
@@ -387,47 +401,38 @@ final class GlassHUDManager {
     }
 
     private func postGlassCommandNotification(_ command: String) {
-        let userInfo = ["source": GlassRecordToggleSource.bridgeCommand.rawValue]
+        var userInfo: [String: Any] = ["source": GlassRecordToggleSource.bridgeCommand.rawValue]
+        let notificationName: Notification.Name
+
         switch command {
+        case "start_recording", "stop_recording":
+            userInfo["recording"] = command == "start_recording"
+            notificationName = .glassRecordingStateRequested
         case "toggle_recording":
-            NotificationCenter.default.post(
-                name: .glassCaptouchRecordToggle,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .glassCaptouchRecordToggle
+        case "capture_photo":
+            notificationName = .glassCapturePhotoRequested
+        case "start_audio":
+            isAudioMemoRecording = true
+            notificationName = .glassAudioStartRequested
+        case "stop_audio":
+            isAudioMemoRecording = false
+            notificationName = .glassAudioStopRequested
         case "start_live":
-            NotificationCenter.default.post(
-                name: .glassStandbyStartRequested,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .glassStandbyStartRequested
         case "open_capture_history":
-            NotificationCenter.default.post(
-                name: .openCaptureHistoryRequested,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .openCaptureHistoryRequested
         case "primary_action":
-            NotificationCenter.default.post(
-                name: .glassPrimaryActionRequested,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .glassPrimaryActionRequested
         case "select_patient":
-            NotificationCenter.default.post(
-                name: .glassPatientPickerRequested,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .glassPatientPickerRequested
         case "show_recommendations":
-            NotificationCenter.default.post(
-                name: .glassRecommendedAssessmentRequested,
-                object: nil,
-                userInfo: userInfo
-            )
+            notificationName = .glassRecommendedAssessmentRequested
         default:
-            break
+            return
         }
+
+        NotificationCenter.default.post(name: notificationName, object: nil, userInfo: userInfo)
     }
 
     private func postHUDNotification(_ name: Notification.Name, userInfo extraUserInfo: [String: String] = [:]) {
@@ -522,7 +527,7 @@ final class GlassHUDManager {
     private func buildContextView() -> FlexBox {
         let hasPatient = !(activePatient?.isEmpty ?? true)
         let patient = activePatient ?? "환자 미선택"
-        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
+        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 영상 대기"
         return FlexBox(direction: .column, spacing: 8) {
             buildHeaderCard(
                 title: "Kinelo AR",
@@ -535,9 +540,9 @@ final class GlassHUDManager {
             if hasPatient {
                 buildActionCard(
                     marker: "START",
-                    title: "녹화 시작",
+                    title: "영상 시작",
                     body: "손 제스처로 선택하면 세션 기록이 시작됩니다.",
-                    buttonLabel: "녹화 시작",
+                    buttonLabel: "영상 시작",
                     buttonStyle: .primary,
                     iconName: .videoCamera
                 ) {
@@ -553,7 +558,7 @@ final class GlassHUDManager {
                 buildActionCard(
                     marker: "PATIENT",
                     title: "환자 선택",
-                    body: "환자 없이 녹화하면 자동 저장과 차트 연결이 불안정합니다.",
+                    body: "환자 없이 영상을 기록하면 자동 저장과 차트 연결이 불안정합니다.",
                     buttonLabel: "환자 선택",
                     buttonStyle: .primary,
                     iconName: .person
@@ -594,9 +599,9 @@ final class GlassHUDManager {
             }
             buildActionCard(
                 marker: "STOP",
-                title: "녹화 중지",
+                title: "영상 중지",
                 body: "중지하면 저장, 업로드, 분석으로 이어집니다.",
-                buttonLabel: "녹화 중지",
+                buttonLabel: "영상 중지",
                 buttonStyle: .secondary,
                 iconName: .x
             ) {
@@ -607,6 +612,29 @@ final class GlassHUDManager {
                         userInfo: ["source": GlassRecordToggleSource.glassDisplayButton.rawValue]
                     )
                 }
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "사진 촬영", style: .primary, iconName: .videoCamera, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassCapturePhotoRequested)
+                    }
+                })
+                Button(
+                    label: self.isAudioMemoRecording ? "음성 종료" : "음성 메모",
+                    style: self.isAudioMemoRecording ? .primary : .secondary,
+                    iconName: .speechBubble,
+                    onClick: {
+                        Task { @MainActor in
+                            self.isAudioMemoRecording.toggle()
+                            self.postHUDNotification(
+                                self.isAudioMemoRecording
+                                    ? .glassAudioStartRequested
+                                    : .glassAudioStopRequested
+                            )
+                            await self.pushHUD()
+                        }
+                    }
+                )
             }
             buildInfoCard(
                 title: "현재 상태",
@@ -679,7 +707,7 @@ final class GlassHUDManager {
             if captureHistorySummaries.isEmpty {
                 buildInfoCard(
                     title: "아직 기록이 없습니다",
-                    body: "녹화 후 저장하거나 전송하면 여기에 최근 기록이 표시됩니다."
+                    body: "영상 저장이나 전송 후 여기에 최근 기록이 표시됩니다."
                 )
             } else {
                 FlexBox(direction: .column, spacing: 8) {
@@ -878,7 +906,7 @@ final class GlassHUDManager {
             return "🟦 준비 완료\(patient)"
         case .ready:
             let patient = activePatient ?? "환자 미선택"
-            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
+            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 영상 대기"
             return "🟢 라이브  \(patient) · \(status)"
         case .recording:
             let elapsed = elapsedString()

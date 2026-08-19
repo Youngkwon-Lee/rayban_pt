@@ -21,6 +21,7 @@ final class StreamViewModel {
     var lastSavedVideo: SavedCapture? = nil
 
     private var deviceSession: DeviceSession?
+    private var camera: MWDATCamera.Camera?
     private var stream: MWDATCamera.Stream?
     private var deviceSelector: AutoDeviceSelector?
     private var stateToken: (any AnyListenerToken)?
@@ -29,6 +30,7 @@ final class StreamViewModel {
     private var photoToken: (any AnyListenerToken)?
     private var deviceTask: Task<Void, Never>?
     private var demoFrameTask: Task<Void, Never>?
+    private var isStartingStream = false
 
     private var wearables: any WearablesInterface { Wearables.shared }
 
@@ -40,7 +42,17 @@ final class StreamViewModel {
 
         guard stream == nil else { return }
 
-        let selector = AutoDeviceSelector(wearables: wearables, filter: { $0.supportsDisplay() })
+        // A physical Ray-Ban must expose the display capability because the
+        // live session also drives HUD state. Meta's official MockDevice
+        // models exercise camera transport but do not advertise that
+        // optional display capability, so let the mock selector choose the
+        // paired device without the display filter.
+        let selector: AutoDeviceSelector
+        if DemoConfig.isDATMockEnabled {
+            selector = AutoDeviceSelector(wearables: wearables)
+        } else {
+            selector = AutoDeviceSelector(wearables: wearables, filter: { $0.supportsDisplay() })
+        }
         deviceSelector = selector
 
         deviceTask = Task { [weak self] in
@@ -72,6 +84,12 @@ final class StreamViewModel {
         }
 
         guard stream == nil, let selector = deviceSelector else { return }
+        guard !isStartingStream else {
+            print("[MWDAT] startStreaming skipped: already in progress")
+            return
+        }
+        isStartingStream = true
+        defer { isStartingStream = false }
         errorMessage = nil
 
         // BLE 상태 스냅샷 로그
@@ -104,14 +122,20 @@ final class StreamViewModel {
             return
         }
 
+        // Use the raw stream for the foreground preview/recording path. Meta's
+        // CameraAccess sample uses `.raw` for live frame delivery; `.hvc1` is
+        // intended for compressed/background streaming and can leave
+        // `makeUIImage()` without a decodable preview frame on-device.
         let config = StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: 24)
-        guard let newStream = try? session.addStream(config: config) else {
-            print("[MWDAT] addStream returned nil")
+        guard let newCamera = try? session.addCamera(config: config) else {
+            print("[MWDAT] addCamera returned nil")
             statusMessage = "스트림 추가 실패"
             return
         }
+        let newStream = newCamera.stream
+        camera = newCamera
         stream = newStream
-        print("[MWDAT] stream added")
+        print("[MWDAT] camera and stream added")
 
         stateToken = newStream.statePublisher.listen { [weak self] state in
             Task { [weak self, state] in
@@ -120,9 +144,10 @@ final class StreamViewModel {
             }
         }
         frameToken = newStream.videoFramePublisher.listen { [weak self] frame in
-            Task { [weak self, frame] in
+            let receivedAt = ProcessInfo.processInfo.systemUptime
+            Task { [weak self, frame, receivedAt] in
                 guard let self else { return }
-                await self.handleIncomingFrame(frame.makeUIImage())
+                await self.handleIncomingFrame(frame.makeUIImage(), receivedAt: receivedAt)
             }
         }
         errorToken = newStream.errorPublisher.listen { [weak self] error in
@@ -139,7 +164,7 @@ final class StreamViewModel {
         }
 
         await GlassHUDManager.shared.attachDisplay(to: session)
-        await newStream.start()
+        newStream.start()
         print("[MWDAT] newStream.start() called")
     }
 
@@ -152,8 +177,9 @@ final class StreamViewModel {
 
         guard stream == nil else { return }
         guard let selector = deviceSelector else {
-            await GlassHUDManager.shared.attachSimulatedDisplay()
-            await GlassHUDManager.shared.showStandby(patient: patientName)
+            await GlassHUDManager.shared.detachDisplay()
+            hasActiveDevice = false
+            statusMessage = "안경 연결 대기 중"
             return
         }
 
@@ -163,8 +189,9 @@ final class StreamViewModel {
             await GlassHUDManager.shared.showStandby(patient: patientName)
         } catch {
             print("[MWDAT] prepareStandbyDisplay failed: \(error)")
-            await GlassHUDManager.shared.attachSimulatedDisplay()
-            await GlassHUDManager.shared.showStandby(patient: patientName)
+            await GlassHUDManager.shared.detachDisplay()
+            hasActiveDevice = false
+            statusMessage = "Meta AI 개발자 모드에서 DAT 설치 필요"
         }
     }
 
@@ -189,9 +216,10 @@ final class StreamViewModel {
         await GlassHUDManager.shared.detachDisplay()
         clearStreamListeners()
 
-        if let s = stream {
+        if let c = camera {
+            camera = nil
             stream = nil
-            await s.stop()
+            c.stop()
         }
         deviceSession?.stop()
         deviceSession = nil
@@ -212,9 +240,10 @@ final class StreamViewModel {
         await GlassHUDManager.shared.detachDisplay()
         clearStreamListeners()
 
-        if let s = stream {
+        if let c = camera {
+            camera = nil
             stream = nil
-            await s.stop()
+            c.stop()
         }
         deviceSession?.stop()
         deviceSession = nil
@@ -225,6 +254,9 @@ final class StreamViewModel {
         hasActiveDevice = false
         errorMessage = nil
         statusMessage = "대기 중"
+#if DEBUG && targetEnvironment(simulator)
+        MockDATDeviceController.shared.disableIfRequested()
+#endif
     }
 
     func startRecording() {
@@ -311,10 +343,10 @@ final class StreamViewModel {
         updateState(state)
     }
 
-    private func handleIncomingFrame(_ image: UIImage?) {
+    private func handleIncomingFrame(_ image: UIImage?, receivedAt: TimeInterval) {
         currentFrame = image
         if let image {
-            recorder.addFrame(image)
+            recorder.addFrame(image, receivedAt: receivedAt)
         }
     }
 
@@ -339,9 +371,19 @@ final class StreamViewModel {
                 statusMessage = "Meta AI 수동으로 열기 → App Connections → Kinelo AR → Update app on glasses"
             }
         case .noEligibleDevice:
-            statusMessage = "연결된 글라스 없음"
+            statusMessage = "Meta AI 개발자 모드에서 DAT 설치 필요"
         default:
             statusMessage = "세션 오류: \(error.localizedDescription)"
+        }
+    }
+
+    func openDATGlassesAppUpdate() async {
+        do {
+            try await wearables.openDATGlassesAppUpdate()
+            statusMessage = "Meta AI에서 Kinelo AR 업데이트를 확인하세요"
+        } catch {
+            print("[MWDAT] openDATGlassesAppUpdate failed: \(error)")
+            statusMessage = "Meta AI에서 Kinelo AR 업데이트를 수동으로 확인하세요"
         }
     }
 
@@ -430,13 +472,17 @@ final class StreamViewModel {
         statusMessage = "Kinelo AR 수신 중"
 
         guard demoFrameTask == nil else { return }
-        currentFrame = makeCurrentDemoFrame(index: 0)
+        let firstFrame = makeCurrentDemoFrame(index: 0)
+        currentFrame = firstFrame
+        recorder.addFrame(firstFrame, receivedAt: ProcessInfo.processInfo.systemUptime)
         demoFrameTask = Task { @MainActor [weak self] in
             var index = 1
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 650_000_000)
                 guard let self else { return }
-                self.currentFrame = self.makeCurrentDemoFrame(index: index)
+                let frame = self.makeCurrentDemoFrame(index: index)
+                self.currentFrame = frame
+                self.recorder.addFrame(frame, receivedAt: ProcessInfo.processInfo.systemUptime)
                 self.statusMessage = "Kinelo AR 수신 중 · \(index)f"
                 index += 1
             }

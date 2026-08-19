@@ -14,9 +14,35 @@ extension Notification.Name {
 }
 
 private enum GlassPTPairingLink {
+    static func applyBridgeSettings(from items: [URLQueryItem]) -> Bool {
+        func value(_ names: String...) -> String {
+            for name in names {
+                if let raw = items.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })?.value?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !raw.isEmpty {
+                    return raw
+                }
+            }
+            return ""
+        }
+
+        let bridgeBaseURL = value("bridge_base_url", "base_url", "bridge_url", "server_url")
+        let apiKey = value("api_key", "bridge_api_key", "x_api_key")
+        var changed = false
+        if let url = URL(string: bridgeBaseURL), url.scheme?.hasPrefix("http") == true {
+            UserDefaults.standard.set(bridgeBaseURL, forKey: "bridge_base_url")
+            changed = true
+        }
+        if !apiKey.isEmpty {
+            UserDefaults.standard.set(apiKey, forKey: "bridge_api_key")
+            changed = true
+        }
+        return changed
+    }
+
     static func handle(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
-              scheme == "kineloar" || scheme == "raybanpt" || scheme == "carelive" else { return false }
+              scheme == "kineloar" || scheme == "raybanpt" || scheme == "kineloarhud" || scheme == "carelive" else { return false }
         let host = url.host?.lowercased()
         let path = url.path.lowercased()
         guard host == "glasspt" || host == "kineloar" || host == "pair" || path.contains("glasspt") || path.contains("kinelo") else {
@@ -42,8 +68,16 @@ private enum GlassPTPairingLink {
         let orgId = value("owner_org_id", "org_id")
         let providerPersonId = value("owner_provider_person_id", "provider_person_id")
         let subjectPersonId = value("subject_person_id", "person_id", "patient_person_id")
+        let bridgeChanged = applyBridgeSettings(from: items)
         guard !orgId.isEmpty, !providerPersonId.isEmpty else {
-            return false
+            if bridgeChanged {
+                NotificationCenter.default.post(
+                    name: Notification.Name("bridgeSettingsDidChange"),
+                    object: nil,
+                    userInfo: ["source": "glasspt_pairing_link"]
+                )
+            }
+            return bridgeChanged
         }
 
         UserDefaults.standard.set(orgId, forKey: "glasspt_owner_org_id")
@@ -54,7 +88,7 @@ private enum GlassPTPairingLink {
         NotificationCenter.default.post(
             name: Notification.Name("bridgeSettingsDidChange"),
             object: nil,
-            userInfo: ["source": "glasspt_pairing_link"]
+            userInfo: ["source": bridgeChanged ? "glasspt_pairing_link_with_bridge" : "glasspt_pairing_link"]
         )
         return true
     }
@@ -63,7 +97,7 @@ private enum GlassPTPairingLink {
 private enum GlassPTDirectLaunchLink {
     static func handle(_ url: URL) -> Bool {
         guard let scheme = url.scheme?.lowercased(),
-              scheme == "kineloar" || scheme == "raybanpt" || scheme == "carelive" else { return false }
+              scheme == "kineloar" || scheme == "raybanpt" || scheme == "kineloarhud" || scheme == "carelive" else { return false }
 
         let host = (url.host ?? "").lowercased()
         let path = url.path.lowercased()
@@ -91,6 +125,8 @@ private enum GlassPTDirectLaunchLink {
         let subjectPersonId = value("subject_person_id", "person_id", "patient_person_id")
         let physioClientId = value("physio_client_id", "client_id", "clientId")
         let physioSessionId = value("physio_session_id", "session_id", "encounter_id", "sessionId")
+        let providerRole = value("provider_role", "providerRole")
+        let bridgeChanged = GlassPTPairingLink.applyBridgeSettings(from: items)
 
         if !orgId.isEmpty {
             UserDefaults.standard.set(orgId, forKey: "glasspt_owner_org_id")
@@ -107,12 +143,15 @@ private enum GlassPTDirectLaunchLink {
         if !physioSessionId.isEmpty {
             UserDefaults.standard.set(physioSessionId, forKey: "glasspt_physio_session_id")
         }
+        if !providerRole.isEmpty {
+            UserDefaults.standard.set(providerRole, forKey: "rayban_pt.provider_role")
+        }
 
-        if !orgId.isEmpty || !providerPersonId.isEmpty || !subjectPersonId.isEmpty || !physioClientId.isEmpty {
+        if bridgeChanged || !orgId.isEmpty || !providerPersonId.isEmpty || !subjectPersonId.isEmpty || !physioClientId.isEmpty || !providerRole.isEmpty {
             NotificationCenter.default.post(
                 name: Notification.Name("bridgeSettingsDidChange"),
                 object: nil,
-                userInfo: ["source": "glasspt_direct_launch_link"]
+                userInfo: ["source": bridgeChanged ? "glasspt_direct_launch_link_with_bridge" : "glasspt_direct_launch_link"]
             )
         }
 
@@ -127,13 +166,23 @@ private enum GlassPTDirectLaunchLink {
 }
 
 private enum NeuralBandDeepLink {
-    private static let supportedSchemes = ["kineloar", "raybanpt", "carelive"]
+    private static let supportedSchemes = ["kineloar", "raybanpt", "kineloarhud", "carelive"]
     private static let gestureToCommand: [String: String] = [
         "tap": "toggle_recording",
         "single_tap": "toggle_recording",
         "double_tap": "toggle_recording",
         "press": "toggle_recording",
         "squeeze": "toggle_recording",
+        "photo": "capture_photo",
+        "capture_photo": "capture_photo",
+        "camera": "capture_photo",
+        "snapshot": "capture_photo",
+        "voice": "start_audio",
+        "audio": "start_audio",
+        "stt": "start_audio",
+        "start_audio": "start_audio",
+        "stop_audio": "stop_audio",
+        "stop_voice": "stop_audio",
         "down": "primary_action",
         "swipe_down": "primary_action",
         "downward": "primary_action",
@@ -192,7 +241,7 @@ private enum NeuralBandDeepLink {
         let resolvedCommand = gestureToCommand[gesture]
             ?? (path == "/toggle-recording" ? "toggle_recording" : nil)
         guard let resolvedCommand,
-              ["toggle_recording", "primary_action", "select_patient", "open_capture_history", "show_recommendations"].contains(resolvedCommand) else {
+              ["toggle_recording", "primary_action", "select_patient", "open_capture_history", "show_recommendations", "capture_photo", "start_audio", "stop_audio"].contains(resolvedCommand) else {
             return false
         }
 
@@ -203,7 +252,9 @@ private enum NeuralBandDeepLink {
         let physioSessionId = value("physio_session_id", "session_id", "encounter_id", "sessionId")
         let patientName = value("patient_name", "patient", "patientName", "client_name", "clientName")
         let sessionLabel = value("session_type", "session", "sessionName", "session_name", "program")
+        let providerRole = value("provider_role", "providerRole")
         let deviceId = value("device_id", "device", "band_id")
+        let bridgeChanged = GlassPTPairingLink.applyBridgeSettings(from: items)
 
         if !orgId.isEmpty {
             UserDefaults.standard.set(orgId, forKey: "glasspt_owner_org_id")
@@ -220,11 +271,14 @@ private enum NeuralBandDeepLink {
         if !physioSessionId.isEmpty {
             UserDefaults.standard.set(physioSessionId, forKey: "glasspt_physio_session_id")
         }
-        if !orgId.isEmpty || !providerPersonId.isEmpty || !subjectPersonId.isEmpty || !physioClientId.isEmpty {
+        if !providerRole.isEmpty {
+            UserDefaults.standard.set(providerRole, forKey: "rayban_pt.provider_role")
+        }
+        if bridgeChanged || !orgId.isEmpty || !providerPersonId.isEmpty || !subjectPersonId.isEmpty || !physioClientId.isEmpty || !providerRole.isEmpty {
             NotificationCenter.default.post(
                 name: Notification.Name("bridgeSettingsDidChange"),
                 object: nil,
-                userInfo: ["source": "neural_band_deeplink"]
+                userInfo: ["source": bridgeChanged ? "neural_band_deeplink_with_bridge" : "neural_band_deeplink"]
             )
         }
 
@@ -258,6 +312,12 @@ private enum NeuralBandDeepLink {
             notificationName = .openCaptureHistoryRequested
         case "show_recommendations":
             notificationName = .glassRecommendedAssessmentRequested
+        case "capture_photo":
+            notificationName = .glassCapturePhotoRequested
+        case "start_audio":
+            notificationName = .glassAudioStartRequested
+        case "stop_audio":
+            notificationName = .glassAudioStopRequested
         default:
             notificationName = .glassCaptouchRecordToggle
         }
@@ -293,6 +353,9 @@ struct RaybanPTApp: App {
         } catch {
             print("[MWDAT] configure 실패: \(error)")
         }
+#if DEBUG && targetEnvironment(simulator)
+        MockDATDeviceController.shared.enableIfRequested()
+#endif
         deviceManager = DeviceSessionManager.shared
     }
 
@@ -315,7 +378,7 @@ struct RaybanPTApp: App {
                     }
                     #if DEBUG
                     if let scheme = url.scheme?.lowercased(),
-                       (scheme == "kineloar" || scheme == "raybanpt" || scheme == "carelive"),
+                       (scheme == "kineloar" || scheme == "raybanpt" || scheme == "kineloarhud" || scheme == "carelive"),
                        url.host?.lowercased() == "debug" {
                         let action = url.path.lowercased()
                         if action == "/toggle-recording" {

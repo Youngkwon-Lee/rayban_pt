@@ -8,6 +8,7 @@ final class AdapterViewModel: ObservableObject {
     @Published var lastEventId: String? = nil   // 완료된 가장 최근 event_id
     @Published var visitSession: BridgeClient.VisitSession? = nil
     @Published var visitStatusMessage: String = ""
+    private var activeProviderRole = "unspecified"
 
     let client: BridgeClient
 
@@ -51,6 +52,13 @@ final class AdapterViewModel: ObservableObject {
                     if let eventId = final.eventId {
                         lastEventId = eventId
                         await attachVisitEventIfActive(eventId)
+                        await recordMediaCaptureEvent(
+                            eventId: eventId,
+                            sourceType: "audio",
+                            candidateType: "transcript",
+                            fileName: fileURL.lastPathComponent,
+                            captureOrigin: "rayban_hfp_microphone"
+                        )
                     }
                     state = .done
                     let intent = final.intent ?? "-"
@@ -89,6 +97,12 @@ final class AdapterViewModel: ObservableObject {
                 lastMessage = "done intent=\(intent) event=\(eventId)"
                 if let eventId = final.eventId {
                     await attachVisitEventIfActive(eventId)
+                    await recordMediaCaptureEvent(
+                        eventId: eventId,
+                        sourceType: "video",
+                        candidateType: "video_evidence",
+                        fileName: fileURL.lastPathComponent
+                    )
                 }
                 return accepted
             }
@@ -110,9 +124,38 @@ final class AdapterViewModel: ObservableObject {
         }
     }
 
-    func startVisitSession(patientAlias: String, historySummary: String = "") async {
+    func recordMediaCaptureEvent(
+        eventId: String,
+        sourceType: String,
+        candidateType: String,
+        fileName: String,
+        captureOrigin: String = "rayban_dat_camera"
+    ) async {
+        guard let session = visitSession else { return }
+        _ = try? await client.createCaptureEvent(
+            visitSessionId: session.id,
+            encounterId: session.encounter_id,
+            eventType: "media",
+            sourceType: sourceType,
+            candidateType: candidateType,
+            sourceEventId: eventId,
+            confidence: nil,
+            status: "draft",
+            payload: [
+                "media_event_type": candidateType,
+                "file_name": fileName,
+                "capture_origin": captureOrigin,
+                "provider_role": activeProviderRole
+            ]
+        )
+    }
+
+    func startVisitSession(patientAlias: String, historySummary: String = "", providerRole: String? = nil) async {
+        let normalizedProviderRole = providerRole?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        activeProviderRole = normalizedProviderRole.isEmpty ? "unspecified" : normalizedProviderRole
         do {
             let response = try await client.startVisitSession(
+                providerRole: providerRole,
                 patientAlias: patientAlias,
                 historySummary: historySummary,
                 updateGlass: true
