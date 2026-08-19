@@ -5,8 +5,15 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/yk/.openclaw/workspace/rayban-local-bridge
-ExecStart=/home/yk/.local/bin/uv run uvicorn app:app --host 0.0.0.0 --port 8791
+WorkingDirectory=/home/yk/services/rayban_pt/server
+EnvironmentFile=-/home/yk/.config/rayban-bridge/env
+Environment=REQUIRE_API_KEY=true
+Environment=REQUIRE_PATIENT_CONSENT=true
+Environment=AUDIO_STORE=true
+Environment=VIDEO_STORE=true
+Environment=PHI_REDACT=true
+Environment=ENABLE_FILE_DOWNLOADS=false
+ExecStart=/usr/bin/env REQUIRE_API_KEY=true REQUIRE_PATIENT_CONSENT=true AUDIO_STORE=true VIDEO_STORE=true PHI_REDACT=true ENABLE_FILE_DOWNLOADS=false /home/yk/services/rayban_pt/server/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 8791
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal

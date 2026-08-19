@@ -419,6 +419,10 @@ def main() -> None:
         require(recording.json()["session"]["recording_status"] == "recording", "recording state should persist")
         require(recording.json()["glass_state"]["is_recording"] is True, "HUD should reflect recording")
         require(recording.json()["glass_state"]["recording_start"], "HUD should include recording start time")
+        require(
+            recording.json()["glass_state"]["recording_start"] == recording.json()["session"]["recording_started_at"],
+            "HUD timer should use the current recording start rather than the visit timer",
+        )
         require(recording.json()["glass_state"]["visit_session_id"] == session_id, "HUD should expose active visit session")
 
         hud_toggle = client.post(
@@ -429,6 +433,16 @@ def main() -> None:
         require(hud_toggle.status_code == 200, "HUD toggle command should succeed")
         require(hud_toggle.json()["executed"]["executed"] is True, "HUD toggle should execute server-side")
         require(hud_toggle.json()["executed"]["session"]["recording_status"] == "idle", "HUD toggle should stop recording")
+        require(
+            hud_toggle.json()["executed"]["session"]["recording_started_at"] is None,
+            "stopping should clear the recording timer",
+        )
+        device_toggle = client.get("/glass/device-command", headers=headers())
+        require(device_toggle.status_code == 200, "native device command poll should succeed")
+        require(
+            device_toggle.json()["command"] == "stop_recording",
+            "server recording transition should deliver an explicit native stop command",
+        )
 
         hud_next = client.post(
             "/glass/command",
@@ -592,6 +606,15 @@ def main() -> None:
         require(
             "home program assigned" in note_content,
             "progress note should summarize linked home program event",
+        )
+        require(
+            "과제=standing balance" in note_content,
+            "progress note should carry structured task semantics from capture events",
+        )
+        require(
+            "linked_event_ids" in note_op["payload"]["ai_draft_snapshot"]
+            and len(note_op["payload"]["ai_draft_snapshot"]["linked_event_ids"]) > 2,
+            "progress note provenance should include derived capture event ids",
         )
         jobs = client.get("/moai-sync/jobs?status=pending&limit=10", headers=headers())
         require(jobs.status_code == 200, "pending moai sync jobs should load")

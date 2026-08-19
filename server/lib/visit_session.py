@@ -9,6 +9,15 @@ from typing import Any
 
 VISIT_PHASES = {"pre_review", "assessment", "intervention", "home_program", "summary"}
 VISIT_EVENT_ROLES = {"assessment", "intervention", "home_program", "observation"}
+PROVIDER_ROLES = {
+    "physical_therapist",
+    "occupational_therapist",
+    "pilates_instructor",
+    "personal_trainer",
+    "caregiver",
+    "unspecified",
+    "other",
+}
 
 
 def utc_now() -> str:
@@ -22,6 +31,7 @@ def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
             id TEXT PRIMARY KEY,
             organization_id TEXT NOT NULL,
             provider_person_id TEXT NOT NULL,
+            provider_role TEXT NOT NULL DEFAULT 'unspecified',
             subject_person_id TEXT NOT NULL,
             encounter_id TEXT NOT NULL,
             patient_alias TEXT NOT NULL DEFAULT '',
@@ -32,6 +42,7 @@ def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
             started_at TEXT NOT NULL,
             ended_at TEXT,
             session_timer_started_at TEXT,
+            recording_started_at TEXT,
             history_summary TEXT NOT NULL DEFAULT '',
             readiness TEXT NOT NULL DEFAULT 'ready',
             error_state TEXT,
@@ -53,6 +64,10 @@ def ensure_visit_session_schema(conn: sqlite3.Connection) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(visit_sessions)").fetchall()}
     if "event_refs" not in columns:
         conn.execute("ALTER TABLE visit_sessions ADD COLUMN event_refs TEXT NOT NULL DEFAULT '[]'")
+    if "recording_started_at" not in columns:
+        conn.execute("ALTER TABLE visit_sessions ADD COLUMN recording_started_at TEXT")
+    if "provider_role" not in columns:
+        conn.execute("ALTER TABLE visit_sessions ADD COLUMN provider_role TEXT NOT NULL DEFAULT 'unspecified'")
 
 
 def _as_json(value: Any) -> str:
@@ -132,34 +147,36 @@ def row_to_visit_session(row: sqlite3.Row | tuple[Any, ...]) -> dict[str, Any]:
         "id": row[0],
         "organization_id": row[1],
         "provider_person_id": row[2],
-        "subject_person_id": row[3],
-        "encounter_id": row[4],
-        "patient_alias": row[5],
-        "phase": row[6],
-        "status": row[7],
-        "recording_status": row[8],
-        "selected_at": row[9],
-        "started_at": row[10],
-        "ended_at": row[11],
-        "session_timer_started_at": row[12],
-        "history_summary": row[13],
-        "readiness": row[14],
-        "error_state": row[15],
-        "cue": row[16],
-        "event_ids": _from_json_list(row[17]),
-        "event_refs": _from_json_refs(row[18]),
-        "draft_progress_note": _from_json_dict(row[19]),
-        "created_at": row[20],
-        "updated_at": row[21],
+        "provider_role": row[3] or "unspecified",
+        "subject_person_id": row[4],
+        "encounter_id": row[5],
+        "patient_alias": row[6],
+        "phase": row[7],
+        "status": row[8],
+        "recording_status": row[9],
+        "selected_at": row[10],
+        "started_at": row[11],
+        "ended_at": row[12],
+        "session_timer_started_at": row[13],
+        "recording_started_at": row[14],
+        "history_summary": row[15],
+        "readiness": row[16],
+        "error_state": row[17],
+        "cue": row[18],
+        "event_ids": _from_json_list(row[19]),
+        "event_refs": _from_json_refs(row[20]),
+        "draft_progress_note": _from_json_dict(row[21]),
+        "created_at": row[22],
+        "updated_at": row[23],
     }
 
 
 def get_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id, organization_id, provider_person_id, subject_person_id, encounter_id,
+        SELECT id, organization_id, provider_person_id, provider_role, subject_person_id, encounter_id,
                patient_alias, phase, status, recording_status, selected_at, started_at, ended_at,
-               session_timer_started_at, history_summary, readiness, error_state, cue, event_ids,
+               session_timer_started_at, recording_started_at, history_summary, readiness, error_state, cue, event_ids,
                event_refs, draft_progress_note, created_at, updated_at
         FROM visit_sessions
         WHERE id = ?
@@ -175,6 +192,7 @@ def create_visit_session(
     organization_id: str,
     provider_person_id: str,
     subject_person_id: str,
+    provider_role: str = "unspecified",
     encounter_id: str | None = None,
     patient_alias: str = "",
     history_summary: str = "",
@@ -185,17 +203,18 @@ def create_visit_session(
     conn.execute(
         """
         INSERT INTO visit_sessions (
-            id, organization_id, provider_person_id, subject_person_id, encounter_id,
+            id, organization_id, provider_person_id, provider_role, subject_person_id, encounter_id,
             patient_alias, phase, status, recording_status, selected_at, started_at,
             session_timer_started_at, history_summary, readiness, cue, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, 'pre_review', 'active', 'idle', ?, ?, ?, ?, 'ready',
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pre_review', 'active', 'idle', ?, ?, ?, ?, 'ready',
                 '기록 확인 후 평가로 진행', ?)
         """,
         (
             session_id,
             organization_id,
             provider_person_id,
+            provider_role.strip() if provider_role.strip() in PROVIDER_ROLES else "unspecified",
             subject_person_id,
             canonical_encounter_id,
             patient_alias.strip() or "Patient",
@@ -234,7 +253,7 @@ def set_visit_recording(conn: sqlite3.Connection, session_id: str, is_recording:
         """
         UPDATE visit_sessions
         SET recording_status = ?,
-            session_timer_started_at = CASE WHEN ? = 'recording' THEN COALESCE(session_timer_started_at, ?) ELSE session_timer_started_at END,
+            recording_started_at = CASE WHEN ? = 'recording' THEN ? ELSE NULL END,
             updated_at = ?
         WHERE id = ?
         """,
@@ -306,6 +325,7 @@ def end_visit_session(conn: sqlite3.Connection, session_id: str) -> dict[str, An
         SET status = 'ended',
             phase = 'summary',
             recording_status = 'idle',
+            recording_started_at = NULL,
             ended_at = COALESCE(ended_at, ?),
             draft_progress_note = ?,
             cue = '진행 노트 초안 검토 필요',
@@ -325,7 +345,7 @@ def visit_hud_state(session: dict[str, Any]) -> dict[str, Any]:
         "mode": "recording" if recording else session.get("phase") or "ready",
         "message": session.get("cue") or f"{session.get('phase', 'ready')} 준비",
         "is_recording": recording,
-        "recording_start": session.get("session_timer_started_at") if recording else None,
+        "recording_start": session.get("recording_started_at") if recording else None,
         "session_count": len(session.get("event_ids") or []),
         "event_role_counts": _event_role_counts(session.get("event_refs") or []),
         "phase": session.get("phase") or "pre_review",

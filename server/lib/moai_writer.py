@@ -74,10 +74,11 @@ def _iter_bundle_items(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def build_moai_write_plan(bundle: dict[str, Any]) -> dict[str, Any]:
+def build_moai_write_plan(bundle: dict[str, Any], *, skip_target_tables: set[str] | None = None) -> dict[str, Any]:
     items = _iter_bundle_items(bundle)
     operations: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    skip_target_tables = skip_target_tables or set()
 
     for item in items:
         target_table = item.get("target_table")
@@ -86,6 +87,8 @@ def build_moai_write_plan(bundle: dict[str, Any]) -> dict[str, Any]:
         missing_fields = list(item.get("missing_required_fields") or [])
         warnings = list(item.get("warnings") or [])
         if not target_table:
+            continue
+        if str(target_table) in skip_target_tables:
             continue
         if not valid:
             skipped.append(

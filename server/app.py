@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 import logging
 import concurrent.futures
+import threading
 import base64
 import hashlib
 import hmac
@@ -12,7 +13,8 @@ import requests
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
+from urllib.parse import urlencode
 import json
 
 from dotenv import load_dotenv
@@ -25,10 +27,22 @@ load_dotenv()
 
 # ── auto-chart 통합 ──────────────────────────────────────────────────────────
 from lib.auto_chart import generate_chart, mask_faces as _mask_faces, save_chart
+from lib.hud_state_machine import build_hud_moai_bundle_from_candidate
 from lib.moai_identity import resolve_moai_identity
 from lib.moai_mapper import build_moai_export_bundle
 from lib.moai_writer import build_moai_write_plan, execute_moai_write_plan, load_moai_writer_config
+from lib.raw_media import RawMediaStage, delete_raw_media, list_raw_media_artifacts, resolve_raw_media, stage_raw_media
+from lib.pose_capture import (
+    POSE_EXTRACTOR_VERSION,
+    analyze_pose_frames,
+)
+from lib.transcript_capture import (
+    TRANSCRIPT_CAPTURE_EXTRACTOR_VERSION,
+    capture_action_type,
+    extract_transcript_capture_candidates,
+)
 from lib.visit_session import (
+    PROVIDER_ROLES,
     attach_visit_event,
     create_visit_session,
     end_visit_session,
@@ -47,6 +61,8 @@ CHART_DIR = ROOT / "storage" / "charts"
 CHART_DIR.mkdir(parents=True, exist_ok=True)
 MASKED_DIR = ROOT / "storage" / "masked"
 MASKED_DIR.mkdir(parents=True, exist_ok=True)
+RAW_MEDIA_DIR = ROOT / "storage" / "raw-media"
+RAW_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="rayban-local-bridge", version="0.4.0")
 
@@ -77,12 +93,32 @@ ALLOW_DOCS_WITHOUT_AUTH = _env_bool("ALLOW_DOCS_WITHOUT_AUTH", False)
 ENABLE_FILE_DOWNLOADS = _env_bool("ENABLE_FILE_DOWNLOADS", False)
 ALLOW_UNMASKED_IMAGE = _env_bool("ALLOW_UNMASKED_IMAGE", False)
 REQUIRE_PATIENT_CONSENT = _env_bool("REQUIRE_PATIENT_CONSENT", False)
+AUDIO_STORE = _env_bool("AUDIO_STORE", False)
 VIDEO_STORE = _env_bool("VIDEO_STORE", False)
 PILOT_CAPTURE_MODE = _env_bool("PILOT_CAPTURE_MODE", False)
 
 PUBLIC_PATHS = {"/", "/health", "/label-taxonomy"}
 PUBLIC_PATH_PREFIXES = ("/glass-app", "/neural-band-console", "/g")
+HUD_TOKEN_AUTH_PATH_PREFIXES = ("/glass/", "/neural-band/event", "/hud/candidates")
+HUD_TOKEN_ISSUE_PATH = "/glass/hud-token"
+# The public Display Web App test route is deliberately constrained to the
+# synthetic, non-PHI fixture.  It is only a device-load check: commands,
+# native capture, and normal HUD state remain authenticated.
+HUD_TEST_HEADER = "x-hud-test"
+HUD_TEST_SCOPE = {"organization_id": "t1", "provider_person_id": "p1"}
+HUD_TEST_ALLOWED_REQUESTS = {
+    ("GET", "/glass/state"),
+    ("GET", "/glass/visits/next"),
+    ("POST", "/glass/visits/start"),
+}
 DOC_PATHS = {"/docs", "/redoc", "/openapi.json"}
+
+
+def _is_hud_test_request(request: Request) -> bool:
+    return (
+        request.headers.get(HUD_TEST_HEADER, "") == "1"
+        and (request.method, request.url.path) in HUD_TEST_ALLOWED_REQUESTS
+    )
 
 ASYNC_RESULTS: dict[str, dict] = {}
 ASYNC_RESULT_TTL_MINUTES = int(os.getenv("ASYNC_RESULT_TTL_MINUTES", "60"))
@@ -95,13 +131,15 @@ if not logger.handlers:
     logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
 EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+CONSENT_MEDIA_LOCK = threading.RLock()
 
 
 def _client_host(request: Request) -> str:
+    direct_host = request.client.host if request.client else ""
     forwarded = request.headers.get("x-forwarded-for", "")
-    if forwarded:
+    if forwarded and _is_loopback_host(direct_host):
         return forwarded.split(",", 1)[0].strip()
-    return request.client.host if request.client else ""
+    return direct_host
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -116,22 +154,59 @@ def _is_loopback_host(host: str) -> bool:
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
     path = request.url.path
+    is_public_prefix = any(
+        path == prefix or path.startswith(f"{prefix}/")
+        for prefix in PUBLIC_PATH_PREFIXES
+    )
 
     if (
         path in PUBLIC_PATHS
-        or path.startswith(PUBLIC_PATH_PREFIXES)
+        or is_public_prefix
         or (ALLOW_DOCS_WITHOUT_AUTH and path in DOC_PATHS)
     ):
         return await call_next(request)
 
+    if _is_hud_test_request(request):
+        return await call_next(request)
+
     incoming_key = request.headers.get("x-api-key", "") or request.query_params.get("api_key", "")
+    incoming_hud_token = request.headers.get("x-hud-token", "") or request.query_params.get("hud_token", "")
+    hud_token_allowed = (
+        path != HUD_TOKEN_ISSUE_PATH
+        and any(path.startswith(prefix) for prefix in HUD_TOKEN_AUTH_PATH_PREFIXES)
+    )
     if BRIDGE_API_KEY:
-        if incoming_key != BRIDGE_API_KEY:
+        if incoming_key == BRIDGE_API_KEY:
+            return await call_next(request)
+        if incoming_hud_token and hud_token_allowed:
+            try:
+                _decode_hud_scope_token(incoming_hud_token)
+            except Exception as exc:
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "code": "INVALID_HUD_SCOPE_TOKEN",
+                        "message": str(exc),
+                    },
+                )
+            return await call_next(request)
+        return JSONResponse(
+            status_code=401,
+            content={
+                "code": "UNAUTHORIZED",
+                "message": "유효한 x-api-key 헤더 또는 HUD scope token이 필요합니다.",
+            },
+        )
+
+    if incoming_hud_token and hud_token_allowed:
+        try:
+            _decode_hud_scope_token(incoming_hud_token)
+        except Exception as exc:
             return JSONResponse(
                 status_code=401,
                 content={
-                    "code": "UNAUTHORIZED",
-                    "message": "유효한 x-api-key 헤더가 필요합니다.",
+                    "code": "INVALID_HUD_SCOPE_TOKEN",
+                    "message": str(exc),
                 },
             )
         return await call_next(request)
@@ -171,6 +246,8 @@ class IngestPayload(BaseModel):
 
 
 class RehabLabelPayload(BaseModel):
+    provider_role: str = "unspecified"
+    action_type: str = "observation"
     session_type: str
     core_task: str
     custom_task: str = ""
@@ -195,6 +272,87 @@ class RehabLabelPayload(BaseModel):
 
 LABEL_TAXONOMY_V0 = {
     "schema_version": "rayban_pt_label_taxonomy/v0",
+    "provider_role": [
+        {"value": "physical_therapist", "label": "Physical therapist"},
+        {"value": "occupational_therapist", "label": "Occupational therapist"},
+        {"value": "pilates_instructor", "label": "Pilates instructor"},
+        {"value": "personal_trainer", "label": "Personal trainer"},
+        {"value": "caregiver", "label": "Caregiver"},
+        {"value": "unspecified", "label": "Unspecified"},
+        {"value": "other", "label": "Other"},
+    ],
+    "action_type": [
+        {"value": "observation", "label": "Observation"},
+        {"value": "assessment", "label": "Assessment"},
+        {"value": "instruction", "label": "Instruction"},
+        {"value": "intervention", "label": "Intervention"},
+        {"value": "reassessment", "label": "Reassessment"},
+        {"value": "home_program", "label": "Home program"},
+        {"value": "safety_check", "label": "Safety check"},
+    ],
+    "assessment_name": [
+        {"value": "pain_assessment", "label": "Pain assessment"},
+        {"value": "range_of_motion", "label": "Range of motion"},
+        {"value": "manual_muscle_test", "label": "Manual muscle test"},
+        {"value": "gait_assessment", "label": "Gait assessment"},
+        {"value": "balance_assessment", "label": "Balance assessment"},
+        {"value": "movement_screen", "label": "Movement screen"},
+        {"value": "posture_assessment", "label": "Posture assessment"},
+        {"value": "breathing_assessment", "label": "Breathing assessment"},
+        {"value": "strength_assessment", "label": "Strength assessment"},
+        {"value": "endurance_assessment", "label": "Endurance assessment"},
+        {"value": "special_test", "label": "Special test"},
+    ],
+    "activity_name": [
+        {"value": "sit_to_stand", "label": "Sit to stand"},
+        {"value": "bridge", "label": "Bridge"},
+        {"value": "dead_bug", "label": "Dead bug"},
+        {"value": "bird_dog", "label": "Bird dog"},
+        {"value": "plank", "label": "Plank"},
+        {"value": "side_plank", "label": "Side plank"},
+        {"value": "push_up", "label": "Push-up"},
+        {"value": "deadlift", "label": "Deadlift"},
+        {"value": "row", "label": "Row"},
+        {"value": "overhead_press", "label": "Overhead press"},
+        {"value": "squat", "label": "Squat"},
+        {"value": "lunge", "label": "Lunge"},
+        {"value": "step_up", "label": "Step-up"},
+        {"value": "clamshell", "label": "Clamshell"},
+        {"value": "heel_raise", "label": "Heel raise"},
+        {"value": "shoulder_flexion", "label": "Shoulder flexion"},
+        {"value": "pelvic_tilt", "label": "Pelvic tilt"},
+        {"value": "cat_cow", "label": "Cat-cow"},
+        {"value": "roll_down", "label": "Roll down"},
+        {"value": "hundred", "label": "The hundred"},
+        {"value": "teaser", "label": "Teaser"},
+        {"value": "reformer_footwork", "label": "Reformer footwork"},
+        {"value": "single_leg_stance", "label": "Single-leg stance"},
+        {"value": "tandem_stance", "label": "Tandem stance"},
+        {"value": "breathing", "label": "Breathing"},
+        {"value": "gait_training", "label": "Gait training"},
+        {"value": "balance_training", "label": "Balance training"},
+    ],
+    "intervention_type": [
+        {"value": "movement_correction", "label": "Movement correction"},
+        {"value": "joint_mobilization", "label": "Joint mobilization"},
+        {"value": "manual_therapy", "label": "Manual therapy"},
+        {"value": "massage", "label": "Massage"},
+        {"value": "soft_tissue_mobilization", "label": "Soft-tissue mobilization"},
+        {"value": "stretching", "label": "Stretching"},
+        {"value": "relaxation", "label": "Relaxation"},
+        {"value": "neuromuscular_reeducation", "label": "Neuromuscular re-education"},
+        {"value": "therapeutic_exercise", "label": "Therapeutic exercise"},
+        {"value": "breathing_training", "label": "Breathing training"},
+        {"value": "pilates_mat", "label": "Pilates mat"},
+        {"value": "pilates_reformer", "label": "Pilates reformer"},
+        {"value": "resistance_training", "label": "Resistance training"},
+        {"value": "gait_training", "label": "Gait training"},
+        {"value": "balance_training", "label": "Balance training"},
+        {"value": "taping", "label": "Taping"},
+        {"value": "cueing", "label": "Cueing/facilitation"},
+        {"value": "orthosis_assistive_device", "label": "Orthosis/assistive device"},
+        {"value": "other_intervention", "label": "Other intervention"},
+    ],
     "session_type": [
         {"value": "assessment", "label": "Assessment"},
         {"value": "therapeutic_exercise", "label": "Therapeutic exercise"},
@@ -212,6 +370,13 @@ LABEL_TAXONOMY_V0 = {
         {"value": "gait_practice", "label": "Gait practice"},
         {"value": "sit_to_stand", "label": "Sit to stand"},
         {"value": "reaching", "label": "Reaching"},
+        {"value": "balance_test", "label": "Balance test"},
+        {"value": "strength_test", "label": "Strength test"},
+        {"value": "movement_screen", "label": "Movement screen"},
+        {"value": "breathing_control", "label": "Breathing control"},
+        {"value": "strength_training", "label": "Strength training"},
+        {"value": "motor_control", "label": "Motor control"},
+        {"value": "pilates_control", "label": "Pilates control"},
         {"value": "range_of_motion", "label": "Range of motion"},
         {"value": "caregiver_handling", "label": "Caregiver handling"},
         {"value": "positioning", "label": "Positioning"},
@@ -258,6 +423,7 @@ LABEL_TAXONOMY_V0 = {
         {"value": "good", "label": "Good"},
         {"value": "fair", "label": "Fair"},
         {"value": "poor", "label": "Poor"},
+        {"value": "tolerated", "label": "Tolerated"},
         {"value": "not_observed", "label": "Not observed"},
     ],
     "fatigue_level": [
@@ -275,6 +441,14 @@ LABEL_TAXONOMY_V0 = {
         "excessive_flexion",
         "shoulder_elevation",
         "pelvic_rotation",
+        "knee_valgus",
+        "pelvic_drop",
+        "forward_trunk_lean",
+        "lumbar_extension",
+        "breath_holding",
+        "scapular_winging",
+        "foot_pronation",
+        "cervical_extension",
     ],
     "flags": [
         "fatigue",
@@ -344,6 +518,17 @@ class ConsentPayload(BaseModel):
     scope: str = "capture_analysis_storage"
     consent_text: Optional[str] = None
     granted_by: Optional[str] = None
+    owner_org_id: Optional[str] = None
+    owner_provider_person_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
+
+
+class ConsentLookupPayload(BaseModel):
+    patient_name: str
+    scope: str = "capture_analysis_storage"
+    owner_org_id: Optional[str] = None
+    owner_provider_person_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
 
 
 class MergeEventsPayload(BaseModel):
@@ -361,6 +546,91 @@ class ChartReviewPayload(BaseModel):
     notes: Optional[str] = ""
 
 
+class HudCandidatePayload(BaseModel):
+    encounter_id: str
+    organization_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
+    provider_person_id: Optional[str] = None
+    event_type: str = "test_result"
+    test: str = ""
+    side: str = ""
+    value: str = ""
+    symptom: str = ""
+    source: str = "rayban_meta_display"
+    source_text: str = ""
+    confidence: Optional[float] = None
+    payload: dict = Field(default_factory=dict)
+
+
+class HudCandidateExtractPayload(BaseModel):
+    encounter_id: str
+    organization_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
+    provider_person_id: Optional[str] = None
+    text: str
+    source: str = "stt_transcript"
+    confidence: Optional[float] = None
+    create_candidate: bool = True
+
+
+class HudCandidateDecisionPayload(BaseModel):
+    reviewer_person_id: Optional[str] = None
+    reason: Optional[str] = None
+
+
+class HudTokenIssuePayload(BaseModel):
+    organization_id: str
+    provider_person_id: str
+    expires_in_minutes: int = 720
+    bridge_url: Optional[str] = None
+    app_path: str = "/glass-app/"
+
+
+class CaptureEventPayload(BaseModel):
+    visit_session_id: Optional[str] = None
+    encounter_id: Optional[str] = None
+    organization_id: Optional[str] = None
+    provider_person_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
+    source_media_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    source_type: str = "therapist_tag"
+    event_type: str
+    candidate_type: Optional[str] = None
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    confidence: Optional[float] = None
+    status: str = "draft"
+    payload: dict = Field(default_factory=dict)
+    reviewed_by: Optional[str] = None
+
+
+class CaptureEventUpdatePayload(BaseModel):
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    confidence: Optional[float] = None
+    status: Optional[str] = None
+    payload: Optional[dict] = None
+    reviewed_by: Optional[str] = None
+
+
+class CaptureEventExtractPayload(BaseModel):
+    visit_session_id: Optional[str] = None
+    encounter_id: Optional[str] = None
+    organization_id: Optional[str] = None
+    provider_person_id: Optional[str] = None
+    subject_person_id: Optional[str] = None
+    source_event_id: Optional[str] = None
+    source_media_id: Optional[str] = None
+    text: str
+    source_type: str = "transcript"
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    confidence: Optional[float] = None
+    capture_origin: Optional[str] = None
+    create_events: bool = True
+
+
 def _error(status_code: int, code: str, detail: str):
     raise HTTPException(status_code=status_code, detail={"code": code, "message": detail})
 
@@ -376,15 +646,24 @@ def _scope_from_request(
     owner_org_id: Optional[str] = None,
     owner_provider_person_id: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str]]:
+    hud_scope: dict[str, str] = {}
+    raw_hud_token = request.headers.get("x-hud-token", "") or request.query_params.get("hud_token", "")
+    if raw_hud_token:
+        try:
+            hud_scope = _decode_hud_scope_token(raw_hud_token)
+        except ValueError as exc:
+            raise HTTPException(status_code=401, detail={"code": "INVALID_HUD_SCOPE_TOKEN", "message": str(exc)})
     org_id = (
         _clean_scope_value(owner_org_id)
         or _clean_scope_value(request.headers.get("x-glasspt-org-id"))
         or _clean_scope_value(request.headers.get("x-org-id"))
+        or _clean_scope_value(hud_scope.get("organization_id"))
     )
     provider_person_id = (
         _clean_scope_value(owner_provider_person_id)
         or _clean_scope_value(request.headers.get("x-glasspt-provider-person-id"))
         or _clean_scope_value(request.headers.get("x-provider-person-id"))
+        or _clean_scope_value(hud_scope.get("provider_person_id"))
     )
     return org_id, provider_person_id
 
@@ -499,10 +778,65 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         );
         CREATE INDEX IF NOT EXISTS idx_moai_sync_jobs_status_updated_at ON moai_sync_jobs(status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_moai_sync_jobs_event_id ON moai_sync_jobs(event_id);
+        CREATE TABLE IF NOT EXISTS hud_candidates (
+            id TEXT PRIMARY KEY,
+            encounter_id TEXT NOT NULL,
+            organization_id TEXT NOT NULL,
+            subject_person_id TEXT NOT NULL,
+            provider_person_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            test TEXT NOT NULL DEFAULT '',
+            side TEXT NOT NULL DEFAULT '',
+            value TEXT NOT NULL DEFAULT '',
+            symptom TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'rayban_meta_display',
+            status TEXT NOT NULL DEFAULT 'candidate',
+            review_status TEXT NOT NULL DEFAULT 'auto_extracted',
+            confidence REAL,
+            source_text TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            reviewer_person_id TEXT NOT NULL DEFAULT '',
+            discarded_reason TEXT NOT NULL DEFAULT '',
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_hud_candidates_encounter_updated_at ON hud_candidates(encounter_id, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_hud_candidates_status_updated_at ON hud_candidates(status, updated_at);
+        CREATE TABLE IF NOT EXISTS capture_events (
+            id TEXT PRIMARY KEY,
+            visit_session_id TEXT,
+            encounter_id TEXT,
+            organization_id TEXT,
+            provider_person_id TEXT,
+            subject_person_id TEXT,
+            source_media_id TEXT,
+            source_event_id TEXT,
+            source_type TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            candidate_type TEXT NOT NULL,
+            start_ms INTEGER,
+            end_ms INTEGER,
+            confidence REAL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            reviewed_by TEXT,
+            reviewed_at TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_capture_events_visit_created_at
+          ON capture_events(visit_session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_capture_events_encounter_created_at
+          ON capture_events(encounter_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_capture_events_source_event_id
+          ON capture_events(source_event_id);
         """
     )
     label_columns = {row[1] for row in conn.execute("PRAGMA table_info(rehab_labels)").fetchall()}
     label_column_specs = {
+        "provider_role": "TEXT NOT NULL DEFAULT 'unspecified'",
+        "action_type": "TEXT NOT NULL DEFAULT 'observation'",
         "custom_task": "TEXT NOT NULL DEFAULT ''",
         "body_position": "TEXT NOT NULL DEFAULT ''",
         "review_status": "TEXT NOT NULL DEFAULT 'reviewed'",
@@ -534,6 +868,13 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE events ADD COLUMN physio_client_id TEXT")
     if "physio_session_id" not in event_columns:
         conn.execute("ALTER TABLE events ADD COLUMN physio_session_id TEXT")
+    consent_columns = {row[1] for row in conn.execute("PRAGMA table_info(patient_consents)").fetchall()}
+    if "owner_org_id" not in consent_columns:
+        conn.execute("ALTER TABLE patient_consents ADD COLUMN owner_org_id TEXT NOT NULL DEFAULT ''")
+    if "owner_provider_person_id" not in consent_columns:
+        conn.execute("ALTER TABLE patient_consents ADD COLUMN owner_provider_person_id TEXT NOT NULL DEFAULT ''")
+    if "subject_person_id" not in consent_columns:
+        conn.execute("ALTER TABLE patient_consents ADD COLUMN subject_person_id TEXT NOT NULL DEFAULT ''")
     conn.executescript(
         """
         CREATE INDEX IF NOT EXISTS idx_events_owner_org_created_at ON events(owner_org_id, created_at);
@@ -541,6 +882,8 @@ def _ensure_runtime_schema(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_events_subject_created_at ON events(subject_person_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_physio_client_created_at ON events(physio_client_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_events_physio_session_created_at ON events(physio_session_id, created_at);
+        CREATE INDEX IF NOT EXISTS idx_patient_consents_identity_scope
+          ON patient_consents(owner_org_id, owner_provider_person_id, subject_person_id, scope, revoked_at, created_at);
         """
     )
 
@@ -554,38 +897,425 @@ def _conn():
     return conn
 
 
+CAPTURE_EVENT_STATUSES = {"draft", "edited", "approved", "rejected"}
+CAPTURE_EVENT_SOURCE_TYPES = {"audio", "video", "pose", "therapist_tag", "transcript", "system"}
+CAPTURE_ORIGIN_ALIASES = {
+    "rayban_dat_camera": "rayban_dat_camera",
+    "rayban-camera": "rayban_dat_camera",
+    "rayban_hfp_microphone": "rayban_hfp_microphone",
+    "rayban-microphone": "rayban_hfp_microphone",
+    "iphone_camera": "iphone_camera",
+    "iphone-camera": "iphone_camera",
+    "ios_demo_synthetic": "ios_demo_synthetic",
+    "ios_demo_autotest": "ios_demo_autotest",
+}
+
+
+def _capture_origin_from_source(source: Optional[str]) -> Optional[str]:
+    """Normalize trusted media source labels into capture-event provenance."""
+
+    normalized = (source or "").strip().lower()
+    return CAPTURE_ORIGIN_ALIASES.get(normalized)
+
+
+def _backfill_capture_origin(
+    conn: sqlite3.Connection,
+    event: dict,
+    capture_origin: Optional[str],
+) -> dict:
+    """Repair provenance on idempotent readback of older capture candidates."""
+
+    if not capture_origin or event["payload"].get("capture_origin"):
+        return event
+    payload = {**event["payload"], "capture_origin": capture_origin}
+    updated_at = datetime.utcnow().isoformat()
+    conn.execute(
+        "UPDATE capture_events SET payload_json = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(payload, ensure_ascii=False, separators=(",", ":")), updated_at, event["id"]),
+    )
+    event["payload"] = payload
+    event["updated_at"] = updated_at
+    return event
+
+
+def _capture_event_from_row(row: tuple) -> dict:
+    try:
+        payload = json.loads(row[15] or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if isinstance(payload, dict):
+        action_type = payload.get("action_type")
+        if not isinstance(action_type, str) or action_type not in {
+            "observation",
+            "assessment",
+            "instruction",
+            "intervention",
+            "reassessment",
+            "home_program",
+            "safety_check",
+        }:
+            payload["action_type"] = capture_action_type(str(row[10] or ""))
+    return {
+        "id": row[0],
+        "visit_session_id": row[1],
+        "encounter_id": row[2],
+        "organization_id": row[3],
+        "provider_person_id": row[4],
+        "subject_person_id": row[5],
+        "source_media_id": row[6],
+        "source_event_id": row[7],
+        "source_type": row[8],
+        "event_type": row[9],
+        "candidate_type": row[10],
+        "start_ms": row[11],
+        "end_ms": row[12],
+        "confidence": row[13],
+        "status": row[14],
+        "payload": payload if isinstance(payload, dict) else {},
+        "reviewed_by": row[16],
+        "reviewed_at": row[17],
+        "created_at": row[18],
+        "updated_at": row[19],
+    }
+
+
+def _capture_event_select() -> str:
+    return (
+        "SELECT id, visit_session_id, encounter_id, organization_id, provider_person_id, "
+        "subject_person_id, source_media_id, source_event_id, source_type, event_type, "
+        "candidate_type, start_ms, end_ms, confidence, status, payload_json, reviewed_by, "
+        "reviewed_at, created_at, updated_at FROM capture_events"
+    )
+
+
+def _create_transcript_capture_events(
+    conn: sqlite3.Connection,
+    *,
+    text: str,
+    visit_session_id: Optional[str] = None,
+    encounter_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    provider_person_id: Optional[str] = None,
+    provider_role: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
+    source_event_id: Optional[str] = None,
+    source_media_id: Optional[str] = None,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    confidence: Optional[float] = None,
+    capture_origin: Optional[str] = None,
+    derived_from: str = "transcript",
+) -> list[dict]:
+    candidates = extract_transcript_capture_candidates(text, provider_role=provider_role)
+    if not candidates:
+        return []
+
+    clean_source_event_id = _clean_scope_value(source_event_id)
+    existing_rows = conn.execute(
+        f"{_capture_event_select()} WHERE encounter_id IS ? AND source_event_id IS ?",
+        (encounter_id, clean_source_event_id),
+    ).fetchall()
+    existing_by_key = {}
+    for row in existing_rows:
+        event = _backfill_capture_origin(
+            conn,
+            _capture_event_from_row(row),
+            capture_origin,
+        )
+        key = event["payload"].get("extraction_key")
+        if isinstance(key, str) and key:
+            existing_by_key[key] = event
+
+    created: list[dict] = []
+    for index, candidate in enumerate(candidates):
+        raw_payload = candidate.get("payload") or {}
+        # Preserve structured semantic fields (lists, numbers, and the nested
+        # semantic snapshot) through capture_events JSON. Older candidates are
+        # still string-valued, so this remains backward-compatible.
+        payload = (
+            {str(key): value for key, value in raw_payload.items()}
+            if isinstance(raw_payload, dict)
+            else {}
+        )
+        source_text = payload.get("source_text", "")
+        extraction_key = hashlib.sha256(
+            f"{clean_source_event_id or ''}:{index}:{candidate.get('candidate_type')}:{source_text}".encode("utf-8")
+        ).hexdigest()
+        payload.update(
+            {
+                "extraction_key": extraction_key,
+                "extractor_version": TRANSCRIPT_CAPTURE_EXTRACTOR_VERSION,
+                "derived_from": derived_from,
+            }
+        )
+        if provider_role:
+            payload.setdefault("provider_role", provider_role)
+        if capture_origin:
+            payload.setdefault("capture_origin", capture_origin)
+        if extraction_key in existing_by_key:
+            created.append(existing_by_key[extraction_key])
+            continue
+
+        candidate_confidence = float(candidate.get("confidence") or 0.5)
+        effective_confidence = (
+            min(candidate_confidence, max(0.0, min(1.0, float(confidence))))
+            if confidence is not None
+            else candidate_confidence
+        )
+        event_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """
+            INSERT INTO capture_events (
+              id, visit_session_id, encounter_id, organization_id, provider_person_id,
+              subject_person_id, source_media_id, source_event_id, source_type, event_type,
+              candidate_type, start_ms, end_ms, confidence, status, payload_json,
+              reviewed_by, reviewed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'transcript', ?, ?, ?, ?, ?, 'draft', ?, NULL, NULL, ?, ?)
+            """,
+            (
+                event_id,
+                visit_session_id,
+                encounter_id,
+                organization_id,
+                provider_person_id,
+                subject_person_id,
+                source_media_id,
+                clean_source_event_id,
+                candidate["event_type"],
+                candidate["candidate_type"],
+                start_ms,
+                end_ms,
+                effective_confidence,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(f"{_capture_event_select()} WHERE id = ?", (event_id,)).fetchone()
+        if row:
+            event = _capture_event_from_row(row)
+            existing_by_key[extraction_key] = event
+            created.append(event)
+    return created
+
+
+def _create_pose_capture_events(
+    conn: sqlite3.Connection,
+    *,
+    candidates: list[dict],
+    visit_session_id: Optional[str] = None,
+    encounter_id: Optional[str] = None,
+    organization_id: Optional[str] = None,
+    provider_person_id: Optional[str] = None,
+    provider_role: Optional[str] = None,
+    subject_person_id: Optional[str] = None,
+    source_event_id: Optional[str] = None,
+    source_media_id: Optional[str] = None,
+    start_ms: Optional[int] = None,
+    end_ms: Optional[int] = None,
+    capture_origin: Optional[str] = None,
+) -> list[dict]:
+    """Persist MediaPipe measurements as idempotent provider-review candidates."""
+
+    if not candidates:
+        return []
+
+    clean_source_event_id = _clean_scope_value(source_event_id)
+    existing_rows = conn.execute(
+        f"{_capture_event_select()} WHERE encounter_id IS ? AND source_event_id IS ? AND source_type = 'pose'",
+        (encounter_id, clean_source_event_id),
+    ).fetchall()
+    existing_by_key: dict[str, dict] = {}
+    for row in existing_rows:
+        event = _backfill_capture_origin(
+            conn,
+            _capture_event_from_row(row),
+            capture_origin,
+        )
+        key = event["payload"].get("extraction_key")
+        if isinstance(key, str) and key:
+            existing_by_key[key] = event
+
+    created: list[dict] = []
+    for index, candidate in enumerate(candidates):
+        payload = dict(candidate.get("payload") or {})
+        candidate_key = json.dumps(
+            {
+                "candidate_type": candidate.get("candidate_type"),
+                "event_type": candidate.get("event_type"),
+                "metric_id": payload.get("metric_id"),
+                "side": payload.get("side"),
+                "label": payload.get("label"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        extraction_key = hashlib.sha256(
+            f"{clean_source_event_id or ''}:pose:{index}:{candidate_key}".encode("utf-8")
+        ).hexdigest()
+        payload.update(
+            {
+                "extraction_key": extraction_key,
+                "extractor_version": POSE_EXTRACTOR_VERSION,
+                "derived_from": "video_pose",
+                "review_required": "true",
+            }
+        )
+        if provider_role:
+            payload.setdefault("provider_role", provider_role)
+        if capture_origin:
+            payload.setdefault("capture_origin", capture_origin)
+        if extraction_key in existing_by_key:
+            created.append(existing_by_key[extraction_key])
+            continue
+
+        event_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        candidate_confidence = float(candidate.get("confidence") or 0.5)
+        conn.execute(
+            """
+            INSERT INTO capture_events (
+              id, visit_session_id, encounter_id, organization_id, provider_person_id,
+              subject_person_id, source_media_id, source_event_id, source_type, event_type,
+              candidate_type, start_ms, end_ms, confidence, status, payload_json,
+              reviewed_by, reviewed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pose', ?, ?, ?, ?, ?, 'draft', ?, NULL, NULL, ?, ?)
+            """,
+            (
+                event_id,
+                visit_session_id,
+                encounter_id,
+                organization_id,
+                provider_person_id,
+                subject_person_id,
+                source_media_id,
+                clean_source_event_id,
+                candidate["event_type"],
+                candidate["candidate_type"],
+                start_ms,
+                end_ms,
+                candidate_confidence,
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(f"{_capture_event_select()} WHERE id = ?", (event_id,)).fetchone()
+        if row:
+            event = _capture_event_from_row(row)
+            existing_by_key[extraction_key] = event
+            created.append(event)
+    return created
+
+
 DEFAULT_CONSENT_TEXT = (
     "환자 또는 보호자가 치료 기록을 위해 사진/영상/음성/텍스트를 캡처하고, "
     "로컬 서버에서 분석 및 차트 생성을 수행하며, 필요한 기간 동안 저장하는 것에 동의했습니다."
 )
 
 
-def _latest_patient_consent(conn: sqlite3.Connection, patient_name: str, scope: str = "capture_analysis_storage"):
+def _latest_patient_consent(
+    conn: sqlite3.Connection,
+    patient_name: str,
+    scope: str = "capture_analysis_storage",
+    *,
+    owner_org_id: str,
+    owner_provider_person_id: str,
+    subject_person_id: str,
+):
     return conn.execute(
         """
-        SELECT id, patient_name, scope, consent_text, granted_by, created_at
+        SELECT id, patient_name, scope, consent_text, granted_by, created_at,
+               owner_org_id, owner_provider_person_id, subject_person_id
         FROM patient_consents
-        WHERE patient_name = ? AND scope = ? AND revoked_at IS NULL
+        WHERE patient_name = ? AND scope = ?
+          AND owner_org_id = ? AND owner_provider_person_id = ? AND subject_person_id = ?
+          AND revoked_at IS NULL
         ORDER BY created_at DESC
         LIMIT 1
         """,
-        (patient_name.strip(), scope.strip() or "capture_analysis_storage"),
+        (
+            patient_name.strip(),
+            scope.strip() or "capture_analysis_storage",
+            owner_org_id.strip(),
+            owner_provider_person_id.strip(),
+            subject_person_id.strip(),
+        ),
     ).fetchone()
 
 
-def _require_patient_consent(event_type: str, patient_name: str) -> Optional[str]:
+def _require_patient_consent(
+    event_type: str,
+    patient_name: str,
+    *,
+    owner_org_id: Optional[str],
+    owner_provider_person_id: Optional[str],
+    subject_person_id: Optional[str],
+) -> Optional[str]:
     if not REQUIRE_PATIENT_CONSENT or event_type not in {"audio", "image", "video", "text"}:
         return None
 
     name = (patient_name or "").strip()
     if not name:
         _error(428, "PATIENT_CONSENT_REQUIRED", "환자 동의 확인을 위해 patient_name이 필요합니다.")
+    org_id = (owner_org_id or "").strip()
+    provider_id = (owner_provider_person_id or "").strip()
+    subject_id = (subject_person_id or "").strip()
+    if not org_id or not provider_id or not subject_id:
+        _error(428, "CONSENT_IDENTITY_REQUIRED", "조직, 치료사, 환자 person ID가 있어야 동의를 확인할 수 있습니다.")
 
     with _conn() as conn:
-        row = _latest_patient_consent(conn, name)
+        row = _latest_patient_consent(
+            conn,
+            name,
+            owner_org_id=org_id,
+            owner_provider_person_id=provider_id,
+            subject_person_id=subject_id,
+        )
     if not row:
-        _error(428, "PATIENT_CONSENT_REQUIRED", f"{name} 환자의 활성 동의 기록이 필요합니다.")
+        _error(428, "PATIENT_CONSENT_REQUIRED", "활성 capture/analysis/storage 동의 기록이 필요합니다.")
     return row[0]
+
+
+def _stage_raw_media_if_consent_active(
+    source_path: Path,
+    stage: RawMediaStage,
+    *,
+    owner_org_id: Optional[str],
+    owner_provider_person_id: Optional[str],
+    subject_person_id: Optional[str],
+) -> Optional[Path]:
+    consent_id = stage.consent_id.strip()
+    identity = (
+        (owner_org_id or "").strip(),
+        (owner_provider_person_id or "").strip(),
+        (subject_person_id or "").strip(),
+    )
+    if not consent_id or not all(identity):
+        source_path.unlink(missing_ok=True)
+        return None
+
+    with CONSENT_MEDIA_LOCK:
+        with _conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                """
+                SELECT 1 FROM patient_consents
+                WHERE id = ? AND owner_org_id = ? AND owner_provider_person_id = ?
+                  AND subject_person_id = ? AND scope = 'capture_analysis_storage'
+                  AND revoked_at IS NULL
+                """,
+                (consent_id, *identity),
+            ).fetchone()
+            if not active:
+                conn.rollback()
+                source_path.unlink(missing_ok=True)
+                return None
+            staged_path = stage_raw_media(source_path, RAW_MEDIA_DIR, stage)
+            conn.commit()
+            return staged_path
 
 
 def _pilot_metadata_gaps(
@@ -660,7 +1390,7 @@ def _optional_bool_from_db(value) -> Optional[bool]:
 def _get_label_by_event_id(conn: sqlite3.Connection, event_id: str):
     row = conn.execute(
         """
-        SELECT event_id, session_type, core_task, custom_task, body_position,
+        SELECT event_id, provider_role, action_type, session_type, core_task, custom_task, body_position,
                assist_level, performance, review_status, reviewer_person_id,
                usable_for_training, label_confidence, repetition_count,
                hold_duration_seconds, tolerance, fatigue_level, compensations,
@@ -674,27 +1404,29 @@ def _get_label_by_event_id(conn: sqlite3.Connection, event_id: str):
         return None
     return {
         "event_id": row[0],
-        "session_type": row[1],
-        "core_task": row[2],
-        "custom_task": row[3] or "",
-        "body_position": row[4] or "",
-        "assist_level": row[5],
-        "performance": row[6],
-        "performance_level": row[6],
-        "review_status": row[7] or "reviewed",
-        "reviewer_person_id": row[8] or "",
-        "usable_for_training": bool(row[9]),
-        "label_confidence": row[10],
-        "repetition_count": row[11],
-        "hold_duration_seconds": row[12],
-        "tolerance": row[13] or "",
-        "fatigue_level": row[14] or "",
-        "compensations": _json_list(row[15]),
-        "caregiver_present": _optional_bool_from_db(row[16]),
-        "flags": _json_list(row[17]),
-        "safety_flags": _json_list(row[17]),
-        "notes": row[18] or "",
-        "updated_at": row[19],
+        "provider_role": row[1] or "unspecified",
+        "action_type": row[2] or "observation",
+        "session_type": row[3],
+        "core_task": row[4],
+        "custom_task": row[5] or "",
+        "body_position": row[6] or "",
+        "assist_level": row[7],
+        "performance": row[8],
+        "performance_level": row[8],
+        "review_status": row[9] or "reviewed",
+        "reviewer_person_id": row[10] or "",
+        "usable_for_training": bool(row[11]),
+        "label_confidence": row[12],
+        "repetition_count": row[13],
+        "hold_duration_seconds": row[14],
+        "tolerance": row[15] or "",
+        "fatigue_level": row[16] or "",
+        "compensations": _json_list(row[17]),
+        "caregiver_present": _optional_bool_from_db(row[18]),
+        "flags": _json_list(row[19]),
+        "safety_flags": _json_list(row[19]),
+        "notes": row[20] or "",
+        "updated_at": row[21],
     }
 
 
@@ -758,6 +1490,7 @@ def _list_event_artifacts(event_id: str) -> list[dict]:
                 "download_path": f"/masked-files/{path.name}",
             }
         )
+    artifacts.extend(list_raw_media_artifacts(RAW_MEDIA_DIR, event_id))
     return artifacts
 
 
@@ -837,6 +1570,238 @@ def _build_moai_bundle_for_event(
     if identity_resolution:
         bundle.setdefault("context", {})["identity_resolution"] = identity_resolution.as_dict()
     return bundle
+
+
+def _hud_candidate_from_row(row) -> dict:
+    return {
+        "id": row[0],
+        "encounter_id": row[1],
+        "organization_id": row[2],
+        "subject_person_id": row[3],
+        "provider_person_id": row[4],
+        "event_type": row[5],
+        "test": row[6] or "",
+        "side": row[7] or "",
+        "value": row[8] or "",
+        "symptom": row[9] or "",
+        "source": row[10] or "rayban_meta_display",
+        "status": row[11],
+        "review_status": row[12],
+        "confidence": row[13],
+        "source_text": row[14] or "",
+        "payload": _safe_json_loads(row[15], {}),
+        "reviewer_person_id": row[16] or "",
+        "discarded_reason": row[17] or "",
+        "reviewed_at": row[18],
+        "created_at": row[19],
+        "updated_at": row[20],
+        "observation_status": "final" if row[11] == "confirmed_by_provider" else "preliminary",
+    }
+
+
+def _get_hud_candidate(conn: sqlite3.Connection, candidate_id: str) -> dict:
+    row = conn.execute(
+        """
+        SELECT id, encounter_id, organization_id, subject_person_id, provider_person_id,
+               event_type, test, side, value, symptom, source, status, review_status,
+               confidence, source_text, payload_json, reviewer_person_id,
+               discarded_reason, reviewed_at, created_at, updated_at
+        FROM hud_candidates
+        WHERE id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="hud candidate not found")
+    return _hud_candidate_from_row(row)
+
+
+def _hud_candidate_plan(candidate: dict) -> dict:
+    return build_moai_write_plan(build_hud_moai_bundle_from_candidate(candidate))
+
+
+def _extract_side_from_transcript(text: str) -> str:
+    lower = text.lower()
+    if re.search(r"\b(left|lt|lft)\b", lower) or "좌측" in text or "왼쪽" in text or "좌 " in text:
+        return "left"
+    if re.search(r"\b(right|rt)\b", lower) or "우측" in text or "오른쪽" in text or "우 " in text:
+        return "right"
+    if "양측" in text or "bilateral" in lower or "both" in lower:
+        return "bilateral"
+    return ""
+
+
+def _extract_test_from_transcript(text: str) -> str:
+    lower = text.lower()
+    if re.search(r"\bslr\b", lower) or "straight leg raise" in lower or "하지직거상" in text:
+        return "SLR"
+    if "slump" in lower or "슬럼프" in text:
+        return "Slump"
+    if re.search(r"\bodi\b", lower) or "oswestry" in lower or "오스웨스트리" in text:
+        return "ODI"
+    if re.search(r"\bnprs\b", lower) or "통증점수" in text or "통증 점수" in text:
+        return "NPRS"
+    return ""
+
+
+def _extract_value_from_transcript(text: str, test: str) -> str:
+    lower = text.lower()
+    degree_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:도|deg(?:ree)?s?|°)", lower)
+    if degree_match:
+        value = degree_match.group(1)
+        return f"{value} degrees"
+    score_match = re.search(r"(\d+(?:\.\d+)?)\s*(?:/|out of)\s*(10|100)", lower)
+    if score_match:
+        return f"{score_match.group(1)}/{score_match.group(2)}"
+    if test == "ODI":
+        odi_match = re.search(r"(?:odi|오스웨스트리)[^\d]*(\d+(?:\.\d+)?)", lower)
+        if odi_match:
+            return odi_match.group(1)
+    if re.search(r"\bpositive\b", lower) or "양성" in text:
+        return "positive"
+    if re.search(r"\bnegative\b", lower) or "음성" in text:
+        return "negative"
+    return ""
+
+
+def _extract_symptom_from_transcript(text: str) -> str:
+    lower = text.lower()
+    if "posterior thigh pain" in lower:
+        return "posterior thigh pain"
+    if "radiating pain" in lower:
+        return "radiating pain"
+    if "hamstring tightness" in lower:
+        return "hamstring tightness"
+    symptom_patterns = [
+        r"(posterior\s+thigh\s+pain.*)$",
+        r"(radiating\s+pain.*)$",
+        r"(hamstring\s+tightness.*)$",
+        r"(허벅지\s*뒤쪽\s*통증.*)$",
+        r"(방사통.*)$",
+        r"(저림.*)$",
+        r"(당김.*)$",
+    ]
+    for pattern in symptom_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return _short_lens_text(match.group(1), limit=80)
+    if "통증" in text:
+        idx = text.find("통증")
+        start = max(0, idx - 12)
+        end = min(len(text), idx + 24)
+        return _short_lens_text(text[start:end], limit=80)
+    return ""
+
+
+def _extract_hud_candidate_from_transcript(text: str) -> Optional[dict]:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if not clean:
+        return None
+    test = _extract_test_from_transcript(clean)
+    if not test:
+        return None
+    side = _extract_side_from_transcript(clean)
+    value = _extract_value_from_transcript(clean, test)
+    symptom = _extract_symptom_from_transcript(clean)
+    event_type = "test_result" if test in {"SLR", "Slump", "ODI", "NPRS"} else "observation"
+    return {
+        "event_type": event_type,
+        "test": test,
+        "side": side,
+        "value": value,
+        "symptom": symptom,
+        "source_text": clean,
+    }
+
+
+def _hud_candidate_micro_card(candidate: Optional[dict]) -> Optional[dict]:
+    if not candidate:
+        return None
+    test = str(candidate.get("test") or candidate.get("event_type") or "Candidate").strip()
+    side = str(candidate.get("side") or "").strip()
+    value = str(candidate.get("value") or "").strip()
+    symptom = str(candidate.get("symptom") or "").strip()
+    source_text = str(candidate.get("source_text") or "").strip()
+    parts = [
+        test,
+        side,
+        value,
+    ]
+    title = " / ".join(str(part) for part in parts if part)
+    lines = [
+        _short_lens_text(title or "Candidate", limit=44),
+        _short_lens_text(symptom or source_text or "승인 대기", limit=54),
+    ]
+    if candidate.get("confidence") is not None:
+        try:
+            confidence = round(float(candidate["confidence"]) * 100)
+            lines.append(f"AI confidence {confidence}%")
+        except Exception:
+            pass
+    return {
+        "id": candidate.get("id"),
+        "encounter_id": candidate.get("encounter_id"),
+        "title": _short_lens_text(title or "Candidate", limit=34),
+        "body": _short_lens_text(symptom or source_text or "승인 대기", limit=54),
+        "lines": [line for line in lines if line],
+        "primary_action": "approve_candidate",
+        "secondary_action": "discard_candidate",
+        "status": candidate.get("status"),
+        "review_status": candidate.get("review_status"),
+        "source": candidate.get("source"),
+        "lens_safe": True,
+    }
+
+
+def _latest_hud_candidate_for_encounter(
+    conn: sqlite3.Connection,
+    encounter_id: str,
+    *,
+    status: str = "candidate",
+) -> Optional[dict]:
+    if not encounter_id:
+        return None
+    row = conn.execute(
+        """
+        SELECT id, encounter_id, organization_id, subject_person_id, provider_person_id,
+               event_type, test, side, value, symptom, source, status, review_status,
+               confidence, source_text, payload_json, reviewer_person_id,
+               discarded_reason, reviewed_at, created_at, updated_at
+        FROM hud_candidates
+        WHERE encounter_id = ?
+          AND (? = 'all' OR status = ?)
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """,
+        (encounter_id, status, status),
+    ).fetchone()
+    return _hud_candidate_from_row(row) if row else None
+
+
+def _active_hud_candidate(conn: sqlite3.Connection, *, status: str = "candidate") -> Optional[dict]:
+    with _glass_lock:
+        explicit = _glass_state.get("active_hud_candidate") or {}
+    if isinstance(explicit, dict) and explicit.get("id"):
+        try:
+            candidate = _get_hud_candidate(conn, str(explicit["id"]))
+            if status == "all" or candidate.get("status") == status:
+                return candidate
+        except HTTPException:
+            pass
+    session_id = _active_visit_session_id_from_hud()
+    if session_id:
+        session = get_visit_session(conn, session_id)
+        if session:
+            candidate = _latest_hud_candidate_for_encounter(conn, str(session.get("encounter_id") or ""), status=status)
+            if candidate:
+                return candidate
+    return None
+
+
+def _set_active_hud_candidate(candidate: Optional[dict]) -> None:
+    with _glass_lock:
+        _glass_state["active_hud_candidate"] = _hud_candidate_micro_card(candidate)
+        _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
 
 
 def _safe_json_loads(value: Optional[str], default):
@@ -1013,7 +1978,13 @@ def _event_consent_status(event: dict) -> dict:
     if not patient_name:
         return {"status": "unknown", "scope": "capture_analysis_storage", "active": False}
     with _conn() as conn:
-        row = _latest_patient_consent(conn, patient_name)
+        row = _latest_patient_consent(
+            conn,
+            patient_name,
+            owner_org_id=str(event.get("owner_org_id") or ""),
+            owner_provider_person_id=str(event.get("owner_provider_person_id") or ""),
+            subject_person_id=str(event.get("subject_person_id") or ""),
+        )
     if not row:
         return {"status": "missing", "scope": "capture_analysis_storage", "active": False}
     return {
@@ -1212,6 +2183,17 @@ def _build_physio_session_export_item(conn: sqlite3.Connection, event_row):
     review = _get_chart_review_by_event_id(conn, event_id)
     chart_text, quality = _read_chart_export(event_id)
     sections = _parse_chart_sections(chart_text) if chart_text else {}
+    consent = (
+        _latest_patient_consent(
+            conn,
+            event_row[6],
+            owner_org_id=str(event_row[7] or ""),
+            owner_provider_person_id=str(event_row[8] or ""),
+            subject_person_id=str(event_row[9] or ""),
+        )
+        if event_row[6]
+        else None
+    )
 
     title = _first_non_empty(
         " · ".join(
@@ -1258,6 +2240,8 @@ def _build_physio_session_export_item(conn: sqlite3.Connection, event_row):
         "chart_excerpt": _clip_chart_text(chart_text, 900) if chart_text else "",
         "quality": quality,
         "review": review,
+        "consent_verified": consent is not None,
+        "consent_id": consent[0] if consent else None,
         "artifacts": _list_event_artifacts(event_id),
         "persisted": True,
         "storage": "rayban-local-bridge.sqlite",
@@ -1561,6 +2545,19 @@ def _extract_voice_memo(text: str) -> str:
     return _clip_chart_text(tail, 500)
 
 
+def _extract_video_transcript_capture_text(text: str) -> str:
+    """Keep therapist speech separate from operational video analysis notes."""
+
+    marker = "[치료사 음성 기록 — S> 섹션 참고]"
+    if marker not in (text or ""):
+        return ""
+    tail = text.split(marker, 1)[1]
+    for stop in ("\n\n[영상 분석", "\n[영상 분석", "\n\n[Ray-Ban 영상"):
+        if stop in tail:
+            tail = tail.split(stop, 1)[0]
+    return tail.strip()
+
+
 def _looks_nonclinical_image(text: str, scene: str) -> bool:
     haystack = f"{scene}\n{text}".lower()
     return any(
@@ -1748,7 +2745,13 @@ def _create_merged_event(image_event: dict, audio_event: dict, patient_name: str
     owner_org_id, owner_provider_person_id = _resolve_merged_scope(image_event, audio_event)
     subject_person_id = _resolve_merged_subject_person_id(image_event, audio_event)
     physio_client_id, physio_session_id = _resolve_merged_physio_context(image_event, audio_event)
-    consent_id = _require_patient_consent("text", patient or "")
+    consent_id = _require_patient_consent(
+        "text",
+        patient or "",
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+        subject_person_id=subject_person_id,
+    )
 
     subjective = audio_text.strip() or "환자 주관적 호소 미입력"
     extraction_basis = "\n".join([subjective, pe_note])
@@ -1858,7 +2861,7 @@ def _process_event(
     physio_client_id: Optional[str] = None,
     physio_session_id: Optional[str] = None,
 ):
-    audio_store = os.getenv("AUDIO_STORE", "false").lower() == "true"
+    audio_store = AUDIO_STORE
     image_store = os.getenv("IMAGE_STORE", "false").lower() == "true"
     phi_redact = os.getenv("PHI_REDACT", "true").lower() == "true"
     soap_enabled = os.getenv("SOAP_ENABLED", "true").lower() == "true"
@@ -1883,7 +2886,13 @@ def _process_event(
     )
 
     event_id = str(uuid.uuid4())
-    consent_id = _require_patient_consent(event_type, patient_name)
+    consent_id = _require_patient_consent(
+        event_type,
+        patient_name,
+        owner_org_id=owner_org_id,
+        owner_provider_person_id=owner_provider_person_id,
+        subject_person_id=subject_person_id,
+    )
 
     if event_type == "audio":
         parsed_text = stt_whisper_local(audio_path)
@@ -1976,6 +2985,7 @@ def _process_event(
 
     soap_id = None
     soap = None
+    transcript_capture_events: list[dict] = []
     should_make_soap = intent == "note" or event_type in {"audio", "image", "video"}
     if soap_enabled and should_make_soap:
         _img_notes = image_notes if event_type == "image" else ""
@@ -2019,6 +3029,26 @@ def _process_event(
                 (str(uuid.uuid4()), event_id, "info", masking_audit),
             )
         visit_auto_attach = _auto_attach_event_to_active_visit(conn, event_id)
+        capture_text = parsed_text
+        if event_type == "video":
+            capture_text = _extract_video_transcript_capture_text(parsed_text)
+        if capture_text and event_type in {"audio", "text", "image", "video"}:
+            attached_session = (visit_auto_attach or {}).get("session") or {}
+            transcript_capture_events = _create_transcript_capture_events(
+                conn,
+                text=capture_text,
+                visit_session_id=attached_session.get("id"),
+                encounter_id=attached_session.get("encounter_id") or physio_session_id,
+                organization_id=attached_session.get("organization_id") or owner_org_id,
+                provider_person_id=attached_session.get("provider_person_id") or owner_provider_person_id,
+                provider_role=attached_session.get("provider_role"),
+                subject_person_id=attached_session.get("subject_person_id") or subject_person_id,
+                source_event_id=event_id,
+                start_ms=None,
+                end_ms=None,
+                capture_origin=_capture_origin_from_source(source),
+                derived_from=event_type,
+            )
         conn.commit()
 
     ack = {"note": "기록 완료", "question": "질문 접수 완료", "command": "명령 접수 완료"}[intent]
@@ -2056,6 +3086,7 @@ def _process_event(
             "physio_session_id": physio_session_id,
         },
         "visit_auto_attach": visit_auto_attach,
+        "capture_events": transcript_capture_events,
     }
 
 
@@ -2098,6 +3129,20 @@ def glass_demo_shortlink():
         params.append(f"api_key={BRIDGE_API_KEY}")
     params.append("candidate_id=enc-demo-a1f607c7")
     return RedirectResponse(url="/glass-app/?" + "&".join(params), status_code=302)
+
+
+@app.get("/g/hud-test")
+def glass_hud_test_shortlink():
+    """Open the non-PHI HUD fixture with a freshly scoped, short-lived token."""
+    token = build_hud_scope_token(
+        organization_id="t1",
+        provider_person_id="p1",
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    return RedirectResponse(
+        url="/glass-app/?" + urlencode({"hud_token": token}),
+        status_code=302,
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -2181,6 +3226,8 @@ def legacy_index():
   <div class='card'>
     <h3>라벨링 (MVP)</h3>
     <input id='labelEventId' type='text' placeholder='라벨링할 event_id' />
+    <input id='providerRole' type='text' value='physical_therapist' placeholder='provider_role (physical_therapist/pilates_instructor/personal_trainer)' />
+    <input id='actionType' type='text' value='intervention' placeholder='action_type (assessment/instruction/intervention/reassessment)' />
     <input id='sessionType' type='text' value='기립훈련' placeholder='session_type' />
     <input id='coreTask' type='text' value='경부 회전+중립 유지' placeholder='core_task' />
     <input id='assistLevel' type='text' value='mod' placeholder='assist_level (max/mod/min/CGA/ind)' />
@@ -2330,6 +3377,8 @@ async function saveLabel() {
   }
   const flagsRaw = (document.getElementById('flags').value || '').trim();
   const payload = {
+    provider_role: document.getElementById('providerRole').value || 'unspecified',
+    action_type: document.getElementById('actionType').value || 'observation',
     session_type: document.getElementById('sessionType').value || '',
     core_task: document.getElementById('coreTask').value || '',
     assist_level: document.getElementById('assistLevel').value || '',
@@ -2404,6 +3453,7 @@ def health():
             "file_downloads_enabled": ENABLE_FILE_DOWNLOADS,
             "allow_unmasked_image": ALLOW_UNMASKED_IMAGE,
             "patient_consent_required": REQUIRE_PATIENT_CONSENT,
+            "audio_store": AUDIO_STORE,
             "video_store": VIDEO_STORE,
             "pilot_capture_mode": PILOT_CAPTURE_MODE,
         },
@@ -2411,12 +3461,28 @@ def health():
     }
 
 
+def _consent_identity_from_payload(
+    request: Request,
+    payload: Union[ConsentPayload, ConsentLookupPayload],
+) -> tuple[str, str, str]:
+    org_id, provider_id = _scope_from_request(
+        request,
+        owner_org_id=payload.owner_org_id,
+        owner_provider_person_id=payload.owner_provider_person_id,
+    )
+    subject_id = (payload.subject_person_id or "").strip()
+    if not org_id or not provider_id or not subject_id:
+        _error(422, "CONSENT_IDENTITY_REQUIRED", "조직, 치료사, 환자 person ID가 필요합니다.")
+    return org_id, provider_id, subject_id
+
+
 @app.post("/consents")
-def record_consent(payload: ConsentPayload):
+def record_consent(payload: ConsentPayload, request: Request):
     patient_name = payload.patient_name.strip()
     scope = payload.scope.strip() or "capture_analysis_storage"
     if not patient_name:
         _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+    owner_org_id, owner_provider_person_id, subject_person_id = _consent_identity_from_payload(request, payload)
 
     consent_id = str(uuid.uuid4())
     consent_text = (payload.consent_text or DEFAULT_CONSENT_TEXT).strip()
@@ -2425,14 +3491,26 @@ def record_consent(payload: ConsentPayload):
     with _conn() as conn:
         conn.execute(
             """
-            INSERT INTO patient_consents (id, patient_name, scope, consent_text, granted_by)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO patient_consents (
+              id, patient_name, owner_org_id, owner_provider_person_id,
+              subject_person_id, scope, consent_text, granted_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (consent_id, patient_name, scope, consent_text, granted_by),
+            (
+                consent_id,
+                patient_name,
+                owner_org_id,
+                owner_provider_person_id,
+                subject_person_id,
+                scope,
+                consent_text,
+                granted_by,
+            ),
         )
         conn.execute(
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), None, "info", f"consent recorded patient={patient_name} scope={scope}"),
+            (str(uuid.uuid4()), None, "info", f"consent recorded scope={scope}"),
         )
         conn.commit()
 
@@ -2443,17 +3521,29 @@ def record_consent(payload: ConsentPayload):
             "patient_name": patient_name,
             "scope": scope,
             "granted_by": granted_by,
+            "owner_org_id": owner_org_id,
+            "owner_provider_person_id": owner_provider_person_id,
+            "subject_person_id": subject_person_id,
         },
     }
 
 
-@app.get("/consents/{patient_name}")
-def get_patient_consent(patient_name: str, scope: str = "capture_analysis_storage"):
-    name = patient_name.strip()
+@app.post("/consents/status")
+def get_patient_consent(payload: ConsentLookupPayload, request: Request):
+    name = payload.patient_name.strip()
+    scope = payload.scope.strip() or "capture_analysis_storage"
     if not name:
         _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+    owner_org_id, owner_provider_person_id, subject_person_id = _consent_identity_from_payload(request, payload)
     with _conn() as conn:
-        row = _latest_patient_consent(conn, name, scope)
+        row = _latest_patient_consent(
+            conn,
+            name,
+            scope,
+            owner_org_id=owner_org_id,
+            owner_provider_person_id=owner_provider_person_id,
+            subject_person_id=subject_person_id,
+        )
     if not row:
         return {"patient_name": name, "scope": scope, "active": False, "consent": None}
     return {
@@ -2471,28 +3561,53 @@ def get_patient_consent(patient_name: str, scope: str = "capture_analysis_storag
     }
 
 
-@app.delete("/consents/{patient_name}")
-def revoke_patient_consent(patient_name: str, scope: str = "capture_analysis_storage"):
-    name = patient_name.strip()
+@app.delete("/consents")
+def revoke_patient_consent(payload: ConsentLookupPayload, request: Request):
+    name = payload.patient_name.strip()
+    clean_scope = payload.scope.strip() or "capture_analysis_storage"
     if not name:
         _error(400, "INVALID_PATIENT_NAME", "patient_name은 비워둘 수 없습니다.")
+    owner_org_id, owner_provider_person_id, subject_person_id = _consent_identity_from_payload(request, payload)
 
     with _conn() as conn:
         cur = conn.execute(
             """
             UPDATE patient_consents
             SET revoked_at = CURRENT_TIMESTAMP
-            WHERE patient_name = ? AND scope = ? AND revoked_at IS NULL
+            WHERE patient_name = ? AND scope = ?
+              AND owner_org_id = ? AND owner_provider_person_id = ? AND subject_person_id = ?
+              AND revoked_at IS NULL
             """,
-            (name, scope.strip() or "capture_analysis_storage"),
+            (name, clean_scope, owner_org_id, owner_provider_person_id, subject_person_id),
         )
+        event_ids = [
+            row[0]
+            for row in conn.execute(
+                """
+                SELECT id FROM events
+                WHERE patient_name = ? AND owner_org_id = ?
+                  AND owner_provider_person_id = ? AND subject_person_id = ?
+                """,
+                (name, owner_org_id, owner_provider_person_id, subject_person_id),
+            ).fetchall()
+        ]
+        purged_raw_files = 0
+        if cur.rowcount and clean_scope == "capture_analysis_storage":
+            for event_id in event_ids:
+                purged_raw_files += _delete_raw_event_artifacts(event_id)
         conn.execute(
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
-            (str(uuid.uuid4()), None, "info", f"consent revoked patient={name} scope={scope} count={cur.rowcount}"),
+            (str(uuid.uuid4()), None, "info", f"consent revoked scope={clean_scope} count={cur.rowcount}"),
         )
         conn.commit()
 
-    return {"ok": True, "patient_name": name, "scope": scope, "revoked": cur.rowcount}
+    return {
+        "ok": True,
+        "patient_name": name,
+        "scope": clean_scope,
+        "revoked": cur.rowcount,
+        "purged_raw_files": purged_raw_files,
+    }
 
 
 @app.post("/ingest")
@@ -2577,16 +3692,36 @@ def _process_upload_job(
                 outer_chart = CHART_DIR / f"{event_id}_11.txt"
                 if inner_chart.exists() and not outer_chart.exists():
                     _shutil.copy(inner_chart, outer_chart)
+            if AUDIO_STORE and inner_id and saved_path.exists():
+                with _conn() as conn:
+                    transcript_row = conn.execute(
+                        "SELECT raw_text FROM events WHERE id = ?",
+                        (inner_id,),
+                    ).fetchone()
+                transcript_text = transcript_row[0] if transcript_row and transcript_row[0] else ""
+                _stage_raw_media_if_consent_active(
+                    saved_path,
+                    RawMediaStage(
+                        event_id=inner_id,
+                        kind="raw_audio",
+                        transcript_text=transcript_text,
+                        consent_id=str((result.get("policy") or {}).get("consent_id") or ""),
+                    ),
+                    owner_org_id=owner_org_id,
+                    owner_provider_person_id=owner_provider_person_id,
+                    subject_person_id=subject_person_id,
+                )
 
+            saved_path.unlink(missing_ok=True)
             _touch_async_result(event_id, {"status": "done", "result": _event_status_result(result)})
             took_ms = int((datetime.utcnow() - started).total_seconds() * 1000)
-            _audit_log(event_id, "info", f"upload processed attempt={i+1} took_ms={took_ms}")
+            _audit_log(inner_id or None, "info", f"upload processed attempt={i+1} took_ms={took_ms}")
             return
         except Exception as e:
             last_error = e
             code, msg, retryable = _normalize_error(e)
             logger.exception("upload job failed event_id=%s attempt=%s code=%s", event_id, i + 1, code)
-            _audit_log(event_id, "error", f"upload failed attempt={i+1} code={code} msg={msg}")
+            _audit_log(None, "error", f"upload failed outer_event_id={event_id} attempt={i+1} code={code} msg={msg}")
             if i == attempts - 1:
                 _touch_async_result(event_id, {
                     "status": "error",
@@ -2594,6 +3729,7 @@ def _process_upload_job(
                     "error_code": code,
                     "retryable": retryable,
                 })
+    saved_path.unlink(missing_ok=True)
 
 
 @app.post("/ingest-upload")
@@ -2614,20 +3750,20 @@ async def ingest_upload(
         _error(400, "INVALID_EVENT_TYPE", "ingest-upload only supports event_type=audio")
 
     ext = (Path(audio.filename or "").suffix or "").lower()
-    allowed_ext = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".webm"}
+    allowed_ext = {".wav"}
     content_type = (audio.content_type or "").lower()
+    allowed_content_types = {"audio/wav", "audio/x-wav"}
 
-    is_audio_type = content_type.startswith("audio/")
-    is_audio_ext = ext in allowed_ext
-
-    if not (is_audio_type or is_audio_ext):
-        _error(400, "INVALID_AUDIO_FILE", f"audio 파일만 업로드 가능합니다. 현재: content_type={content_type or 'unknown'}, ext={ext or 'none'}")
+    if ext not in allowed_ext or content_type not in allowed_content_types:
+        _error(400, "INVALID_AUDIO_FILE", "현재 캡처 경로는 WAV 오디오만 허용합니다.")
 
     safe_ext = ext if ext else ".bin"
     saved_path = UPLOAD_DIR / f"{uuid.uuid4()}{safe_ext}"
 
     content = await audio.read()
     _validate_upload_size(content, "audio")
+    if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
+        _error(400, "INVALID_AUDIO_FILE", "WAV 파일 서명이 올바르지 않습니다.")
     saved_path.write_bytes(content)
 
     event_id = str(uuid.uuid4())
@@ -2764,6 +3900,257 @@ def write_event_to_moai(
     return {"status": "done", "result": result}
 
 
+@app.post("/hud/candidates")
+def create_hud_candidate(payload: HudCandidatePayload, request: Request):
+    org_id, provider_from_scope = _scope_from_request(
+        request,
+        owner_org_id=payload.organization_id,
+        owner_provider_person_id=payload.provider_person_id,
+    )
+    encounter_id = payload.encounter_id.strip()
+    subject_person_id = (payload.subject_person_id or "").strip()
+    provider_person_id = (payload.provider_person_id or provider_from_scope or "").strip()
+    organization_id = (payload.organization_id or org_id or "").strip()
+    event_type = payload.event_type.strip() or "test_result"
+    if payload.confidence is not None and not (0 <= payload.confidence <= 1):
+        _error(422, "INVALID_HUD_CONFIDENCE", "confidence는 0과 1 사이여야 합니다.")
+    missing = [
+        name
+        for name, value in [
+            ("encounter_id", encounter_id),
+            ("organization_id", organization_id),
+            ("subject_person_id", subject_person_id),
+            ("provider_person_id", provider_person_id),
+            ("event_type", event_type),
+        ]
+        if not value
+    ]
+    if missing:
+        _error(422, "HUD_CANDIDATE_CONTEXT_REQUIRED", f"missing required fields: {', '.join(missing)}")
+
+    candidate_id = str(uuid.uuid4())
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO hud_candidates (
+              id, encounter_id, organization_id, subject_person_id, provider_person_id,
+              event_type, test, side, value, symptom, source, status, review_status,
+              confidence, source_text, payload_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'auto_extracted', ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                candidate_id,
+                encounter_id,
+                organization_id,
+                subject_person_id,
+                provider_person_id,
+                event_type,
+                payload.test.strip(),
+                payload.side.strip().lower(),
+                payload.value.strip(),
+                payload.symptom.strip(),
+                payload.source.strip() or "rayban_meta_display",
+                payload.confidence,
+                payload.source_text.strip(),
+                json.dumps(payload.payload, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+        candidate = _get_hud_candidate(conn, candidate_id)
+    _set_active_hud_candidate(candidate)
+    _audit_log(None, "info", f"HUD candidate created id={candidate_id} encounter={encounter_id}")
+    return {"status": "done", "candidate": candidate, "plan": {"summary": _hud_candidate_plan(candidate)["summary"]}}
+
+
+@app.post("/hud/candidates/extract")
+def extract_hud_candidate(payload: HudCandidateExtractPayload, request: Request):
+    org_id, provider_from_scope = _scope_from_request(
+        request,
+        owner_org_id=payload.organization_id,
+        owner_provider_person_id=payload.provider_person_id,
+    )
+    organization_id = (payload.organization_id or org_id or "").strip()
+    provider_person_id = (payload.provider_person_id or provider_from_scope or "").strip()
+    subject_person_id = (payload.subject_person_id or "").strip()
+    encounter_id = payload.encounter_id.strip()
+    if payload.confidence is not None and not (0 <= payload.confidence <= 1):
+        _error(422, "INVALID_HUD_CONFIDENCE", "confidence는 0과 1 사이여야 합니다.")
+    extracted = _extract_hud_candidate_from_transcript(payload.text)
+    if not extracted:
+        return {
+            "status": "no_candidate",
+            "reason": "unsupported_transcript",
+            "source_text": _short_lens_text(payload.text, limit=120),
+        }
+    candidate_preview = {
+        **extracted,
+        "encounter_id": encounter_id,
+        "organization_id": organization_id,
+        "subject_person_id": subject_person_id,
+        "provider_person_id": provider_person_id,
+        "source": payload.source.strip() or "stt_transcript",
+        "confidence": payload.confidence,
+        "status": "candidate",
+        "review_status": "auto_extracted",
+    }
+    if not payload.create_candidate:
+        return {"status": "preview", "candidate": candidate_preview}
+    missing = [
+        name
+        for name, value in [
+            ("encounter_id", encounter_id),
+            ("organization_id", organization_id),
+            ("subject_person_id", subject_person_id),
+            ("provider_person_id", provider_person_id),
+        ]
+        if not value
+    ]
+    if missing:
+        _error(422, "HUD_CANDIDATE_CONTEXT_REQUIRED", f"missing required fields: {', '.join(missing)}")
+
+    candidate_id = str(uuid.uuid4())
+    with _conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO hud_candidates (
+              id, encounter_id, organization_id, subject_person_id, provider_person_id,
+              event_type, test, side, value, symptom, source, status, review_status,
+              confidence, source_text, payload_json, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'auto_extracted', ?, ?, ?, CURRENT_TIMESTAMP)
+            """,
+            (
+                candidate_id,
+                encounter_id,
+                organization_id,
+                subject_person_id,
+                provider_person_id,
+                candidate_preview["event_type"],
+                candidate_preview["test"],
+                candidate_preview["side"],
+                candidate_preview["value"],
+                candidate_preview["symptom"],
+                candidate_preview["source"],
+                payload.confidence,
+                candidate_preview["source_text"],
+                json.dumps(
+                    {
+                        "extractor": "rayban_pt_rule_parser_v0",
+                        "source_text": candidate_preview["source_text"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        conn.commit()
+        candidate = _get_hud_candidate(conn, candidate_id)
+    _set_active_hud_candidate(candidate)
+    _audit_log(None, "info", f"HUD candidate extracted id={candidate_id} encounter={encounter_id}")
+    return {"status": "done", "candidate": candidate, "plan": {"summary": _hud_candidate_plan(candidate)["summary"]}}
+
+
+@app.get("/hud/candidates")
+def list_hud_candidates(encounter_id: str = "", status: str = "all", limit: int = 20):
+    n = max(1, min(limit, 100))
+    clauses: list[str] = []
+    params: list = []
+    if encounter_id.strip():
+        clauses.append("encounter_id = ?")
+        params.append(encounter_id.strip())
+    if status.strip() and status != "all":
+        clauses.append("status = ?")
+        params.append(status.strip())
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(n)
+    with _conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT id, encounter_id, organization_id, subject_person_id, provider_person_id,
+                   event_type, test, side, value, symptom, source, status, review_status,
+                   confidence, source_text, payload_json, reviewer_person_id,
+                   discarded_reason, reviewed_at, created_at, updated_at
+            FROM hud_candidates
+            {where}
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    return {"status": "done", "count": len(rows), "items": [_hud_candidate_from_row(row) for row in rows]}
+
+
+@app.get("/hud/candidates/{candidate_id}")
+def get_hud_candidate(candidate_id: str):
+    with _conn() as conn:
+        candidate = _get_hud_candidate(conn, candidate_id)
+    return {"status": "done", "candidate": candidate}
+
+
+@app.post("/hud/candidates/{candidate_id}/approve")
+def approve_hud_candidate(candidate_id: str, payload: HudCandidateDecisionPayload):
+    with _conn() as conn:
+        candidate = _get_hud_candidate(conn, candidate_id)
+        if candidate["status"] == "discarded":
+            _error(409, "HUD_CANDIDATE_DISCARDED", "discarded candidate cannot be approved")
+        reviewer = (payload.reviewer_person_id or candidate.get("provider_person_id") or "").strip()
+        conn.execute(
+            """
+            UPDATE hud_candidates
+            SET status='confirmed_by_provider',
+                review_status='clinician_accepted',
+                reviewer_person_id=?,
+                reviewed_at=CURRENT_TIMESTAMP,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (reviewer, candidate_id),
+        )
+        conn.commit()
+        candidate = _get_hud_candidate(conn, candidate_id)
+    _set_active_hud_candidate(None)
+    _audit_log(None, "info", f"HUD candidate approved id={candidate_id}")
+    plan = _hud_candidate_plan(candidate)
+    return {"status": "done", "candidate": candidate, "plan": plan}
+
+
+@app.post("/hud/candidates/{candidate_id}/discard")
+def discard_hud_candidate(candidate_id: str, payload: HudCandidateDecisionPayload):
+    with _conn() as conn:
+        candidate = _get_hud_candidate(conn, candidate_id)
+        if candidate["status"] == "confirmed_by_provider":
+            _error(409, "HUD_CANDIDATE_APPROVED", "approved candidate cannot be discarded")
+        reviewer = (payload.reviewer_person_id or candidate.get("provider_person_id") or "").strip()
+        conn.execute(
+            """
+            UPDATE hud_candidates
+            SET status='discarded',
+                review_status='rejected',
+                reviewer_person_id=?,
+                discarded_reason=?,
+                reviewed_at=CURRENT_TIMESTAMP,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (reviewer, (payload.reason or "").strip(), candidate_id),
+        )
+        conn.commit()
+        candidate = _get_hud_candidate(conn, candidate_id)
+    _set_active_hud_candidate(None)
+    _audit_log(None, "info", f"HUD candidate discarded id={candidate_id}")
+    plan = _hud_candidate_plan(candidate)
+    return {"status": "done", "candidate": candidate, "plan": plan}
+
+
+@app.get("/hud/candidates/{candidate_id}/moai-write-plan")
+def get_hud_candidate_moai_write_plan(candidate_id: str):
+    with _conn() as conn:
+        candidate = _get_hud_candidate(conn, candidate_id)
+    plan = _hud_candidate_plan(candidate)
+    _audit_log(None, "info", f"HUD candidate moai write plan viewed id={candidate_id}")
+    return {"status": "done", "result": plan}
+
+
 @app.get("/moai-sync/jobs")
 def get_moai_sync_jobs(status: str = "pending", limit: int = 20):
     clean_status = (status or "").strip().lower()
@@ -2810,26 +4197,46 @@ def get_event_pilot_readiness(event_id: str, resolve_identity: bool = True):
 def _delete_event_artifacts(event_id: str) -> list[str]:
     deleted: list[str] = []
     candidates = [CHART_DIR / f"{event_id}_11.txt"]
-    candidates.extend(MASKED_DIR.glob(f"{event_id}*"))
+    candidates.extend(
+        path for path in MASKED_DIR.iterdir()
+        if path.name.startswith(f"{event_id}_")
+    )
+    candidates.extend(
+        path for path in RAW_MEDIA_DIR.iterdir()
+        if path.name.startswith(f"{event_id}_")
+    )
     for path in candidates:
         try:
             if path.exists() and path.is_file():
                 path.unlink()
                 deleted.append(path.name)
         except Exception as e:
-            logger.warning("artifact delete failed event_id=%s path=%s err=%s", event_id, path, e)
+            logger.warning("artifact delete failed event_id=%s err=%s", event_id, e)
+    return deleted
+
+
+def _delete_raw_event_artifacts(event_id: str) -> int:
+    deleted = 0
+    failures: list[str] = []
+    for artifact in list_raw_media_artifacts(RAW_MEDIA_DIR, event_id):
+        try:
+            if delete_raw_media(RAW_MEDIA_DIR, artifact["filename"]):
+                deleted += 1
+        except OSError as exc:
+            failures.append(str(exc))
+    if failures:
+        raise RuntimeError("staged raw media purge failed")
     return deleted
 
 
 @app.delete("/events/{event_id}")
 def delete_event(event_id: str):
-    deleted_files = _delete_event_artifacts(event_id)
     with _conn() as conn:
         ev = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
-        if not ev and not deleted_files:
+        if not ev:
             raise HTTPException(status_code=404, detail="event not found")
-        if ev:
-            conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        deleted_files = _delete_event_artifacts(event_id)
+        conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
         conn.execute(
             "INSERT INTO audit_logs (id, event_id, level, message) VALUES (?, ?, ?, ?)",
             (str(uuid.uuid4()), None, "info", f"event deleted id={event_id} files={len(deleted_files)}"),
@@ -3060,7 +4467,16 @@ def _process_video_job(
             except Exception:
                 frame_notes.append(f"t+{i}s: 분석 오류")
 
-        # ── 5. 통합 텍스트 ──────────────────────────────────────────
+        # ── 5. MediaPipe Pose 측정 (저장하지 않는 로컬 evidence) ─────
+        pose_analysis = analyze_pose_frames(
+            frames,
+            frame_interval_ms=1_000,
+            duration_sec=max(1.0, len(frames)),
+        )
+        pose_summary = pose_analysis.get("summary")
+        pose_capture_candidates = pose_analysis.get("candidates") or []
+
+        # ── 6. 통합 텍스트 ──────────────────────────────────────────
         parts = []
         if patient_name:
             parts.append("[환자] " + patient_name)
@@ -3080,7 +4496,7 @@ def _process_video_job(
 
         combined = (chr(10) + chr(10)).join(parts)
 
-        # ── 6. SOAP 차트 생성 ────────────────────────────────────────
+        # ── 7. SOAP 차트 생성 ────────────────────────────────────────
         result = _process_event(
             source=source,
             event_type="video",
@@ -3094,6 +4510,29 @@ def _process_video_job(
         )
         inner_id = result.get("event_id", "")
 
+        pose_capture_events: list[dict] = []
+        if inner_id and pose_capture_candidates:
+            attached_session = (result.get("visit_auto_attach") or {}).get("session") or {}
+            with _conn() as pose_conn:
+                pose_capture_events = _create_pose_capture_events(
+                    pose_conn,
+                    candidates=pose_capture_candidates,
+                    visit_session_id=attached_session.get("id"),
+                    encounter_id=attached_session.get("encounter_id") or physio_session_id,
+                    organization_id=attached_session.get("organization_id") or owner_org_id,
+                    provider_person_id=attached_session.get("provider_person_id") or owner_provider_person_id,
+                    provider_role=attached_session.get("provider_role"),
+                    subject_person_id=attached_session.get("subject_person_id") or subject_person_id,
+                    source_event_id=inner_id,
+                    source_media_id=event_id,
+                    start_ms=0,
+                    end_ms=max(1_000, len(frames) * 1_000) if frames else None,
+                    capture_origin=_capture_origin_from_source(source),
+                )
+                pose_conn.commit()
+        result["pose_summary"] = pose_summary
+        result["pose_capture_events"] = pose_capture_events
+
         # outer_event_id 로도 차트 조회 가능하도록 복사
         if inner_id and inner_id != event_id:
             inner_chart = CHART_DIR / f"{inner_id}_11.txt"
@@ -3104,6 +4543,18 @@ def _process_video_job(
                 inner_masked = MASKED_DIR / outer_masked.name.replace(event_id, inner_id, 1)
                 if not inner_masked.exists():
                     _shutil.copy(outer_masked, inner_masked)
+        if VIDEO_STORE and inner_id and saved_path.exists():
+            _stage_raw_media_if_consent_active(
+                saved_path,
+                RawMediaStage(
+                    event_id=inner_id,
+                    kind="raw_video",
+                    consent_id=str((result.get("policy") or {}).get("consent_id") or ""),
+                ),
+                owner_org_id=owner_org_id,
+                owner_provider_person_id=owner_provider_person_id,
+                subject_person_id=subject_person_id,
+            )
 
         # iOS EventStatusResponse 구조에 맞게 래핑
         with _conn() as _c:
@@ -3132,12 +4583,12 @@ def _process_video_job(
                 "soap": result.get("soap"),
             },
         })
-        _audit_log(event_id, "info", "video processed")
+        _audit_log(inner_id or None, "info", "video processed")
 
     except Exception as e:
         code, msg, retryable = _normalize_error(e)
         logger.exception("video job failed event_id=%s code=%s", event_id, code)
-        _audit_log(event_id, "error", f"video failed code={code} msg={msg}")
+        _audit_log(None, "error", f"video failed outer_event_id={event_id} code={code} msg={msg}")
         _touch_async_result(event_id, {
             "status": "error",
             "error": msg,
@@ -3146,8 +4597,7 @@ def _process_video_job(
         })
     finally:
         _shutil.rmtree(tmp_dir, ignore_errors=True)
-        if not VIDEO_STORE:
-            saved_path.unlink(missing_ok=True)
+        saved_path.unlink(missing_ok=True)
 
 
 @app.post("/ingest-video")
@@ -3164,20 +4614,20 @@ async def ingest_video(
     video: UploadFile = File(...),
 ):
     ext = (Path(video.filename or "").suffix or "").lower()
-    allowed_ext = {".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+    allowed_ext = {".mp4", ".mov"}
     content_type = (video.content_type or "").lower()
+    allowed_content_types = {"video/mp4", "video/quicktime"}
 
-    is_video_type = content_type.startswith("video/")
-    is_video_ext = ext in allowed_ext
-
-    if not (is_video_type or is_video_ext):
-        _error(400, "INVALID_VIDEO_FILE", f"영상 파일만 업로드 가능합니다. content_type={content_type or 'unknown'}, ext={ext or 'none'}")
+    if ext not in allowed_ext or content_type not in allowed_content_types:
+        _error(400, "INVALID_VIDEO_FILE", "현재 캡처 경로는 MP4 또는 QuickTime 영상만 허용합니다.")
 
     safe_ext = ext if ext else ".mp4"
     saved_path = UPLOAD_DIR / f"{uuid.uuid4()}{safe_ext}"
 
     content = await video.read()
     _validate_upload_size(content, "video")
+    if len(content) < 12 or content[4:8] != b"ftyp":
+        _error(400, "INVALID_VIDEO_FILE", "영상 파일 서명이 올바르지 않습니다.")
     saved_path.write_bytes(content)
 
     event_id = str(uuid.uuid4())
@@ -3436,6 +4886,48 @@ def get_masked_file(filename: str):
     return FileResponse(str(file_path), media_type="image/jpeg", filename=safe_name)
 
 
+@app.get("/raw-media/{filename}")
+def get_raw_media(filename: str, request: Request):
+    file_path, event_id = _authorize_raw_media_request(filename, request)
+    artifacts = list_raw_media_artifacts(RAW_MEDIA_DIR, event_id)
+    content_type = next(
+        (item["content_type"] for item in artifacts if item["filename"] == file_path.name),
+        "application/octet-stream",
+    )
+    _audit_log(event_id, "info", "raw media accessed for scoped import")
+    return FileResponse(str(file_path), media_type=content_type, filename=file_path.name)
+
+
+def _authorize_raw_media_request(filename: str, request: Request) -> tuple[Path, str]:
+    file_path = resolve_raw_media(RAW_MEDIA_DIR, filename)
+    if file_path is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    event_id = file_path.stem.rsplit("_", 1)[0]
+    requested_org_id = request.headers.get("x-glasspt-org-id", "").strip()
+    requested_provider_id = request.headers.get("x-glasspt-provider-person-id", "").strip()
+    if not requested_org_id or not requested_provider_id:
+        raise HTTPException(status_code=403, detail="scoped artifact access headers are required")
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT owner_org_id, owner_provider_person_id FROM events WHERE id = ?",
+            (event_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="event not found")
+    if row[0] != requested_org_id or row[1] != requested_provider_id:
+        raise HTTPException(status_code=403, detail="artifact scope mismatch")
+    return file_path, event_id
+
+
+@app.delete("/raw-media/{filename}")
+def consume_raw_media(filename: str, request: Request):
+    _, event_id = _authorize_raw_media_request(filename, request)
+    if not delete_raw_media(RAW_MEDIA_DIR, filename):
+        raise HTTPException(status_code=404, detail="file not found")
+    _audit_log(event_id, "info", "raw media consumed after durable import")
+    return {"ok": True, "filename": filename}
+
+
 @app.get("/recent-events")
 def recent_events(limit: int = 10):
     n = max(1, min(limit, 50))
@@ -3597,14 +5089,16 @@ def upsert_label(event_id: str, payload: RehabLabelPayload):
         conn.execute(
             """
             INSERT INTO rehab_labels (
-              event_id, session_type, core_task, custom_task, body_position,
+              event_id, provider_role, action_type, session_type, core_task, custom_task, body_position,
               assist_level, performance, review_status, reviewer_person_id,
               usable_for_training, label_confidence, repetition_count,
               hold_duration_seconds, tolerance, fatigue_level, compensations,
               caregiver_present, flags, notes, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(event_id) DO UPDATE SET
+              provider_role=excluded.provider_role,
+              action_type=excluded.action_type,
               session_type=excluded.session_type,
               core_task=excluded.core_task,
               custom_task=excluded.custom_task,
@@ -3627,6 +5121,8 @@ def upsert_label(event_id: str, payload: RehabLabelPayload):
             """,
             (
                 event_id,
+                payload.provider_role.strip() or "unspecified",
+                payload.action_type.strip() or "observation",
                 payload.session_type,
                 payload.core_task,
                 payload.custom_task.strip(),
@@ -3701,10 +5197,31 @@ _glass_state: dict = {
     "session_count": 0,
     "event_role_counts": {},
     "capture_role": "observation",
+    "active_hud_candidate": None,
     "last_insight": None,
     "updated_at": None,
 }
-_glass_pending_command: Optional[dict] = None
+# Kept separate from the authenticated HUD state so the public Web App test
+# can never disclose or modify a live clinician session.
+_hud_test_state: dict = {
+    "visit_session_id": None,
+    "patient": None,
+    "mode": "standby",
+    "message": "HUD 테스트 연결 대기",
+    "is_recording": False,
+    "recording_start": None,
+    "session_count": 0,
+    "event_role_counts": {},
+    "capture_role": "observation",
+    "active_hud_candidate": None,
+    "phase": "pre_review",
+    "readiness": "ready",
+    "error_state": None,
+    "last_insight": None,
+    "updated_at": None,
+}
+_glass_pending_command: list[dict] = []
+_glass_pending_device_command: list[dict] = []
 
 
 class GlassStateUpdate(BaseModel):
@@ -3716,6 +5233,7 @@ class GlassStateUpdate(BaseModel):
     session_count: Optional[int] = None
     event_role_counts: Optional[dict] = None
     capture_role: Optional[str] = None
+    active_hud_candidate: Optional[dict] = None
     visit_session_id: Optional[str] = None
     phase: Optional[str] = None
     readiness: Optional[str] = None
@@ -3752,6 +5270,7 @@ class AgentCueDryRunRequest(BaseModel):
 class VisitSessionStartRequest(BaseModel):
     organization_id: str
     provider_person_id: str
+    provider_role: str = "unspecified"
     subject_person_id: str
     encounter_id: Optional[str] = None
     patient_alias: str = "Patient"
@@ -3791,6 +5310,24 @@ def _apply_visit_session_hud(session: dict, insight: Optional[dict] = None) -> d
         _glass_state.update(hud)
         _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
     return hud
+
+
+def _apply_hud_test_visit_state(session: dict) -> dict:
+    """Store only the synthetic fixture's state for the public device check."""
+    hud = visit_hud_state(session)
+    hud.update(
+        {
+            "message": "HUD 테스트 방문 진행 중",
+            "is_recording": False,
+            "recording_start": None,
+            "last_insight": None,
+            "active_hud_candidate": None,
+        }
+    )
+    with _glass_lock:
+        _hud_test_state.update(hud)
+        _hud_test_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        return dict(_hud_test_state)
 
 
 def _build_visit_session_write_plan(session: dict) -> dict:
@@ -3833,7 +5370,7 @@ def _build_visit_session_write_plan(session: dict) -> dict:
         bundle["notes"][0]["payload"]["ai_draft_snapshot"] = {
             "source_system": "rayban_pt",
             "source_visit_session_id": session["id"],
-            "linked_event_ids": session.get("event_ids") or [],
+            "linked_event_ids": draft.get("evidence_ids") or session.get("event_ids") or [],
         }
     return build_moai_write_plan(bundle)
 
@@ -3929,22 +5466,22 @@ def _trim_event_text(value: Optional[str], limit: int = 140) -> str:
 
 def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
     event_ids = [str(event_id) for event_id in session.get("event_ids") or [] if str(event_id).strip()]
-    if not event_ids:
-        return []
     refs_by_id = {
         str(ref.get("event_id")): ref
         for ref in session.get("event_refs") or []
         if str(ref.get("event_id") or "").strip()
     }
-    placeholders = ",".join("?" for _ in event_ids)
-    rows = conn.execute(
-        f"""
-        SELECT id, event_type, raw_text, intent, created_at
-        FROM events
-        WHERE id IN ({placeholders})
-        """,
-        event_ids,
-    ).fetchall()
+    rows = []
+    if event_ids:
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = conn.execute(
+            f"""
+            SELECT id, event_type, raw_text, intent, created_at
+            FROM events
+            WHERE id IN ({placeholders})
+            """,
+            event_ids,
+        ).fetchall()
     by_id = {
         row[0]: {
             "id": row[0],
@@ -3954,10 +5491,106 @@ def _visit_linked_events(conn: sqlite3.Connection, session: dict) -> list[dict]:
             "created_at": row[4],
             "role": refs_by_id.get(row[0], {}).get("role"),
             "phase": refs_by_id.get(row[0], {}).get("phase"),
+            "payload": {},
+            "candidate_type": "",
         }
         for row in rows
     }
-    return [by_id[event_id] for event_id in event_ids if event_id in by_id]
+
+    capture_rows = conn.execute(
+        f"{_capture_event_select()} WHERE visit_session_id = ? ORDER BY created_at ASC",
+        (session["id"],),
+    ).fetchall()
+    capture_events: list[dict] = []
+    for row in capture_rows:
+        event = _capture_event_from_row(row)
+        if event["id"] in by_id:
+            continue
+        payload = event.get("payload") or {}
+        action_type = str(payload.get("action_type") or "observation")
+        role = action_type if action_type in {"assessment", "intervention", "home_program", "observation"} else "observation"
+        capture_events.append(
+            {
+                "id": event["id"],
+                "event_type": event["event_type"],
+                "candidate_type": event["candidate_type"],
+                "raw_text": _capture_event_note_text(event),
+                "intent": action_type,
+                "created_at": event["created_at"],
+                "role": refs_by_id.get(event["id"], {}).get("role") or role,
+                "phase": refs_by_id.get(event["id"], {}).get("phase") or session.get("phase"),
+                "payload": payload,
+                "source_type": event["source_type"],
+            }
+        )
+
+    return [by_id[event_id] for event_id in event_ids if event_id in by_id] + capture_events
+
+
+def _capture_event_note_text(event: dict) -> str:
+    """Render a compact, clinician-reviewable line from one capture candidate."""
+
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    nested = payload.get("semantic") if isinstance(payload.get("semantic"), dict) else {}
+
+    def read(key: str):
+        return nested.get(key) if key in nested else payload.get(key)
+
+    value_labels = {
+        "assessment_type": "평가",
+        "assessment_name": "평가 도구",
+        "intervention_type": "중재",
+        "instruction_type": "교육",
+        "instruction_detail": "지시 상세",
+        "activity_name": "동작명",
+        "core_task": "과제",
+        "body_position": "체위",
+        "assist_level": "보조",
+        "performance_level": "수행",
+        "tolerance": "내약성",
+        "fatigue_level": "피로",
+        "repetition_count": "반복",
+        "set_count": "세트",
+        "hold_duration_seconds": "유지(초)",
+        "rest_duration_seconds": "휴식(초)",
+        "pain_score": "통증 점수",
+        "rpe_score": "RPE",
+        "equipment": "도구",
+        "compensations": "보상",
+        "safety_flags": "안전",
+    }
+    details: list[str] = []
+    for key in (
+        "assessment_type",
+        "assessment_name",
+        "intervention_type",
+        "instruction_type",
+        "instruction_detail",
+        "activity_name",
+        "core_task",
+        "body_position",
+        "assist_level",
+        "performance_level",
+        "tolerance",
+        "fatigue_level",
+        "repetition_count",
+        "hold_duration_seconds",
+        "compensations",
+        "safety_flags",
+    ):
+        value = read(key)
+        if value in (None, "", []):
+            continue
+        if isinstance(value, list):
+            rendered = ", ".join(str(item).replace("_", " ") for item in value)
+        else:
+            rendered = str(value).replace("_", " ")
+        details.append(f"{value_labels[key]}={rendered}")
+
+    base = str(payload.get("source_text") or payload.get("label") or event.get("candidate_type") or "capture event").strip()
+    if details:
+        return _trim_event_text(f"{base} ({'; '.join(details)})", limit=220)
+    return _trim_event_text(base, limit=220)
 
 
 def _linked_event_bucket(event: dict) -> str:
@@ -4009,6 +5642,7 @@ def _build_linked_event_progress_note(session: dict, linked_events: list[dict]) 
             else "AI 추출 결과는 clinician review 전 draft 상태."
         ),
         "plan": "\n".join(plan_lines),
+        "evidence_ids": [str(event["id"]) for event in linked_events if str(event.get("id") or "").strip()],
     }
 
 
@@ -4086,6 +5720,27 @@ GLASS_COMMANDS = {
     "primary_action",
     "select_patient",
     "show_recommendations",
+    "approve_candidate",
+    "discard_candidate",
+    "capture_photo",
+    "start_audio",
+    "stop_audio",
+}
+
+# Commands that must reach the paired iPhone. The Web App can request them,
+# but it cannot perform camera or microphone work itself.
+GLASS_DEVICE_COMMANDS = {
+    "toggle_recording",
+    "start_recording",
+    "stop_recording",
+    "start_live",
+    "capture_photo",
+    "start_audio",
+    "stop_audio",
+    "open_capture_history",
+    "select_patient",
+    "show_recommendations",
+    "primary_action",
 }
 NEURAL_BAND_GESTURE_MAP = {
     "toggle_recording": "toggle_recording",
@@ -4094,6 +5749,15 @@ NEURAL_BAND_GESTURE_MAP = {
     "double_tap": "toggle_recording",
     "press": "toggle_recording",
     "squeeze": "toggle_recording",
+    "photo": "capture_photo",
+    "capture_photo": "capture_photo",
+    "camera": "capture_photo",
+    "snapshot": "capture_photo",
+    "voice": "start_audio",
+    "audio": "start_audio",
+    "stt": "start_audio",
+    "start_audio": "start_audio",
+    "stop_audio": "stop_audio",
     "long_press": "end_visit_session",
     "hold": "end_visit_session",
     "pinch_hold": "end_visit_session",
@@ -4108,6 +5772,14 @@ NEURAL_BAND_GESTURE_MAP = {
     "select": "select_focused",
     "enter": "select_focused",
     "confirm": "select_focused",
+    "pinch": "approve_candidate",
+    "approve": "approve_candidate",
+    "accept": "approve_candidate",
+    "yes": "approve_candidate",
+    "reject": "discard_candidate",
+    "discard": "discard_candidate",
+    "delete": "discard_candidate",
+    "no": "discard_candidate",
     "open": "start_visit",
     "start": "start_visit",
     "start_visit": "start_visit",
@@ -4349,6 +6021,8 @@ def _decode_hud_scope_token(raw_token: str) -> dict:
 
 
 def _hud_scope_from_request(request: Optional[Request] = None) -> dict:
+    if request is not None and _is_hud_test_request(request):
+        return dict(HUD_TEST_SCOPE)
     raw_token = ""
     if request is not None:
         raw_token = request.headers.get("x-hud-token", "") or request.query_params.get("hud_token", "")
@@ -4364,6 +6038,41 @@ def _hud_scope_from_request(request: Optional[Request] = None) -> dict:
     if organization_id:
         scope["organization_id"] = organization_id
     return scope
+
+
+@app.post("/glass/hud-token")
+def issue_hud_scope_token(payload: HudTokenIssuePayload):
+    organization_id = payload.organization_id.strip()
+    provider_person_id = payload.provider_person_id.strip()
+    if not organization_id or not provider_person_id:
+        _error(422, "HUD_TOKEN_SCOPE_REQUIRED", "organization_id and provider_person_id are required")
+    minutes = max(5, min(int(payload.expires_in_minutes or 720), 7 * 24 * 60))
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    token = build_hud_scope_token(
+        organization_id=organization_id,
+        provider_person_id=provider_person_id,
+        expires_at=expires_at,
+    )
+    app_path = payload.app_path.strip() or "/glass-app/"
+    if not app_path.startswith("/"):
+        app_path = "/" + app_path
+    bridge_url = (payload.bridge_url or "").strip().rstrip("/")
+    token_query = urlencode({"hud_token": token})
+    glass_app_url = f"{app_path}?{token_query}"
+    if bridge_url:
+        glass_app_url = f"{bridge_url}{glass_app_url}"
+    return {
+        "status": "done",
+        "hud_token": token,
+        "token_type": "hud_scope",
+        "scope": {
+            "organization_id": organization_id,
+            "provider_person_id": provider_person_id,
+        },
+        "expires_at": expires_at.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "expires_in_minutes": minutes,
+        "glass_app_url": glass_app_url,
+    }
 
 
 def _candidate_matches_hud_scope(candidate: dict, scope: Optional[dict]) -> bool:
@@ -4802,13 +6511,26 @@ def _generate_command_cue_if_needed(command: str, source: str) -> Optional[dict]
 
 
 VISIT_PHASE_ORDER = ["pre_review", "assessment", "intervention", "home_program", "summary"]
-SERVER_EXECUTED_GLASS_COMMANDS = {"start_visit", "toggle_recording", "next_phase", "next_role", "end_visit_session"}
+SERVER_EXECUTED_GLASS_COMMANDS = {
+    "start_visit",
+    "toggle_recording",
+    "next_phase",
+    "next_role",
+    "end_visit_session",
+    "approve_candidate",
+    "discard_candidate",
+}
 
 
 def _active_visit_session_id_from_hud() -> Optional[str]:
     with _glass_lock:
         session_id = str(_glass_state.get("visit_session_id") or "").strip()
     return session_id or None
+
+
+def _glass_state_snapshot() -> dict:
+    with _glass_lock:
+        return dict(_glass_state)
 
 
 def _next_visit_phase(current: str) -> str:
@@ -4827,6 +6549,85 @@ def _execute_visit_hud_command(
 ) -> Optional[dict]:
     if command not in SERVER_EXECUTED_GLASS_COMMANDS:
         return None
+
+    if command in {"approve_candidate", "discard_candidate"}:
+        with _conn() as conn:
+            candidate = _active_hud_candidate(conn, status="candidate")
+            if not candidate:
+                with _glass_lock:
+                    _glass_state.update(
+                        {
+                            "mode": "error",
+                            "message": "승인할 후보 없음",
+                            "readiness": "error",
+                            "error_state": "NO_ACTIVE_HUD_CANDIDATE",
+                            "updated_at": datetime.utcnow().isoformat() + "Z",
+                        }
+                    )
+                _audit_log(None, "warning", f"HUD candidate command blocked no candidate command={command} source={source}")
+                return {
+                    "ok": False,
+                    "executed": False,
+                    "command": command,
+                    "error_code": "NO_ACTIVE_HUD_CANDIDATE",
+                    "message": "active HUD candidate is required",
+                }
+            if command == "approve_candidate":
+                reviewer = str(candidate.get("provider_person_id") or "").strip()
+                conn.execute(
+                    """
+                    UPDATE hud_candidates
+                    SET status='confirmed_by_provider',
+                        review_status='clinician_accepted',
+                        reviewer_person_id=?,
+                        reviewed_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (reviewer, candidate["id"]),
+                )
+            else:
+                reviewer = str(candidate.get("provider_person_id") or "").strip()
+                conn.execute(
+                    """
+                    UPDATE hud_candidates
+                    SET status='discarded',
+                        review_status='rejected',
+                        reviewer_person_id=?,
+                        discarded_reason=?,
+                        reviewed_at=CURRENT_TIMESTAMP,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (reviewer, f"discarded via {source} command", candidate["id"]),
+                )
+            conn.commit()
+            updated = _get_hud_candidate(conn, candidate["id"])
+            plan = _hud_candidate_plan(updated)
+            next_candidate = _latest_hud_candidate_for_encounter(conn, updated.get("encounter_id") or "", status="candidate")
+        _set_active_hud_candidate(next_candidate)
+        message = "후보 승인됨" if command == "approve_candidate" else "후보 폐기됨"
+        with _glass_lock:
+            _glass_state.update(
+                {
+                    "mode": "candidate_approval" if next_candidate else "ready",
+                    "message": message,
+                    "readiness": "ready",
+                    "error_state": None,
+                    "updated_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+        _audit_log(None, "info", f"HUD candidate command executed command={command} source={source} id={updated['id']}")
+        return {
+            "ok": True,
+            "executed": True,
+            "command": command,
+            "source": source,
+            "candidate": updated,
+            "next_candidate": next_candidate,
+            "moai_write_plan": plan,
+            "glass_state": _glass_state_snapshot(),
+        }
 
     session_id = _active_visit_session_id_from_hud()
     if command == "start_visit":
@@ -5010,14 +6811,51 @@ def _queue_glass_command(
     source: str = "glass",
     metadata: Optional[dict] = None,
     scope: Optional[dict] = None,
+    delivery: str = "web",
 ) -> dict:
-    global _glass_pending_command
+    global _glass_pending_command, _glass_pending_device_command
     if command not in GLASS_COMMANDS:
         allowed = ", ".join(sorted(GLASS_COMMANDS))
         _error(400, "INVALID_COMMAND", f"command must be one of: {allowed}")
 
+    # Camera/microphone actions are executed by the paired iPhone, never by
+    # the Web App. Keep them off the shared Web App queue so two consumers do
+    # not race to consume the same command.
+    if command in {"capture_photo", "start_audio", "stop_audio"}:
+        queued = {
+            "command": command,
+            "id": str(uuid.uuid4()),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "source": source,
+        }
+        if metadata:
+            queued["metadata"] = metadata
+        with _glass_lock:
+            _glass_pending_device_command.append(queued)
+        return queued
+
     executed = _execute_visit_hud_command(command, source=source, metadata=metadata, scope=scope)
     if executed is not None:
+        # The server owns the visit-state transition, while the iPhone owns
+        # the physical recorder. Queue an explicit idempotent action for the
+        # native app instead of asking it to toggle a second time.
+        if command == "toggle_recording":
+            session = executed.get("session") or {}
+            device_command = (
+                "start_recording"
+                if session.get("recording_status") == "recording"
+                else "stop_recording"
+            )
+            device_queued = {
+                "command": device_command,
+                "id": str(uuid.uuid4()),
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "source": source,
+            }
+            if metadata:
+                device_queued["metadata"] = metadata
+            with _glass_lock:
+                _glass_pending_device_command.append(device_queued)
         return {
             "command": command,
             "id": str(uuid.uuid4()),
@@ -5036,7 +6874,10 @@ def _queue_glass_command(
         queued["metadata"] = metadata
 
     with _glass_lock:
-        _glass_pending_command = queued
+        if delivery == "device" and command in GLASS_DEVICE_COMMANDS:
+            _glass_pending_device_command.append(queued)
+        else:
+            _glass_pending_command.append(queued)
     cue = _generate_command_cue_if_needed(command, source)
     if cue:
         queued["cue_id"] = cue["id"]
@@ -5045,11 +6886,15 @@ def _queue_glass_command(
 
 @app.post("/visit-sessions/start")
 def visit_session_start(payload: VisitSessionStartRequest):
+    provider_role = payload.provider_role.strip()
+    if provider_role not in PROVIDER_ROLES:
+        _error(400, "INVALID_PROVIDER_ROLE", f"provider_role must be one of: {', '.join(sorted(PROVIDER_ROLES))}")
     with _conn() as conn:
         session = create_visit_session(
             conn,
             organization_id=payload.organization_id.strip(),
             provider_person_id=payload.provider_person_id.strip(),
+            provider_role=provider_role,
             subject_person_id=payload.subject_person_id.strip(),
             encounter_id=(payload.encounter_id or "").strip() or None,
             patient_alias=payload.patient_alias,
@@ -5115,6 +6960,296 @@ def visit_session_attach_event(session_id: str, payload: VisitSessionEventReques
     return {"status": "attached", "session": session, "glass_state": hud}
 
 
+@app.post("/capture-events")
+def capture_event_create(payload: CaptureEventPayload, request: Request):
+    source_type = payload.source_type.strip().lower()
+    event_type = payload.event_type.strip()
+    candidate_type = (payload.candidate_type or event_type).strip()
+    status = payload.status.strip().lower()
+    if source_type not in CAPTURE_EVENT_SOURCE_TYPES:
+        _error(400, "INVALID_CAPTURE_SOURCE", f"source_type must be one of: {', '.join(sorted(CAPTURE_EVENT_SOURCE_TYPES))}")
+    if not event_type or not candidate_type:
+        _error(400, "INVALID_CAPTURE_EVENT", "event_type and candidate_type are required")
+    if status not in CAPTURE_EVENT_STATUSES:
+        _error(400, "INVALID_CAPTURE_STATUS", f"status must be one of: {', '.join(sorted(CAPTURE_EVENT_STATUSES))}")
+    if payload.start_ms is not None and payload.start_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "start_ms must be non-negative")
+    if payload.end_ms is not None and payload.end_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be non-negative")
+    if payload.start_ms is not None and payload.end_ms is not None and payload.end_ms < payload.start_ms:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be greater than or equal to start_ms")
+    if payload.confidence is not None and not 0 <= payload.confidence <= 1:
+        _error(400, "INVALID_CAPTURE_CONFIDENCE", "confidence must be between 0 and 1")
+
+    with _conn() as conn:
+        session = None
+        if payload.visit_session_id:
+            session = get_visit_session(conn, payload.visit_session_id.strip())
+            if not session:
+                raise HTTPException(status_code=404, detail="visit session not found")
+
+        organization_id, provider_person_id = _scope_from_request(
+            request,
+            owner_org_id=payload.organization_id or (session or {}).get("organization_id"),
+            owner_provider_person_id=payload.provider_person_id or (session or {}).get("provider_person_id"),
+        )
+        organization_id = organization_id or _clean_scope_value(payload.organization_id)
+        provider_person_id = provider_person_id or _clean_scope_value(payload.provider_person_id)
+        encounter_id = _clean_scope_value(payload.encounter_id) or (session or {}).get("encounter_id")
+        subject_person_id = _clean_scope_value(payload.subject_person_id) or (session or {}).get("subject_person_id")
+        visit_session_id = _clean_scope_value(payload.visit_session_id)
+        source_media_id = _clean_scope_value(payload.source_media_id)
+        source_event_id = _clean_scope_value(payload.source_event_id)
+        reviewed_by = _clean_scope_value(payload.reviewed_by)
+        reviewed_at = datetime.utcnow().isoformat() if reviewed_by and status != "draft" else None
+        event_payload = dict(payload.payload or {})
+        event_payload.setdefault("action_type", capture_action_type(candidate_type))
+        if session and session.get("provider_role"):
+            event_payload.setdefault("provider_role", session["provider_role"])
+        event_id = str(uuid.uuid4())
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """
+            INSERT INTO capture_events (
+                id, visit_session_id, encounter_id, organization_id, provider_person_id,
+                subject_person_id, source_media_id, source_event_id, source_type, event_type,
+                candidate_type, start_ms, end_ms, confidence, status, payload_json,
+                reviewed_by, reviewed_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event_id,
+                visit_session_id,
+                encounter_id,
+                organization_id,
+                provider_person_id,
+                subject_person_id,
+                source_media_id,
+                source_event_id,
+                source_type,
+                event_type,
+                candidate_type,
+                payload.start_ms,
+                payload.end_ms,
+                payload.confidence,
+                status,
+                json.dumps(event_payload, ensure_ascii=False, separators=(",", ":")),
+                reviewed_by,
+                reviewed_at,
+                now,
+                now,
+            ),
+        )
+        row = conn.execute(f"{_capture_event_select()} WHERE id = ?", (event_id,)).fetchone()
+        conn.commit()
+    event = _capture_event_from_row(row)
+    _audit_log(None, "info", f"capture event created id={event_id} type={event_type} source_event={source_event_id or '-'}")
+    return {"status": "created", "event": event}
+
+
+@app.post("/capture-events/extract")
+def capture_event_extract(payload: CaptureEventExtractPayload, request: Request):
+    """Create review-first capture evidence from explicit therapist language."""
+
+    text = payload.text.strip()
+    if not text:
+        _error(422, "CAPTURE_TRANSCRIPT_REQUIRED", "text는 비어 있을 수 없습니다.")
+    if payload.start_ms is not None and payload.start_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "start_ms must be non-negative")
+    if payload.end_ms is not None and payload.end_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be non-negative")
+    if payload.start_ms is not None and payload.end_ms is not None and payload.end_ms < payload.start_ms:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be greater than or equal to start_ms")
+    if payload.confidence is not None and not 0 <= payload.confidence <= 1:
+        _error(400, "INVALID_CAPTURE_CONFIDENCE", "confidence must be between 0 and 1")
+
+    with _conn() as conn:
+        session = None
+        if payload.visit_session_id:
+            session = get_visit_session(conn, payload.visit_session_id.strip())
+            if not session:
+                raise HTTPException(status_code=404, detail="visit session not found")
+
+        organization_id, provider_person_id = _scope_from_request(
+            request,
+            owner_org_id=payload.organization_id or (session or {}).get("organization_id"),
+            owner_provider_person_id=payload.provider_person_id or (session or {}).get("provider_person_id"),
+        )
+        organization_id = organization_id or _clean_scope_value(payload.organization_id)
+        provider_person_id = provider_person_id or _clean_scope_value(payload.provider_person_id)
+        encounter_id = _clean_scope_value(payload.encounter_id) or (session or {}).get("encounter_id")
+        subject_person_id = _clean_scope_value(payload.subject_person_id) or (session or {}).get("subject_person_id")
+        visit_session_id = _clean_scope_value(payload.visit_session_id)
+
+        if not encounter_id and not visit_session_id:
+            _error(422, "CAPTURE_SCOPE_REQUIRED", "encounter_id or visit_session_id is required")
+
+        candidates = extract_transcript_capture_candidates(
+            text,
+            provider_role=(session or {}).get("provider_role"),
+        )
+        if not payload.create_events:
+            return {
+                "status": "preview" if candidates else "no_candidates",
+                "extractor_version": TRANSCRIPT_CAPTURE_EXTRACTOR_VERSION,
+                "source_text": _short_lens_text(text, limit=2_000),
+                "candidates": candidates,
+            }
+
+        events = _create_transcript_capture_events(
+            conn,
+            text=text,
+            visit_session_id=visit_session_id,
+            encounter_id=encounter_id,
+            organization_id=organization_id,
+            provider_person_id=provider_person_id,
+            provider_role=(session or {}).get("provider_role"),
+            subject_person_id=subject_person_id,
+            source_event_id=payload.source_event_id,
+            source_media_id=payload.source_media_id,
+            start_ms=payload.start_ms,
+            end_ms=payload.end_ms,
+            confidence=payload.confidence,
+            capture_origin=_capture_origin_from_source(payload.capture_origin),
+            derived_from=payload.source_type.strip().lower() or "transcript",
+        )
+        conn.commit()
+
+    # source_event_id may refer to an upstream media event that is not present
+    # in this bridge's local `events` table, so it must not be used as the
+    # audit_logs foreign key without a local existence check.
+    audit_event_id = None
+    if payload.source_event_id:
+        with _conn() as audit_conn:
+            if audit_conn.execute("SELECT 1 FROM events WHERE id = ?", (payload.source_event_id,)).fetchone():
+                audit_event_id = payload.source_event_id
+    _audit_log(
+        audit_event_id,
+        "info",
+        f"transcript capture extraction candidates={len(events)} source_event={payload.source_event_id or '-'}",
+    )
+    return {
+        "status": "created" if events else "no_candidates",
+        "extractor_version": TRANSCRIPT_CAPTURE_EXTRACTOR_VERSION,
+        "source_event_id": payload.source_event_id,
+        "events": events,
+    }
+
+
+@app.get("/visit-sessions/{session_id}/capture-events")
+def capture_event_list_by_session(session_id: str, limit: int = 100):
+    if limit < 1 or limit > 500:
+        _error(400, "INVALID_CAPTURE_LIMIT", "limit must be between 1 and 500")
+    with _conn() as conn:
+        session = get_visit_session(conn, session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="visit session not found")
+        rows = conn.execute(
+            f"{_capture_event_select()} WHERE visit_session_id = ? ORDER BY created_at ASC LIMIT ?",
+            (session_id, limit),
+        ).fetchall()
+    return {"items": [_capture_event_from_row(row) for row in rows]}
+
+
+@app.get("/capture-events")
+def capture_event_list(
+    request: Request,
+    encounter_id: Optional[str] = None,
+    visit_session_id: Optional[str] = None,
+    limit: int = 100,
+):
+    if not _clean_scope_value(encounter_id) and not _clean_scope_value(visit_session_id):
+        _error(400, "CAPTURE_SCOPE_REQUIRED", "encounter_id or visit_session_id is required")
+    if limit < 1 or limit > 500:
+        _error(400, "INVALID_CAPTURE_LIMIT", "limit must be between 1 and 500")
+    filters: list[str] = []
+    values: list[object] = []
+    scoped_org_id, scoped_provider_person_id = _scope_from_request(request)
+    if scoped_org_id:
+        filters.append("organization_id = ?")
+        values.append(scoped_org_id)
+    if scoped_provider_person_id:
+        filters.append("provider_person_id = ?")
+        values.append(scoped_provider_person_id)
+    if encounter_id and encounter_id.strip():
+        filters.append("encounter_id = ?")
+        values.append(encounter_id.strip())
+    if visit_session_id and visit_session_id.strip():
+        filters.append("visit_session_id = ?")
+        values.append(visit_session_id.strip())
+    with _conn() as conn:
+        rows = conn.execute(
+            f"{_capture_event_select()} WHERE {' AND '.join(filters)} ORDER BY created_at ASC LIMIT ?",
+            (*values, limit),
+        ).fetchall()
+    return {"items": [_capture_event_from_row(row) for row in rows]}
+
+
+@app.patch("/capture-events/{event_id}")
+def capture_event_update(event_id: str, payload: CaptureEventUpdatePayload, request: Request):
+    status = payload.status.strip().lower() if payload.status is not None else None
+    if status is not None and status not in CAPTURE_EVENT_STATUSES:
+        _error(400, "INVALID_CAPTURE_STATUS", f"status must be one of: {', '.join(sorted(CAPTURE_EVENT_STATUSES))}")
+    if payload.start_ms is not None and payload.start_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "start_ms must be non-negative")
+    if payload.end_ms is not None and payload.end_ms < 0:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be non-negative")
+    if payload.start_ms is not None and payload.end_ms is not None and payload.end_ms < payload.start_ms:
+        _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be greater than or equal to start_ms")
+    if payload.confidence is not None and not 0 <= payload.confidence <= 1:
+        _error(400, "INVALID_CAPTURE_CONFIDENCE", "confidence must be between 0 and 1")
+
+    with _conn() as conn:
+        existing = conn.execute(f"{_capture_event_select()} WHERE id = ?", (event_id,)).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail="capture event not found")
+        existing_event = _capture_event_from_row(existing)
+        scoped_org_id, scoped_provider_person_id = _scope_from_request(request)
+        if scoped_org_id and existing_event["organization_id"] and scoped_org_id != existing_event["organization_id"]:
+            raise HTTPException(status_code=403, detail="capture event organization scope mismatch")
+        if (
+            scoped_provider_person_id
+            and existing_event["provider_person_id"]
+            and scoped_provider_person_id != existing_event["provider_person_id"]
+        ):
+            raise HTTPException(status_code=403, detail="capture event provider scope mismatch")
+        next_start_ms = payload.start_ms if payload.start_ms is not None else existing_event["start_ms"]
+        next_end_ms = payload.end_ms if payload.end_ms is not None else existing_event["end_ms"]
+        if next_start_ms is not None and next_end_ms is not None and next_end_ms < next_start_ms:
+            _error(400, "INVALID_CAPTURE_TIMESTAMP", "end_ms must be greater than or equal to start_ms")
+        next_status = status or existing_event["status"]
+        reviewed_by = _clean_scope_value(payload.reviewed_by) or existing_event["reviewed_by"]
+        reviewed_at = existing_event["reviewed_at"]
+        if next_status != "draft" and reviewed_by:
+            reviewed_at = reviewed_at or datetime.utcnow().isoformat()
+        next_payload = payload.payload if payload.payload is not None else existing_event["payload"]
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """
+            UPDATE capture_events
+            SET start_ms = ?, end_ms = ?, confidence = ?, status = ?, payload_json = ?,
+                reviewed_by = ?, reviewed_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                next_start_ms,
+                next_end_ms,
+                payload.confidence if payload.confidence is not None else existing_event["confidence"],
+                next_status,
+                json.dumps(next_payload or {}, ensure_ascii=False, separators=(",", ":")),
+                reviewed_by,
+                reviewed_at,
+                now,
+                event_id,
+            ),
+        )
+        row = conn.execute(f"{_capture_event_select()} WHERE id = ?", (event_id,)).fetchone()
+        conn.commit()
+    event = _capture_event_from_row(row)
+    _audit_log(None, "info", f"capture event updated id={event_id} status={event['status']}")
+    return {"status": "updated", "event": event}
+
+
 @app.post("/visit-sessions/{session_id}/end")
 def visit_session_end(session_id: str, update_glass: bool = True):
     try:
@@ -5153,6 +7288,7 @@ def glass_visits_next(request: Request, offset: int = 0, candidate_id: Optional[
 
 @app.post("/glass/visits/start")
 def glass_visits_start(payload: GlassVisitStartRequest, request: Request):
+    is_hud_test = _is_hud_test_request(request)
     scope = _hud_scope_from_request(request)
     with _conn() as conn:
         candidate = _get_glass_visit_candidate(
@@ -5175,14 +7311,22 @@ def glass_visits_start(payload: GlassVisitStartRequest, request: Request):
         )
         session, pre_review = _attach_pre_review_to_session(conn, session)
         conn.commit()
-    hud = _apply_visit_session_hud(session, insight=pre_review) if payload.update_glass else None
+    hud = (
+        _apply_hud_test_visit_state(session)
+        if is_hud_test and payload.update_glass
+        else _apply_visit_session_hud(session, insight=pre_review)
+        if payload.update_glass
+        else None
+    )
     _audit_log(None, "info", f"glass visit started session={session['id']} candidate={candidate['id']}")
     return {"status": "started", "candidate": candidate, "session": session, "glass_state": hud}
 
 
 @app.get("/glass/state")
-def glass_state_get():
+def glass_state_get(request: Request):
     with _glass_lock:
+        if _is_hud_test_request(request):
+            return dict(_hud_test_state)
         return dict(_glass_state)
 
 
@@ -5204,6 +7348,10 @@ def glass_state_post(update: GlassStateUpdate):
             _glass_state["session_count"] = update.session_count
         if "event_role_counts" in fields_set:
             _glass_state["event_role_counts"] = update.event_role_counts
+        if "capture_role" in fields_set:
+            _glass_state["capture_role"] = update.capture_role
+        if "active_hud_candidate" in fields_set:
+            _glass_state["active_hud_candidate"] = update.active_hud_candidate
         if "visit_session_id" in fields_set:
             _glass_state["visit_session_id"] = update.visit_session_id
         if "phase" in fields_set:
@@ -5242,7 +7390,13 @@ def neural_band_event_post(event: NeuralBandEventRequest, request: Request):
         metadata["device_id"] = event.device_id
     metadata["gesture"] = gesture
 
-    queued = _queue_glass_command(command, source=event.source or "neural_band", metadata=metadata, scope=scope)
+    queued = _queue_glass_command(
+        command,
+        source=event.source or "neural_band",
+        metadata=metadata,
+        scope=scope,
+        delivery="device",
+    )
     return {
         "ok": True,
         "gesture": gesture,
@@ -5288,10 +7442,18 @@ def agent_cue_dry_run(payload: AgentCueDryRunRequest):
 
 @app.get("/glass/command")
 def glass_command_get():
-    global _glass_pending_command
     with _glass_lock:
-        cmd = _glass_pending_command
-        _glass_pending_command = None
+        cmd = _glass_pending_command.pop(0) if _glass_pending_command else None
+    if cmd is None:
+        return {"command": None}
+    return cmd
+
+
+@app.get("/glass/device-command")
+def glass_device_command_get():
+    """Consume one command intended for the paired native iOS app."""
+    with _glass_lock:
+        cmd = _glass_pending_device_command.pop(0) if _glass_pending_device_command else None
     if cmd is None:
         return {"command": None}
     return cmd

@@ -661,7 +661,7 @@ def build_moai_export_bundle(
                     "subject_person_id": subject_id,
                     "actor_id": provider_id,
                     "actor_type": "user" if provider_id else "system",
-                    "event_type": "bridge_ingest",
+                    "event_type": "create",
                     "event_subtype": f"rayban_pt_{event_type}",
                     "resource_type": "rayban_pt_event",
                     "resource_id": event_id,
@@ -681,7 +681,7 @@ def build_moai_export_bundle(
                 if field not in _compact(
                     {
                         "actor_type": "user" if provider_id else "system",
-                        "event_type": "bridge_ingest",
+                        "event_type": "create",
                         "resource_type": "rayban_pt_event",
                         "action_description": f"Bridge event normalized for moai_web export ({event_type}).",
                         "severity": "info",

@@ -23,7 +23,7 @@ def build_deep_link(*, app_name: str, app_url: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate a Meta AI app deep link for an MRBD web app.")
     parser.add_argument("app_url", type=_valid_https_url, help="Public HTTPS web app URL")
-    parser.add_argument("--app-name", default="stage-rayban-pt-mrbd-hud")
+    parser.add_argument("--app-name", default="Kinelo AR")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of the raw deep link")
     args = parser.parse_args()
 
