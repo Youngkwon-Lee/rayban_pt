@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neural Band Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Kinelo AR Companion</p>
+        <h1>Neural Band Console</h1>
+        <p class="lede">뉴럴벤드 제스처를 안전하게 브리지로 보내고, 안경 HUD 상태를 바로 확인하는 테스트 콘솔입니다.</p>
+      </div>
+      <div class="hero-status">
+        <div class="status-chip" id="healthChip">Bridge 확인 중</div>
+        <div class="status-chip" id="glassChip">Glass 상태 대기</div>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="panel panel-config">
+        <div class="panel-head">
+          <h2>Bridge 설정</h2>
+          <button class="ghost" id="saveConfigBtn">저장</button>
+        </div>
+        <label>
+          <span>Bridge Base URL</span>
+          <input id="baseUrl" type="text" placeholder="http://127.0.0.1:8791" />
+        </label>
+        <label>
+          <span>API Key</span>
+          <input id="apiKey" type="password" placeholder="x-api-key" />
+        </label>
+        <label>
+          <span>Device ID</span>
+          <input id="deviceId" type="text" placeholder="band-01" />
+        </label>
+        <label>
+          <span>Session Tag</span>
+          <input id="sessionTag" type="text" placeholder="pilot" />
+        </label>
+      </section>
+
+      <section class="panel panel-gesture">
+        <div class="panel-head">
+          <h2>Gesture Pad</h2>
+          <button class="ghost" id="refreshBtn">상태 새로고침</button>
+        </div>
+        <div class="button-grid">
+          <button class="gesture primary" data-gesture="double_tap">Double Tap</button>
+          <button class="gesture" data-gesture="tap">Tap</button>
+          <button class="gesture" data-gesture="single_tap">Single Tap</button>
+          <button class="gesture" data-gesture="press">Press</button>
+          <button class="gesture" data-gesture="squeeze">Squeeze</button>
+          <button class="gesture subtle" data-gesture="toggle_recording">Toggle Recording</button>
+        </div>
+        <label>
+          <span>Extra Metadata JSON</span>
+          <textarea id="metadataJson" rows="5" placeholder='{"strength":"high","source_note":"desktop-test"}'></textarea>
+        </label>
+        <div class="inline-actions">
+          <button class="primary" id="sendCustomBtn">Custom Gesture 전송</button>
+          <input id="customGesture" type="text" placeholder="custom gesture name" />
+        </div>
+      </section>
+
+      <section class="panel panel-state">
+        <div class="panel-head">
+          <h2>Glass State</h2>
+          <span class="small-note">읽기 전용</span>
+        </div>
+        <div class="state-grid">
+          <div class="state-card">
+            <span class="state-label">환자</span>
+            <strong id="statePatient">-</strong>
+          </div>
+          <div class="state-card">
+            <span class="state-label">모드</span>
+            <strong id="stateMode">-</strong>
+          </div>
+          <div class="state-card">
+            <span class="state-label">Recording</span>
+            <strong id="stateRecording">-</strong>
+          </div>
+          <div class="state-card">
+            <span class="state-label">Session Count</span>
+            <strong id="stateSessionCount">-</strong>
+          </div>
+        </div>
+        <pre id="stateDump" class="dump"></pre>
+      </section>
+
+      <section class="panel panel-log">
+        <div class="panel-head">
+          <h2>Dispatch Log</h2>
+          <button class="ghost" id="clearLogBtn">지우기</button>
+        </div>
+        <pre id="eventLog" class="dump"></pre>
+      </section>
+    </main>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
