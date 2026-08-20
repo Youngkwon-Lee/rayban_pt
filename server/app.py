@@ -444,27 +444,6 @@ def health():
     }
 
 
-@app.post("/ingest")
-def ingest(payload: IngestPayload, request: Request):
-    owner_org_id, owner_provider_person_id = _scope_from_request(
-        request,
-        owner_org_id=payload.owner_org_id or payload.org_id,
-        owner_provider_person_id=payload.owner_provider_person_id or payload.provider_person_id,
-    )
-    return _process_event(
-        source=payload.source,
-        event_type=payload.event_type,
-        text=payload.text,
-        audio_path=payload.audio_path,
-        image_base64=payload.image_base64,
-        patient_name=payload.patient_name or "",
-        owner_org_id=owner_org_id,
-        owner_provider_person_id=owner_provider_person_id,
-        subject_person_id=payload.subject_person_id,
-        physio_client_id=payload.physio_client_id or payload.client_id,
-        physio_session_id=payload.physio_session_id or payload.session_id or payload.encounter_id,
-    )
-
 @app.post("/events/merge")
 def merge_events(payload: MergeEventsPayload):
     with _conn() as conn:
@@ -484,65 +463,6 @@ def merge_events(payload: MergeEventsPayload):
         "soap": result["soap"],
     }
 
-@app.post("/ingest-upload")
-async def ingest_upload(
-    background_tasks: BackgroundTasks,
-    request: Request,
-    source: str = Form("iphone"),
-    event_type: str = Form("audio"),
-    patient_name: str = Form(""),
-    owner_org_id: str = Form(""),
-    owner_provider_person_id: str = Form(""),
-    subject_person_id: str = Form(""),
-    physio_client_id: str = Form(""),
-    physio_session_id: str = Form(""),
-    audio: UploadFile = File(...),
-):
-    if event_type != "audio":
-        _error(400, "INVALID_EVENT_TYPE", "ingest-upload only supports event_type=audio")
-
-    ext = (Path(audio.filename or "").suffix or "").lower()
-    allowed_ext = {".wav"}
-    content_type = (audio.content_type or "").lower()
-    allowed_content_types = {"audio/wav", "audio/x-wav"}
-
-    if ext not in allowed_ext or content_type not in allowed_content_types:
-        _error(400, "INVALID_AUDIO_FILE", "현재 캡처 경로는 WAV 오디오만 허용합니다.")
-
-    safe_ext = ext if ext else ".bin"
-    saved_path = core.UPLOAD_DIR / f"{uuid.uuid4()}{safe_ext}"
-
-    content = await audio.read()
-    _validate_upload_size(content, "audio")
-    if len(content) < 12 or content[:4] != b"RIFF" or content[8:12] != b"WAVE":
-        _error(400, "INVALID_AUDIO_FILE", "WAV 파일 서명이 올바르지 않습니다.")
-    saved_path.write_bytes(content)
-
-    event_id = str(uuid.uuid4())
-    scoped_org_id, scoped_provider_person_id = _scope_from_request(
-        request,
-        owner_org_id=owner_org_id,
-        owner_provider_person_id=owner_provider_person_id,
-    )
-    _touch_async_result(event_id, {"status": "accepted", "message": "uploaded"})
-    background_tasks.add_task(
-        _process_upload_job,
-        event_id,
-        source,
-        saved_path,
-        patient_name,
-        scoped_org_id,
-        scoped_provider_person_id,
-        subject_person_id,
-        physio_client_id,
-        physio_session_id,
-    )
-
-    return {
-        "event_id": event_id,
-        "status": "accepted",
-        "message": "업로드 접수 완료. /events/{event_id} 로 결과를 조회하세요.",
-    }
 
 @app.get("/events/{event_id}")
 def get_event(event_id: str):
@@ -973,122 +893,6 @@ def purge_old_events(days: int = 30):
 
     return {"ok": True, "days": days, "purged_events": len(event_ids), "deleted_files": deleted_files}
 
-@app.post("/ingest-image")
-async def ingest_image(
-    background_tasks: BackgroundTasks,
-    request: Request,
-    source: str = Form("rayban"),
-    description: str = Form(""),
-    patient_name: str = Form(""),
-    owner_org_id: str = Form(""),
-    owner_provider_person_id: str = Form(""),
-    subject_person_id: str = Form(""),
-    physio_client_id: str = Form(""),
-    physio_session_id: str = Form(""),
-    image: UploadFile = File(...),
-):
-    ext = (Path(image.filename or "").suffix or "").lower()
-    allowed_ext = {".jpg", ".jpeg", ".png", ".heic", ".webp"}
-    content_type = (image.content_type or "").lower()
-
-    is_image_type = content_type.startswith("image/")
-    is_image_ext = ext in allowed_ext
-
-    if not (is_image_type or is_image_ext):
-        _error(400, "INVALID_IMAGE_FILE", f"이미지 파일만 업로드 가능합니다. content_type={content_type or 'unknown'}, ext={ext or 'none'}")
-
-    safe_ext = ext if ext else ".jpg"
-    saved_path = core.UPLOAD_DIR / f"{__import__('uuid').uuid4()}{safe_ext}"
-
-    content = await image.read()
-    _validate_upload_size(content, "image")
-    saved_path.write_bytes(content)
-
-    event_id = str(__import__('uuid').uuid4())
-    scoped_org_id, scoped_provider_person_id = _scope_from_request(
-        request,
-        owner_org_id=owner_org_id,
-        owner_provider_person_id=owner_provider_person_id,
-    )
-    _touch_async_result(event_id, {"status": "accepted", "message": "image uploaded"})
-    background_tasks.add_task(
-        _process_image_job,
-        event_id,
-        source,
-        saved_path,
-        description,
-        patient_name,
-        scoped_org_id,
-        scoped_provider_person_id,
-        subject_person_id,
-        physio_client_id,
-        physio_session_id,
-    )
-
-    return {
-        "event_id": event_id,
-        "status": "accepted",
-        "image_saved": saved_path.name,
-        "message": "이미지 접수 완료. /events/{event_id} 로 결과를 조회하세요.",
-    }
-
-@app.post("/ingest-video")
-async def ingest_video(
-    background_tasks: BackgroundTasks,
-    request: Request,
-    source: str = Form("rayban-camera"),
-    patient_name: str = Form(""),
-    owner_org_id: str = Form(""),
-    owner_provider_person_id: str = Form(""),
-    subject_person_id: str = Form(""),
-    physio_client_id: str = Form(""),
-    physio_session_id: str = Form(""),
-    video: UploadFile = File(...),
-):
-    ext = (Path(video.filename or "").suffix or "").lower()
-    allowed_ext = {".mp4", ".mov"}
-    content_type = (video.content_type or "").lower()
-    allowed_content_types = {"video/mp4", "video/quicktime"}
-
-    if ext not in allowed_ext or content_type not in allowed_content_types:
-        _error(400, "INVALID_VIDEO_FILE", "현재 캡처 경로는 MP4 또는 QuickTime 영상만 허용합니다.")
-
-    safe_ext = ext if ext else ".mp4"
-    saved_path = core.UPLOAD_DIR / f"{uuid.uuid4()}{safe_ext}"
-
-    content = await video.read()
-    _validate_upload_size(content, "video")
-    if len(content) < 12 or content[4:8] != b"ftyp":
-        _error(400, "INVALID_VIDEO_FILE", "영상 파일 서명이 올바르지 않습니다.")
-    saved_path.write_bytes(content)
-
-    event_id = str(uuid.uuid4())
-    scoped_org_id, scoped_provider_person_id = _scope_from_request(
-        request,
-        owner_org_id=owner_org_id,
-        owner_provider_person_id=owner_provider_person_id,
-    )
-    _touch_async_result(event_id, {"status": "accepted", "message": "video uploaded"})
-    background_tasks.add_task(
-        _process_video_job,
-        event_id,
-        source,
-        saved_path,
-        patient_name,
-        scoped_org_id,
-        scoped_provider_person_id,
-        subject_person_id,
-        physio_client_id,
-        physio_session_id,
-    )
-
-    return {
-        "event_id": event_id,
-        "status": "accepted",
-        "video_saved": saved_path.name,
-        "size_kb": len(content) // 1024,
-        "message": "영상 접수 완료. /events/{event_id} 로 결과를 조회하세요.",
-    }
 
 @app.get("/charts/{event_id}")
 def get_chart(event_id: str):
@@ -2209,5 +2013,7 @@ def audit_logs(limit: int = 50, level: str = "", event_id: str = ""):
 # ── routers ─────────────────────────────────────────────────────────────────
 
 from routers.consents import router as consents_router
+from routers.ingest import router as ingest_router
 
 app.include_router(consents_router)
+app.include_router(ingest_router)
