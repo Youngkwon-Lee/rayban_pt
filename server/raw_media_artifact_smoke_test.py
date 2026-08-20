@@ -8,6 +8,7 @@ import wave
 from pathlib import Path
 
 import app as bridge
+import bridge_core  # (mutable config/state lives here)
 
 
 def require(condition: bool, message: str) -> None:
@@ -24,15 +25,15 @@ def _write_silent_wav(path: Path) -> None:
 
 
 def main() -> None:
-    original_raw_media_dir = bridge.RAW_MEDIA_DIR
+    original_raw_media_dir = bridge_core.RAW_MEDIA_DIR
     with tempfile.TemporaryDirectory(prefix="rayban-raw-media-") as temp_dir:
         raw_media_dir = Path(temp_dir) / "raw-media"
         raw_media_dir.mkdir()
-        bridge.RAW_MEDIA_DIR = raw_media_dir
+        bridge_core.RAW_MEDIA_DIR = raw_media_dir
         try:
             source_audio = Path(temp_dir) / "capture.wav"
             _write_silent_wav(source_audio)
-            staged_audio = bridge.stage_raw_media(
+            staged_audio = bridge_core.stage_raw_media(
                 source_audio,
                 raw_media_dir,
                 bridge.RawMediaStage(
@@ -63,7 +64,7 @@ def main() -> None:
             require(not staged_audio.exists(), "consumed raw audio should be removed")
             require(not metadata_path.exists(), "consumed metadata should be removed")
         finally:
-            bridge.RAW_MEDIA_DIR = original_raw_media_dir
+            bridge_core.RAW_MEDIA_DIR = original_raw_media_dir
 
     print("OK: raw media artifact smoke test passed")
 

@@ -19,6 +19,7 @@ os.environ["REQUIRE_PATIENT_CONSENT"] = "false"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as bridge  # noqa: E402
+import bridge_core  # noqa: E402  (mutable config/state lives here)
 import mlops_harness  # noqa: E402
 
 
@@ -35,17 +36,17 @@ def headers() -> dict[str, str]:
 
 
 def configure_isolated_storage(root: Path) -> None:
-    bridge.DB_PATH = root / "bridge.db"
-    bridge.UPLOAD_DIR = root / "uploads"
-    bridge.CHART_DIR = root / "charts"
-    bridge.MASKED_DIR = root / "masked"
-    bridge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.CHART_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.MASKED_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.DB_PATH = root / "bridge.db"
+    bridge_core.UPLOAD_DIR = root / "uploads"
+    bridge_core.CHART_DIR = root / "charts"
+    bridge_core.MASKED_DIR = root / "masked"
+    bridge_core.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.CHART_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.MASKED_DIR.mkdir(parents=True, exist_ok=True)
     bridge.ASYNC_RESULTS.clear()
 
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-    with sqlite3.connect(bridge.DB_PATH) as conn:
+    with sqlite3.connect(bridge_core.DB_PATH) as conn:
         conn.executescript(schema)
 
 
@@ -72,7 +73,7 @@ def exercise_hud_scope_token_candidate_filter() -> None:
         configure_isolated_storage(Path(tmp))
         reset_hud_state()
         client = TestClient(bridge.app)
-        bridge._moai_fetch_rows = lambda table, params: []
+        bridge_core._moai_fetch_rows = lambda table, params: []
         token = bridge.build_hud_scope_token(
             "11111111-1111-4111-8111-111111111111",
             "22222222-2222-4222-8222-222222222222",
@@ -146,7 +147,7 @@ def exercise_remote_today_candidate_ranking() -> None:
     nearer = (now + timedelta(minutes=20)).isoformat(timespec="seconds").replace("+00:00", "Z")
     later = (now + timedelta(hours=3)).isoformat(timespec="seconds").replace("+00:00", "Z")
     captured_params: list[tuple[str, str]] = []
-    original_fetch = bridge._moai_fetch_rows
+    original_fetch = bridge_core._moai_fetch_rows
 
     def fake_moai_fetch(table: str, params) -> list[dict]:
         captured_params.extend(list(params))
@@ -173,9 +174,9 @@ def exercise_remote_today_candidate_ranking() -> None:
             },
         ]
 
-    bridge._moai_fetch_rows = fake_moai_fetch
+    bridge_core._moai_fetch_rows = fake_moai_fetch
     try:
-        candidates = bridge._list_moai_glass_visit_candidates(
+        candidates = bridge_core._list_moai_glass_visit_candidates(
             limit=10,
             scope={
                 "organization_id": "11111111-1111-4111-8111-111111111111",
@@ -195,7 +196,7 @@ def exercise_remote_today_candidate_ranking() -> None:
             "remote lookup should be organization scoped",
         )
     finally:
-        bridge._moai_fetch_rows = original_fetch
+        bridge_core._moai_fetch_rows = original_fetch
 
 
 def exercise_remote_visit_candidate() -> None:
@@ -219,9 +220,9 @@ def exercise_remote_visit_candidate() -> None:
             "status": "scheduled",
             "care_setting": "home_visit",
         }
-        original_lookup = bridge._list_moai_glass_visit_candidates
-        original_fetch = bridge._moai_fetch_rows
-        bridge._list_moai_glass_visit_candidates = lambda limit=10, scope=None: [remote_candidate]
+        original_lookup = bridge_core._list_moai_glass_visit_candidates
+        original_fetch = bridge_core._moai_fetch_rows
+        bridge_core._list_moai_glass_visit_candidates = lambda limit=10, scope=None: [remote_candidate]
 
         def fake_moai_fetch(table: str, params: dict[str, str]) -> list[dict]:
             if table == "encounter_notes":
@@ -273,7 +274,7 @@ def exercise_remote_visit_candidate() -> None:
                 ]
             return []
 
-        bridge._moai_fetch_rows = fake_moai_fetch
+        bridge_core._moai_fetch_rows = fake_moai_fetch
         try:
             next_visit = client.get("/glass/visits/next", headers=headers())
             require(next_visit.status_code == 200, "remote HUD next visit should succeed")
@@ -319,8 +320,8 @@ def exercise_remote_visit_candidate() -> None:
             require(insight["signals"]["media_summaries_count"] == 1, "pre-review should count media summaries")
             require(any("체간 안정성 저하" in line for line in insight["lines"]), "pre-review insight should include note snippet")
         finally:
-            bridge._list_moai_glass_visit_candidates = original_lookup
-            bridge._moai_fetch_rows = original_fetch
+            bridge_core._list_moai_glass_visit_candidates = original_lookup
+            bridge_core._moai_fetch_rows = original_fetch
             reset_hud_state()
 
 
@@ -333,7 +334,7 @@ def main() -> None:
         configure_isolated_storage(Path(tmp))
         reset_hud_state()
         client = TestClient(bridge.app)
-        bridge._moai_fetch_rows = lambda table, params: []
+        bridge_core._moai_fetch_rows = lambda table, params: []
 
         unauth = client.post("/visit-sessions/start", json={})
         require(unauth.status_code == 401, "visit session API should require auth")

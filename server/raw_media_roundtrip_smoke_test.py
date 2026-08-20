@@ -13,6 +13,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app as bridge
+import bridge_core  # (mutable config/state lives here)
 from mlops_harness import _isolated_bridge_runtime
 
 
@@ -55,11 +56,11 @@ def _inner_event_id(client: TestClient, outer_event_id: str, headers: dict[str, 
 
 
 def main() -> None:
-    original_stt = bridge.stt_whisper_local
+    original_stt = bridge_core.stt_whisper_local
     with _isolated_bridge_runtime() as runtime, tempfile.TemporaryDirectory(prefix="rayban-roundtrip-") as temp_dir:
-        bridge.AUDIO_STORE = True
-        bridge.VIDEO_STORE = True
-        bridge.stt_whisper_local = lambda _path: "합성 음성 기록"
+        bridge_core.AUDIO_STORE = True
+        bridge_core.VIDEO_STORE = True
+        bridge_core.stt_whisper_local = lambda _path: "합성 음성 기록"
 
         try:
             root = Path(temp_dir)
@@ -95,7 +96,7 @@ def main() -> None:
             require(rejected_audio.status_code == 200, "async audio rejection should return its tracking id")
             rejected_status = client.get(f"/events/{rejected_audio.json()['event_id']}", headers=headers)
             require(rejected_status.json()["status"] == "error", "missing consent should fail processing")
-            require(not list(bridge.UPLOAD_DIR.iterdir()), "rejected audio should not remain in uploads")
+            require(not list(bridge_core.UPLOAD_DIR.iterdir()), "rejected audio should not remain in uploads")
 
             rejected_video = client.post(
                 "/ingest-video",
@@ -165,12 +166,12 @@ def main() -> None:
             wildcard_delete = client.delete("/events/%2A", headers=headers)
             require(wildcard_delete.status_code == 404, "wildcard event IDs must not delete staged media")
             require(
-                all(bridge.resolve_raw_media(bridge.RAW_MEDIA_DIR, item["filename"]) for item in (audio_artifact, video_artifact)),
+                all(bridge.resolve_raw_media(bridge_core.RAW_MEDIA_DIR, item["filename"]) for item in (audio_artifact, video_artifact)),
                 "wildcard event deletion must leave unrelated artifacts intact",
             )
 
-            configured_key = bridge.BRIDGE_API_KEY
-            bridge.BRIDGE_API_KEY = ""
+            configured_key = bridge_core.BRIDGE_API_KEY
+            bridge_core.BRIDGE_API_KEY = ""
             try:
                 spoofed = client.get(
                     audio_artifact["download_path"],
@@ -178,7 +179,7 @@ def main() -> None:
                 )
                 require(spoofed.status_code == 503, "forwarded loopback must not bypass bridge authentication")
             finally:
-                bridge.BRIDGE_API_KEY = configured_key
+                bridge_core.BRIDGE_API_KEY = configured_key
 
             for artifact in (audio_artifact, video_artifact):
                 wrong_scope = {**headers, "x-glasspt-org-id": "550e8400-e29b-41d4-a716-446655440099"}
@@ -286,7 +287,7 @@ def main() -> None:
                 conn.commit()
             race_source = root / "race.wav"
             shutil.copy2(wav_path, race_source)
-            original_stage_raw_media = bridge.stage_raw_media
+            original_stage_raw_media = bridge_core.stage_raw_media
             stage_entered = threading.Event()
             release_stage = threading.Event()
             revoke_done = threading.Event()
@@ -328,7 +329,7 @@ def main() -> None:
                 revoke_response["status_code"] = response.status_code
                 revoke_done.set()
 
-            bridge.stage_raw_media = pausing_stage_raw_media
+            bridge_core.stage_raw_media = pausing_stage_raw_media
             try:
                 stage_thread = threading.Thread(target=run_stage)
                 revoke_thread = threading.Thread(target=run_revoke)
@@ -340,12 +341,12 @@ def main() -> None:
                 stage_thread.join(timeout=5)
                 revoke_thread.join(timeout=5)
             finally:
-                bridge.stage_raw_media = original_stage_raw_media
+                bridge_core.stage_raw_media = original_stage_raw_media
                 release_stage.set()
             require(not stage_errors, "race fixture staging should complete without errors")
             require(revoke_response.get("status_code") == 200, "race fixture revocation should complete")
             require(
-                not bridge.list_raw_media_artifacts(bridge.RAW_MEDIA_DIR, race_event_id),
+                not bridge.list_raw_media_artifacts(bridge_core.RAW_MEDIA_DIR, race_event_id),
                 "revocation racing with staging must leave no raw media",
             )
             with bridge._conn() as conn:
@@ -355,7 +356,7 @@ def main() -> None:
                 ).fetchone()[0]
             require(phi_log_count == 0, "patient names must not be written to audit logs")
         finally:
-            bridge.stt_whisper_local = original_stt
+            bridge_core.stt_whisper_local = original_stt
 
     print("OK: raw media HTTP round-trip smoke test passed")
 

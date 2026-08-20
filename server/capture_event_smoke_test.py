@@ -15,6 +15,7 @@ os.environ["ALLOW_INSECURE_LAN"] = "false"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as bridge  # noqa: E402
+import bridge_core  # noqa: E402  (mutable config/state lives here)
 
 
 def require(condition: bool, message: str) -> None:
@@ -25,16 +26,16 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="rayban_capture_events_") as tmp:
         root = Path(tmp)
-        bridge.DB_PATH = root / "bridge.db"
+        bridge_core.DB_PATH = root / "bridge.db"
         bridge.ASYNC_RESULTS.clear()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-        with sqlite3.connect(bridge.DB_PATH) as conn:
+        with sqlite3.connect(bridge_core.DB_PATH) as conn:
             conn.executescript(schema)
 
         # This test proves the local capture-event contract. Keep the optional
         # moai_web pre-review enrichment deterministic and avoid sending
         # synthetic non-UUID fixture IDs to the live Supabase REST endpoint.
-        bridge._moai_fetch_rows = lambda table, params: []
+        bridge_core._moai_fetch_rows = lambda table, params: []
 
         client = TestClient(bridge.app)
         headers = {
