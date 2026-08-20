@@ -149,14 +149,6 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
-class HudTokenIssuePayload(BaseModel):
-    organization_id: str
-    provider_person_id: str
-    expires_in_minutes: int = 720
-    bridge_url: Optional[str] = None
-    app_path: str = "/glass-app/"
-
-
 def _error(status_code: int, code: str, detail: str):
     raise HTTPException(status_code=status_code, detail={"code": code, "message": detail})
 
@@ -2702,34 +2694,6 @@ _glass_pending_command: list[dict] = []
 _glass_pending_device_command: list[dict] = []
 
 
-class GlassStateUpdate(BaseModel):
-    patient: Optional[str] = None
-    mode: Optional[str] = None
-    message: Optional[str] = None
-    is_recording: Optional[bool] = None
-    recording_start: Optional[str] = None
-    session_count: Optional[int] = None
-    event_role_counts: Optional[dict] = None
-    capture_role: Optional[str] = None
-    active_hud_candidate: Optional[dict] = None
-    visit_session_id: Optional[str] = None
-    phase: Optional[str] = None
-    readiness: Optional[str] = None
-    error_state: Optional[str] = None
-    last_insight: Optional[dict] = None
-
-
-class GlassCommandRequest(BaseModel):
-    command: str
-
-
-class NeuralBandEventRequest(BaseModel):
-    gesture: str
-    device_id: Optional[str] = None
-    source: str = "neural_band"
-    metadata: Optional[dict] = None
-
-
 class AgentCueDryRunRequest(BaseModel):
     requested_tool: str = "generate_session_cue"
     event_id: Optional[str] = None
@@ -2743,11 +2707,6 @@ class AgentCueDryRunRequest(BaseModel):
 
     class Config:
         extra = "forbid"
-
-
-class GlassVisitStartRequest(BaseModel):
-    candidate_id: Optional[str] = None
-    update_glass: bool = True
 
 
 def _apply_visit_session_hud(session: dict, insight: Optional[dict] = None) -> dict:
@@ -4400,7 +4359,6 @@ __all__ = [
     "CONSENT_MEDIA_LOCK",
     "_client_host",
     "_is_loopback_host",
-    "HudTokenIssuePayload",
     "_error",
     "_clean_scope_value",
     "_scope_from_request",
@@ -4497,11 +4455,7 @@ __all__ = [
     "_hud_test_state",
     "_glass_pending_command",
     "_glass_pending_device_command",
-    "GlassStateUpdate",
-    "GlassCommandRequest",
-    "NeuralBandEventRequest",
     "AgentCueDryRunRequest",
-    "GlassVisitStartRequest",
     "_apply_visit_session_hud",
     "_apply_hud_test_visit_state",
     "_build_visit_session_write_plan",
