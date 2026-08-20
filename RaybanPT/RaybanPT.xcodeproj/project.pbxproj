@@ -10,7 +10,7 @@
 		832812D82F8B94400074213F /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = AA000002DEADBEEF00000002 /* MWDATCore */; };
 		832812D92F8B94400074213F /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = AA000003DEADBEEF00000003 /* MWDATCamera */; };
 		AA000006DEADBEEF00000006 /* MWDATDisplay in Frameworks */ = {isa = PBXBuildFile; productRef = AA000007DEADBEEF00000007 /* MWDATDisplay */; };
-		AA000009DEADBEEF00000009 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; platformFilters = (simulator, ); productRef = AA00000ADEADBEEF0000000A /* MWDATMockDevice */; };
+		AA000009DEADBEEF00000009 /* MWDATMockDevice in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000ADEADBEEF0000000A /* MWDATMockDevice */; };
 		A10000012F9B000100000001 /* TextSendUITest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000022F9B000100000001 /* TextSendUITest.swift */; };
 /* End PBXBuildFile section */
 
