@@ -2,7 +2,7 @@
 
 Application setup only: the app object, static mounts, the API-key/HUD-token
 middleware, and router registration.  Configuration, mutable state, and domain
-helpers live in :mod:`bridge_core`; endpoints live in :mod:`routers`.
+helpers live in :mod:`bridge_core`; the endpoints live under ``routers/``.
 
 ``bridge_core`` is re-exported here so that existing tooling which does
 ``import app`` keeps seeing the helper names it used to.  Values that are
@@ -10,15 +10,35 @@ patched at runtime (``DB_PATH``, ``BRIDGE_API_KEY``, ...) must be set on
 ``bridge_core`` itself, because that is where every reader looks them up.
 """
 
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
 import bridge_core as core
 from bridge_core import *  # noqa: F401,F403  (backwards-compatible re-export)
-from bridge_core import (  # noqa: F401  (names the app layer uses directly)
+from bridge_core import (
+    DOC_PATHS,
+    HUD_TOKEN_AUTH_PATH_PREFIXES,
+    HUD_TOKEN_ISSUE_PATH,
+    PUBLIC_PATH_PREFIXES,
+    PUBLIC_PATHS,
     ROOT,
-    FastAPI,
-    JSONResponse,
-    Request,
-    StaticFiles,
+    _client_host,
+    _decode_hud_scope_token,
+    _is_hud_test_request,
+    _is_loopback_host,
 )
+from routers.agent_gateway import router as agent_gateway_router
+from routers.charts import router as charts_router
+from routers.consents import router as consents_router
+from routers.events import router as events_router
+from routers.glass import router as glass_router
+from routers.hud_candidates import router as hud_candidates_router
+from routers.ingest import router as ingest_router
+from routers.media import router as media_router
+from routers.moai_sync import router as moai_sync_router
+from routers.system import router as system_router
+from routers.visit_sessions import router as visit_sessions_router
 
 app = FastAPI(title="rayban-local-bridge", version="0.4.0")
 
@@ -33,6 +53,7 @@ app.mount(
     StaticFiles(directory=str(ROOT / "static" / "neural-band-console"), html=True),
     name="neural-band-console",
 )
+
 
 @app.middleware("http")
 async def api_key_guard(request: Request, call_next):
@@ -110,20 +131,8 @@ async def api_key_guard(request: Request, call_next):
     )
 
 
-# ── routers ─────────────────────────────────────────────────────────────────
-
-from routers.consents import router as consents_router
-from routers.ingest import router as ingest_router
-from routers.events import router as events_router
-from routers.hud_candidates import router as hud_candidates_router
-from routers.moai_sync import router as moai_sync_router
-from routers.charts import router as charts_router
-from routers.media import router as media_router
-from routers.visit_sessions import router as visit_sessions_router
-from routers.glass import router as glass_router
-from routers.agent_gateway import router as agent_gateway_router
-from routers.system import router as system_router
-
+# Registration order is cosmetic here: no two routes shadow one another, so
+# matching is unaffected by the order in which the routers are included.
 app.include_router(consents_router)
 app.include_router(ingest_router)
 app.include_router(events_router)
