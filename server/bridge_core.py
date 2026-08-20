@@ -426,38 +426,6 @@ class ChartReviewPayload(BaseModel):
     notes: Optional[str] = ""
 
 
-class HudCandidatePayload(BaseModel):
-    encounter_id: str
-    organization_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-    provider_person_id: Optional[str] = None
-    event_type: str = "test_result"
-    test: str = ""
-    side: str = ""
-    value: str = ""
-    symptom: str = ""
-    source: str = "rayban_meta_display"
-    source_text: str = ""
-    confidence: Optional[float] = None
-    payload: dict = Field(default_factory=dict)
-
-
-class HudCandidateExtractPayload(BaseModel):
-    encounter_id: str
-    organization_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-    provider_person_id: Optional[str] = None
-    text: str
-    source: str = "stt_transcript"
-    confidence: Optional[float] = None
-    create_candidate: bool = True
-
-
-class HudCandidateDecisionPayload(BaseModel):
-    reviewer_person_id: Optional[str] = None
-    reason: Optional[str] = None
-
-
 class HudTokenIssuePayload(BaseModel):
     organization_id: str
     provider_person_id: str
@@ -4815,9 +4783,6 @@ __all__ = [
     "LABEL_TAXONOMY_V0",
     "ChartUpdatePayload",
     "ChartReviewPayload",
-    "HudCandidatePayload",
-    "HudCandidateExtractPayload",
-    "HudCandidateDecisionPayload",
     "HudTokenIssuePayload",
     "CaptureEventPayload",
     "CaptureEventUpdatePayload",
