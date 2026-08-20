@@ -444,31 +444,6 @@ def health():
     }
 
 
-@app.get("/moai-sync/jobs")
-def get_moai_sync_jobs(status: str = "pending", limit: int = 20):
-    clean_status = (status or "").strip().lower()
-    if clean_status not in {"pending", "planned", "blocked", "synced", "error", "all"}:
-        _error(400, "INVALID_SYNC_STATUS", "status must be pending, planned, blocked, synced, error, or all")
-    return {"status": "done", "items": _list_moai_sync_jobs(status=clean_status, limit=limit)}
-
-@app.get("/moai-sync/jobs/{event_id}")
-def get_moai_sync_job(event_id: str):
-    with _conn() as conn:
-        row = conn.execute(
-            """
-            SELECT id, event_id, status, trigger_reason, operation_count, skipped_count, attempts,
-                   last_error, last_plan_summary, last_result_summary, last_attempted_at,
-                   synced_at, created_at, updated_at
-            FROM moai_sync_jobs
-            WHERE event_id = ?
-            """,
-            (event_id,),
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="moai sync job not found")
-    return {"status": "done", "job": _moai_sync_job_from_row(row)}
-
-
 @app.get("/charts/{event_id}")
 def get_chart(event_id: str):
     """생성된 11.txt 차트 내용 반환."""
@@ -1460,8 +1435,10 @@ from routers.consents import router as consents_router
 from routers.ingest import router as ingest_router
 from routers.events import router as events_router
 from routers.hud_candidates import router as hud_candidates_router
+from routers.moai_sync import router as moai_sync_router
 
 app.include_router(consents_router)
 app.include_router(ingest_router)
 app.include_router(events_router)
 app.include_router(hud_candidates_router)
+app.include_router(moai_sync_router)
