@@ -416,7 +416,7 @@ def _conn():
 
 
 CAPTURE_EVENT_STATUSES = {"draft", "edited", "approved", "rejected"}
-CAPTURE_EVENT_SOURCE_TYPES = {"audio", "video", "pose", "therapist_tag", "transcript", "system"}
+CAPTURE_EVENT_SOURCE_TYPES = {"audio", "video", "pose", "therapist_tag", "transcript", "system", "human_label"}
 CAPTURE_ORIGIN_ALIASES = {
     "rayban_dat_camera": "rayban_dat_camera",
     "rayban-camera": "rayban_dat_camera",

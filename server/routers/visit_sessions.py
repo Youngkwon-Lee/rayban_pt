@@ -196,6 +196,16 @@ def capture_event_create(payload: CaptureEventPayload, request: Request):
         _error(400, "INVALID_CAPTURE_EVENT", "event_type and candidate_type are required")
     if status not in CAPTURE_EVENT_STATUSES:
         _error(400, "INVALID_CAPTURE_STATUS", f"status must be one of: {', '.join(sorted(CAPTURE_EVENT_STATUSES))}")
+    if source_type == "human_label":
+        # Mapping spec §C.2: human labels are never machine drafts, and
+        # approval always names a reviewer.
+        if status == "draft":
+            _error(400, "INVALID_HUMAN_LABEL_STATUS", "human_label events must be status edited, approved, or rejected")
+        if status == "approved" and not (payload.reviewed_by or "").strip():
+            _error(400, "HUMAN_LABEL_REVIEWER_REQUIRED", "approved human_label events require reviewed_by")
+        clip_payload = payload.payload or {}
+        if not str(clip_payload.get("clip_id") or "").strip() or not str(clip_payload.get("label_schema") or "").strip():
+            _error(400, "INVALID_HUMAN_LABEL_PAYLOAD", "human_label events require payload.clip_id and payload.label_schema")
     if payload.start_ms is not None and payload.start_ms < 0:
         _error(400, "INVALID_CAPTURE_TIMESTAMP", "start_ms must be non-negative")
     if payload.end_ms is not None and payload.end_ms < 0:
