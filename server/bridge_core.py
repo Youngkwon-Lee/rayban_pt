@@ -2706,27 +2706,6 @@ def _delete_raw_event_artifacts(event_id: str) -> int:
     return deleted
 
 
-def _authorize_raw_media_request(filename: str, request: Request) -> tuple[Path, str]:
-    file_path = resolve_raw_media(RAW_MEDIA_DIR, filename)
-    if file_path is None:
-        raise HTTPException(status_code=404, detail="file not found")
-    event_id = file_path.stem.rsplit("_", 1)[0]
-    requested_org_id = request.headers.get("x-glasspt-org-id", "").strip()
-    requested_provider_id = request.headers.get("x-glasspt-provider-person-id", "").strip()
-    if not requested_org_id or not requested_provider_id:
-        raise HTTPException(status_code=403, detail="scoped artifact access headers are required")
-    with _conn() as conn:
-        row = conn.execute(
-            "SELECT owner_org_id, owner_provider_person_id FROM events WHERE id = ?",
-            (event_id,),
-        ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="event not found")
-    if row[0] != requested_org_id or row[1] != requested_provider_id:
-        raise HTTPException(status_code=403, detail="artifact scope mismatch")
-    return file_path, event_id
-
-
 # ── Glass Relay (phone-free PT HUD) ─────────────────────────────────────────
 import threading as _threading
 
@@ -4589,7 +4568,6 @@ __all__ = [
     "_process_event",
     "_event_status_result",
     "_delete_raw_event_artifacts",
-    "_authorize_raw_media_request",
     "_threading",
     "_glass_lock",
     "_glass_state",

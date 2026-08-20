@@ -444,62 +444,6 @@ def health():
     }
 
 
-@app.get("/files/{filename}")
-def get_uploaded_file(filename: str):
-    if not core.ENABLE_FILE_DOWNLOADS:
-        _error(404, "FILE_DOWNLOAD_DISABLED", "원본 업로드 파일 다운로드는 기본 비활성화되어 있습니다.")
-
-    safe_name = Path(filename).name
-    file_path = core.UPLOAD_DIR / safe_name
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="file not found")
-
-    media_type = None
-    ext = file_path.suffix.lower()
-    if ext in {".mp4", ".m4v"}:
-        media_type = "video/mp4"
-    elif ext == ".mov":
-        media_type = "video/quicktime"
-    elif ext == ".avi":
-        media_type = "video/x-msvideo"
-    elif ext == ".mkv":
-        media_type = "video/x-matroska"
-
-    return FileResponse(str(file_path), media_type=media_type, filename=safe_name)
-
-@app.get("/masked-files/{filename}")
-def get_masked_file(filename: str):
-    """마스킹이 끝난 산출물만 보호된 경로로 내려준다."""
-    safe_name = Path(filename).name
-    if safe_name != filename:
-        raise HTTPException(status_code=404, detail="file not found")
-
-    file_path = core.MASKED_DIR / safe_name
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="file not found")
-
-    return FileResponse(str(file_path), media_type="image/jpeg", filename=safe_name)
-
-@app.get("/raw-media/{filename}")
-def get_raw_media(filename: str, request: Request):
-    file_path, event_id = _authorize_raw_media_request(filename, request)
-    artifacts = list_raw_media_artifacts(core.RAW_MEDIA_DIR, event_id)
-    content_type = next(
-        (item["content_type"] for item in artifacts if item["filename"] == file_path.name),
-        "application/octet-stream",
-    )
-    _audit_log(event_id, "info", "raw media accessed for scoped import")
-    return FileResponse(str(file_path), media_type=content_type, filename=file_path.name)
-
-@app.delete("/raw-media/{filename}")
-def consume_raw_media(filename: str, request: Request):
-    _, event_id = _authorize_raw_media_request(filename, request)
-    if not delete_raw_media(core.RAW_MEDIA_DIR, filename):
-        raise HTTPException(status_code=404, detail="file not found")
-    _audit_log(event_id, "info", "raw media consumed after durable import")
-    return {"ok": True, "filename": filename}
-
-
 @app.get("/recent-failures")
 def recent_failures(limit: int = 20):
     n = max(1, min(limit, 100))
@@ -1165,6 +1109,7 @@ from routers.events import router as events_router
 from routers.hud_candidates import router as hud_candidates_router
 from routers.moai_sync import router as moai_sync_router
 from routers.charts import router as charts_router
+from routers.media import router as media_router
 
 app.include_router(consents_router)
 app.include_router(ingest_router)
@@ -1172,3 +1117,4 @@ app.include_router(events_router)
 app.include_router(hud_candidates_router)
 app.include_router(moai_sync_router)
 app.include_router(charts_router)
+app.include_router(media_router)
