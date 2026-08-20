@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import os
+import shutil
+import sqlite3
+import tempfile
+from pathlib import Path
 
 os.environ.setdefault("REQUIRE_API_KEY", "false")
 os.environ.setdefault("REQUIRE_PATIENT_CONSENT", "false")
 
+import app as bridge  # noqa: E402
 from app import (  # noqa: E402
     _conn,
     _create_pose_capture_events,
@@ -25,6 +30,14 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
+    # Use an isolated throwaway DB so this test does not depend on a
+    # previously initialized local storage/bridge.db (e.g. in CI).
+    tmp_dir = Path(tempfile.mkdtemp(prefix="rayban_pose_smoke_"))
+    bridge.DB_PATH = tmp_dir / "bridge.db"
+    schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+    with sqlite3.connect(bridge.DB_PATH) as schema_conn:
+        schema_conn.executescript(schema)
+
     samples = []
     for index, (left_angle, right_angle) in enumerate(((82, 106), (95, 118), (110, 125))):
         samples.append(
@@ -154,6 +167,7 @@ def main() -> None:
         any(candidate["candidate_type"] == "functional_task" for candidate in cycle_candidates),
         "cyclic pose motion should produce a review-first repetition candidate",
     )
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     print("pose_capture_smoke_test: PASS")
 
 
