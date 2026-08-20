@@ -1,0 +1,12 @@
+{
+  "_comment": "clip_id -> rayban_pt identifiers for import_pediatric_labels.py --links. Copy per session, fill from the bridge session manifest. All values optional except that a clip without an entry here is skipped by the importer.",
+  "PB9_0001": {
+    "visit_session_id": "",
+    "source_event_id": "",
+    "encounter_id": "",
+    "organization_id": "",
+    "provider_person_id": "",
+    "subject_person_id": "",
+    "source_media_id": ""
+  }
+}

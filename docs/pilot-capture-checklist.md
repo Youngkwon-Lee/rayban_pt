@@ -67,6 +67,30 @@ For multimodal sessions, prefer:
 - one short spoken note from the therapist
 - one final therapist label/review form
 
+### Goniometer reference measurement (egocentric ROM validation)
+
+Egocentric (glasses-worn, moving camera) pose accuracy has no published
+validation, so lens-derived angles stay research candidates until checked
+against goniometry (see `vision-to-soap-research-and-v1-architecture.md`).
+In at least 3 of the 10 pilot sessions:
+
+- pick 1-2 movements that the video captures (e.g. knee flexion, shoulder
+  flexion) and measure the same motion with a goniometer at the same moment
+- speak the goniometer value into the audio note ("goniometer right knee
+  flexion 95 degrees") so it lands in the transcript with a timestamp
+- record camera framing (subject fully in frame? sagittal or oblique?) —
+  out-of-plane error is the known failure mode
+- later compare `MET.ROM.*` pose values against the goniometer reference;
+  a per-metric error summary decides whether lens angles ever leave
+  research-candidate status
+
+### Labeling link capture
+
+For every captured media event, note the `visit_session_id` and event id
+shown by the bridge (or keep the session manifest) — the label importer
+needs them to fill `docs/pilot-clip-links.template.json` when clips come
+back from the labeling workbench.
+
 Recommended spoken note format:
 
 ```text
