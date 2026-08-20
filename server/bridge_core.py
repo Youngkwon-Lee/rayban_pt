@@ -417,12 +417,6 @@ LABEL_TAXONOMY_V0 = {
 }
 
 
-class MergeEventsPayload(BaseModel):
-    image_event_id: str
-    audio_event_id: str
-    patient_name: Optional[str] = None
-
-
 class ChartUpdatePayload(BaseModel):
     chart: str
 
@@ -3007,27 +3001,6 @@ def _event_status_result(processed: dict) -> dict:
     return result
 
 
-def _delete_event_artifacts(event_id: str) -> list[str]:
-    deleted: list[str] = []
-    candidates = [CHART_DIR / f"{event_id}_11.txt"]
-    candidates.extend(
-        path for path in MASKED_DIR.iterdir()
-        if path.name.startswith(f"{event_id}_")
-    )
-    candidates.extend(
-        path for path in RAW_MEDIA_DIR.iterdir()
-        if path.name.startswith(f"{event_id}_")
-    )
-    for path in candidates:
-        try:
-            if path.exists() and path.is_file():
-                path.unlink()
-                deleted.append(path.name)
-        except Exception as e:
-            logger.warning("artifact delete failed event_id=%s err=%s", event_id, e)
-    return deleted
-
-
 def _delete_raw_event_artifacts(event_id: str) -> int:
     deleted = 0
     failures: list[str] = []
@@ -4840,7 +4813,6 @@ __all__ = [
     "_is_loopback_host",
     "RehabLabelPayload",
     "LABEL_TAXONOMY_V0",
-    "MergeEventsPayload",
     "ChartUpdatePayload",
     "ChartReviewPayload",
     "HudCandidatePayload",
@@ -4939,7 +4911,6 @@ __all__ = [
     "stt_whisper_local",
     "_process_event",
     "_event_status_result",
-    "_delete_event_artifacts",
     "_delete_raw_event_artifacts",
     "_authorize_raw_media_request",
     "_label_performance_value",
