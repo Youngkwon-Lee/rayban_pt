@@ -436,24 +436,6 @@ LABEL_TAXONOMY_V0 = {
 }
 
 
-class ConsentPayload(BaseModel):
-    patient_name: str
-    scope: str = "capture_analysis_storage"
-    consent_text: Optional[str] = None
-    granted_by: Optional[str] = None
-    owner_org_id: Optional[str] = None
-    owner_provider_person_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-
-
-class ConsentLookupPayload(BaseModel):
-    patient_name: str
-    scope: str = "capture_analysis_storage"
-    owner_org_id: Optional[str] = None
-    owner_provider_person_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-
-
 class MergeEventsPayload(BaseModel):
     image_event_id: str
     audio_event_id: str
@@ -3044,21 +3026,6 @@ def _event_status_result(processed: dict) -> dict:
     return result
 
 
-def _consent_identity_from_payload(
-    request: Request,
-    payload: Union[ConsentPayload, ConsentLookupPayload],
-) -> tuple[str, str, str]:
-    org_id, provider_id = _scope_from_request(
-        request,
-        owner_org_id=payload.owner_org_id,
-        owner_provider_person_id=payload.owner_provider_person_id,
-    )
-    subject_id = (payload.subject_person_id or "").strip()
-    if not org_id or not provider_id or not subject_id:
-        _error(422, "CONSENT_IDENTITY_REQUIRED", "조직, 치료사, 환자 person ID가 필요합니다.")
-    return org_id, provider_id, subject_id
-
-
 def _process_upload_job(
     event_id: str,
     source: str,
@@ -5236,8 +5203,6 @@ __all__ = [
     "IngestPayload",
     "RehabLabelPayload",
     "LABEL_TAXONOMY_V0",
-    "ConsentPayload",
-    "ConsentLookupPayload",
     "MergeEventsPayload",
     "ChartUpdatePayload",
     "ChartReviewPayload",
@@ -5337,7 +5302,6 @@ __all__ = [
     "stt_whisper_local",
     "_process_event",
     "_event_status_result",
-    "_consent_identity_from_payload",
     "_process_upload_job",
     "_delete_event_artifacts",
     "_delete_raw_event_artifacts",
