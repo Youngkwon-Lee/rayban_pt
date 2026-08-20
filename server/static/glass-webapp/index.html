@@ -3,73 +3,95 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=600, height=600, initial-scale=1.0, user-scalable=no">
-  <title>PT HUD</title>
-  <link rel="stylesheet" href="styles.css">
+  <meta name="description" content="Kinelo AR visit HUD for Meta Ray-Ban Display glasses.">
+  <meta name="mrbd-web-app-capable" content="yes">
+  <link rel="icon" href="/favicon.png" type="image/png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <title>Kinelo AR</title>
+  <script>
+    (function () {
+      var assetQuery = window.location.search || "";
+      var stylesheet = document.createElement("link");
+      stylesheet.rel = "stylesheet";
+      stylesheet.href = "/styles.css" + assetQuery;
+      document.head.appendChild(stylesheet);
+    })();
+  </script>
 </head>
 <body>
-  <div id="app">
-    <div id="home" class="screen">
-
-      <header class="header">
-        <div class="header-title">PT HUD</div>
-        <div class="header-conn" id="conn-status">
-          <span class="conn-dot" id="conn-dot"></span>
-          <span id="conn-label">연결 중…</span>
+  <main id="app" class="app-root" aria-live="polite">
+    <section id="home" class="screen" aria-label="Kinelo AR 세션 HUD">
+      <header class="hud-header panel">
+        <div>
+          <p class="eyebrow">Kinelo AR</p>
+          <h1>세션 HUD</h1>
+        </div>
+        <div class="connection" id="conn-status" role="status" aria-live="polite">
+          <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
+          <span id="conn-label">연결 중</span>
         </div>
       </header>
 
-      <div class="content">
-
-        <!-- Patient card -->
-        <div class="card patient-card" id="patient-card">
-          <div class="card-row">
-            <span class="card-icon">👤</span>
-            <div class="card-body">
-              <div class="card-title" id="patient-name">환자 미선택</div>
-              <div class="card-meta" id="session-label">녹화 대기</div>
-            </div>
-          </div>
+      <section class="patient-panel panel" aria-label="환자 컨텍스트">
+        <div>
+          <p class="meta-label" id="patient-context-label">환자</p>
+          <p class="patient-name" id="patient-name">미선택</p>
         </div>
-
-        <!-- Recording status card -->
-        <div class="card status-card" id="status-card">
-          <div class="card-row">
-            <span class="rec-dot hidden" id="rec-dot">●</span>
-            <div class="card-body">
-              <div class="card-title status-title" id="status-title">대기 중</div>
-              <div class="card-meta" id="status-meta"></div>
-            </div>
-            <div class="rec-timer" id="rec-timer"></div>
-          </div>
+        <div class="context-pills" aria-label="세션 준비 상태">
+          <div class="session-pill" id="readiness-label">준비</div>
+          <div class="session-pill" id="session-label">E0</div>
         </div>
+      </section>
 
-        <!-- AI Insight card (hidden until insight arrives) -->
-        <div class="card insight-card hidden" id="insight-card">
-          <div class="card-row">
-            <span class="card-icon">💡</span>
-            <div class="card-body">
-              <div class="card-title insight-title" id="insight-title">AI 분석</div>
-              <div class="card-meta" id="insight-body"></div>
-            </div>
-            <div class="insight-dismiss" id="insight-timer-bar">
-              <div class="insight-progress" id="insight-progress"></div>
-            </div>
-          </div>
+      <section class="focusable status-panel panel" id="status-card" tabindex="0" data-action="cycle_record_preview" aria-label="현재 상태">
+        <div class="status-row">
+          <span class="rec-dot hidden" id="rec-dot" aria-hidden="true"></span>
+          <span class="status-kicker" id="status-kicker">STANDBY</span>
+          <span class="rec-timer hidden" id="rec-timer">00:00</span>
         </div>
+        <h2 id="status-title">화면 준비</h2>
+        <p id="status-meta">라이브 연결을 기다리는 중</p>
+        <div class="record-list hidden" id="record-list" aria-label="환자 기록 미리보기"></div>
+        <p class="status-caption" id="status-caption">렌즈에는 최소 정보만 표시됩니다.</p>
+      </section>
 
-      </div>
+      <section class="cue-panel panel hidden" id="insight-card" aria-label="최근 안내">
+        <div>
+          <p class="meta-label">안내</p>
+          <p class="cue-title" id="insight-title">확인 필요</p>
+          <p class="cue-body" id="insight-body"></p>
+        </div>
+        <div class="cue-time" id="insight-timer-bar" aria-hidden="true">
+          <div id="insight-progress"></div>
+        </div>
+      </section>
 
-      <nav class="nav-bar">
-        <button class="nav-item focusable primary" id="toggle-btn" data-action="toggle-recording">
-          ● 녹화 시작
+      <nav class="command-rail" id="command-rail" data-count="3" aria-label="HUD 명령">
+        <button class="focusable command-button primary" id="toggle-btn" data-action="toggle_recording">
+          <span class="command-icon" id="toggle-icon" aria-hidden="true">●</span>
+          <span id="toggle-label">녹화 시작</span>
+        </button>
+        <button class="focusable command-button" id="next-btn" data-action="next_phase">
+          <span class="command-icon" id="next-icon" aria-hidden="true">›</span>
+          <span id="next-label">다른 환자</span>
+        </button>
+        <button class="focusable command-button danger" id="end-btn" data-action="end_visit_session">
+          <span class="command-icon" id="end-icon" aria-hidden="true">×</span>
+          <span id="end-label">종료</span>
         </button>
       </nav>
+    </section>
+  </main>
 
-    </div>
-  </div>
+  <div id="toast" class="toast" role="status"></div>
 
-  <div id="toast" class="toast"></div>
-
-  <script src="app.js"></script>
+  <script>
+    (function () {
+      var assetQuery = window.location.search || "";
+      var script = document.createElement("script");
+      script.src = "/app.js" + assetQuery;
+      document.body.appendChild(script);
+    })();
+  </script>
 </body>
 </html>

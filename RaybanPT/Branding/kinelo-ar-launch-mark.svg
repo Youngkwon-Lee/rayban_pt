@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="glass" x1="268" y1="332" x2="756" y2="754" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#82EEFF"/>
+      <stop offset="0.52" stop-color="#81B3FF"/>
+      <stop offset="1" stop-color="#A796FF"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="406" y1="506" x2="650" y2="564" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6FBFF"/>
+      <stop offset="1" stop-color="#CFE1FF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="black" fill-opacity="0"/>
+  <path d="M332 330H692C752.751 330 802 379.249 802 440V448C802 476.719 825.281 500 854 500C871.673 500 886 514.327 886 532C886 549.673 871.673 564 854 564H784C723.249 564 674 613.249 674 674V676C674 728.467 631.467 771 579 771H445C392.533 771 350 728.467 350 676V674C350 613.249 300.751 564 240 564H170C152.327 564 138 549.673 138 532C138 514.327 152.327 500 170 500C198.719 500 222 476.719 222 448V440C222 379.249 271.249 330 332 330Z" stroke="url(#glass)" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M408 544H468L504 490L548 590L592 544H652" stroke="url(#pulse)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

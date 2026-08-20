@@ -90,6 +90,77 @@ final class TextSendUITest: XCTestCase {
         XCTAssertTrue(app.navigationBars["기기 점검"].waitForExistence(timeout: 3), "서버 설정에서 기기 점검 화면으로 이동할 수 없음")
     }
 
+    func testMockDATTransportCameraStream() throws {
+        let mockApp = XCUIApplication()
+        // Reset the one-time launch gate so this transport test is deterministic
+        // even when the simulator has already completed the ready panel in a
+        // previous UI test run.
+        mockApp.launchArguments = [
+            "-rayban_dat_mock",
+            "-rayban_dat_mock_qa_patient",
+            "-smart_glass_live.has_seen_ready_panel",
+            "false",
+        ]
+        mockApp.launch()
+
+        let startButton = mockApp.buttons["startFieldInputButton"]
+        XCTAssertTrue(startButton.waitForExistence(timeout: 8), "준비 화면의 현장 입력 시작 버튼이 없음")
+        startButton.tap()
+
+        // The official MWDATMockDevice should drive the same DeviceSession /
+        // Camera.Stream path used by physical glasses. The stream surface
+        // exposes the connected source after the first mock frame arrives.
+        XCTAssertTrue(
+            mockApp.staticTexts["Glass"].waitForExistence(timeout: 8),
+            "DAT mock 장치가 카메라 화면에서 활성 장치로 표시되지 않음"
+        )
+        let startStreamButton = mockApp.buttons["시작"]
+        XCTAssertTrue(startStreamButton.waitForExistence(timeout: 8), "DAT mock 스트림 시작 버튼이 없음")
+        startStreamButton.tap()
+
+        // The center action opens the patient picker instead of starting the
+        // DAT stream until a subject is selected. Handle both a clean
+        // simulator (empty state) and a simulator with persisted QA patients.
+        let patientPicker = mockApp.navigationBars["환자 선택"]
+        if patientPicker.waitForExistence(timeout: 3) {
+            let addFirstPatient = mockApp.buttons["첫 번째 환자 추가"]
+            if addFirstPatient.waitForExistence(timeout: 2) {
+                addFirstPatient.tap()
+                let patientField = mockApp.textFields["환자 이름 입력"]
+                XCTAssertTrue(patientField.waitForExistence(timeout: 3), "QA 환자 입력 필드가 없음")
+                patientField.tap()
+                patientField.typeText("DAT Mock QA")
+                patientField.typeText("\n")
+            } else {
+                let firstPatient = mockApp.tables.cells.firstMatch
+                XCTAssertTrue(firstPatient.waitForExistence(timeout: 3), "기존 QA 환자 행이 없음")
+                firstPatient.tap()
+            }
+
+            let resumedStart = mockApp.buttons["시작"]
+            XCTAssertTrue(resumedStart.waitForExistence(timeout: 5), "환자 선택 후 시작 버튼이 없음")
+            resumedStart.tap()
+        }
+
+        // The session reaching the live state is a useful transport proof even
+        // when the simulator's MockDevice media pipeline is unavailable.
+        XCTAssertTrue(
+            mockApp.staticTexts["프레임 수신 대기 중"].waitForExistence(timeout: 8),
+            "DAT mock Camera.Stream이 streaming 상태로 올라오지 않음"
+        )
+
+        if !mockApp.images["raybanDATFrame"].waitForExistence(timeout: 8) {
+            let os = ProcessInfo.processInfo.operatingSystemVersion
+            if os.majorVersion == 26 && os.minorVersion == 5 {
+                throw XCTSkip(
+                    "Meta MWDATMockDevice upstream issue #197: iOS 26.5 Simulator에서 "
+                    + "videoFramePublisher가 호출되지 않음"
+                )
+            }
+            XCTFail("DAT mock Camera.Stream에서 앱 화면으로 프레임이 전달되지 않음")
+        }
+    }
+
     func testChartReviewQueueAccess() throws {
         try XCTSkipIf(bridgeAPIKey.isEmpty, "BRIDGE_API_KEY 환경변수가 있어야 보호된 차트 API를 테스트할 수 있음")
 

@@ -45,3 +45,11 @@ server/**/*.pyc
 server/*.db
 server/*.sqlite
 server/.bridge_api_key
+server/.infisical.json
+server/.rayban_bridge.pid
+
+# Local build/evidence output
+.deriveddata-device/
+.codex-build/
+output/
+server/static/glass-webapp/qr-*.png

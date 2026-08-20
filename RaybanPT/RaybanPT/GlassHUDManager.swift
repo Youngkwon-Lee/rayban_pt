@@ -5,6 +5,47 @@ import MWDATDisplay
 
 extension Notification.Name {
     static let glassCaptouchRecordToggle = Notification.Name("glassCaptouchRecordToggle")
+    static let glassRecordingStateRequested = Notification.Name("glassRecordingStateRequested")
+    static let glassCapturePhotoRequested = Notification.Name("glassCapturePhotoRequested")
+    static let glassAudioStartRequested = Notification.Name("glassAudioStartRequested")
+    static let glassAudioStopRequested = Notification.Name("glassAudioStopRequested")
+}
+
+enum GlassRecordToggleSource: String {
+    case glassDisplayButton = "glass_display_button"
+    case bridgeCommand = "bridge_command"
+    case neuralBandDeepLink = "neural_band_deeplink"
+    case debugDeepLink = "debug_deeplink"
+    case unknown = "unknown"
+
+    init(notification: Notification) {
+        let raw = (notification.userInfo?["source"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self = GlassRecordToggleSource(rawValue: raw) ?? .unknown
+    }
+
+    var isHandsFreeGlassPath: Bool {
+        switch self {
+        case .glassDisplayButton, .bridgeCommand, .neuralBandDeepLink:
+            return true
+        case .debugDeepLink, .unknown:
+            return false
+        }
+    }
+
+    var toastLabel: String {
+        switch self {
+        case .glassDisplayButton:
+            return "안경 HUD"
+        case .bridgeCommand:
+            return "브리지 명령"
+        case .neuralBandDeepLink:
+            return "Neural Band"
+        case .debugDeepLink:
+            return "디버그"
+        case .unknown:
+            return "안경 입력"
+        }
+    }
 }
 
 // Manages the Ray-Ban Display HUD — context overlay, recording status, and AI insights.
@@ -35,28 +76,53 @@ final class GlassHUDManager {
     }
 
     private enum HUDMode {
-        case off
-        case context
+        case standby
+        case ready
         case recording
-        indirect case insight(title: String, body: String, returnTo: HUDMode)
+        case uploading
+        case analyzing
+        case patientSelect
+        case captureHistory
+        case recommendations
+        indirect case result(kind: HUDResultKind, title: String, body: String, returnTo: HUDMode)
     }
 
-    private var hudMode: HUDMode = .off
+    private enum HUDResultKind {
+        case success
+        case error
+    }
+
+    private var hudMode: HUDMode = .standby
     private var activePatient: String? = nil
+    private var patientCandidates: [String] = []
+    private var captureHistorySummaries: [String] = []
+    private var selectedAssessment: String? = nil
     private var sessionCount = 0
     private var recordingStart: Date? = nil
+    private var isAudioMemoRecording = false
 
     private init() {}
 
     // MARK: - Display lifecycle (called by StreamViewModel)
 
     func attachDisplay(to session: DeviceSession) async {
+        if display != nil, isDisplayConnected {
+            return
+        }
+
+        if display != nil, !isDisplayConnected {
+            await resetDisplayTransport()
+        }
+
         guard display == nil else { return }
         do {
             let capability = try session.addDisplay()
+            display = capability
+            isSimulated = false
             let (stream, continuation) = AsyncStream.makeStream(of: DisplayState.self)
             displayStateContinuation = continuation
             stateListenerToken = capability.statePublisher.listen { state in
+                print("[GlassHUD] display state: \(state)")
                 continuation.yield(state)
             }
             displayStateTask = Task { [weak self] in
@@ -78,10 +144,13 @@ final class GlassHUDManager {
                     }
                 }
             }
-            await capability.start()
-            display = capability
+            print("[GlassHUD] display capability added; starting")
+            capability.start()
+            await pushHUD()
+            print("[GlassHUD] initial HUD push requested")
         } catch {
             print("[GlassHUD] attachDisplay failed: \(error)")
+            await resetDisplayTransport()
         }
     }
 
@@ -94,6 +163,16 @@ final class GlassHUDManager {
     }
 
     func detachDisplay() async {
+        await resetDisplayTransport()
+        isSimulated = false
+        demoHUDSummary = nil
+        hudMode = .standby
+        activePatient = nil
+        sessionCount = 0
+        recordingStart = nil
+    }
+
+    private func resetDisplayTransport() async {
         elapsedTask?.cancel()
         elapsedTask = nil
         insightTask?.cancel()
@@ -105,15 +184,9 @@ final class GlassHUDManager {
         displayStateContinuation = nil
         displayStateTask?.cancel()
         displayStateTask = nil
-        await display?.stop()
+        display?.stop()
         display = nil
-        isSimulated = false
         isDisplayConnected = false
-        demoHUDSummary = nil
-        hudMode = .off
-        activePatient = nil
-        sessionCount = 0
-        recordingStart = nil
     }
 
     // MARK: - Context HUD (shown while streaming, not recording)
@@ -121,19 +194,19 @@ final class GlassHUDManager {
     func startContext(patient: String?) async {
         activePatient = patient
         sessionCount = 0
-        hudMode = .context
+        hudMode = .ready
         await pushHUD()
     }
 
     func updateContextPatient(_ patient: String?) async {
         activePatient = patient
-        if case .context = hudMode {
+        if case .ready = hudMode {
             await pushHUD()
         }
     }
 
     func stopContext() async {
-        hudMode = .off
+        hudMode = .standby
         activePatient = nil
         sessionCount = 0
         await pushHUD()
@@ -141,7 +214,33 @@ final class GlassHUDManager {
 
     func showStandby(patient: String?) async {
         activePatient = patient
-        hudMode = .off
+        patientCandidates = []
+        hudMode = .standby
+        await pushHUD()
+    }
+
+    func showPatientSelection(current patient: String?, candidates: [String]) async {
+        activePatient = patient
+        patientCandidates = Array(
+            candidates
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(3)
+        )
+        hudMode = .patientSelect
+        await pushHUD()
+    }
+
+    func showCaptureHistory(patient: String?, summaries: [String]) async {
+        insightTask?.cancel()
+        activePatient = patient
+        captureHistorySummaries = Array(
+            summaries
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .prefix(3)
+        )
+        hudMode = .captureHistory
         await pushHUD()
     }
 
@@ -164,21 +263,69 @@ final class GlassHUDManager {
         insightTask?.cancel()
         insightTask = nil
         recordingStart = nil
-        hudMode = .context
+        isAudioMemoRecording = false
+        hudMode = .ready
         await pushHUD()
     }
 
-    // MARK: - AI Insight HUD (auto-dismisses after 8 s)
-
-    func showInsight(title: String, body: String) async {
-        insightTask?.cancel()
-        let previousMode = hudMode
-        hudMode = .insight(title: title, body: body, returnTo: previousMode)
+    func setAudioMemoRecording(_ active: Bool) async {
+        isAudioMemoRecording = active
         await pushHUD()
+    }
+
+    // MARK: - Processing HUD
+
+    func showUploading(patient: String?) async {
+        insightTask?.cancel()
+        activePatient = patient
+        hudMode = .uploading
+        await pushHUD()
+    }
+
+    func showAnalyzing(patient: String?) async {
+        insightTask?.cancel()
+        activePatient = patient
+        hudMode = .analyzing
+        await pushHUD()
+    }
+
+    func showRecommendations(patient: String?) async {
+        insightTask?.cancel()
+        activePatient = patient
+        hudMode = .recommendations
+        await pushHUD()
+    }
+
+    func selectAssessment(_ title: String, patient: String?) async {
+        selectedAssessment = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        activePatient = patient
+        hudMode = .recommendations
+        await pushHUD()
+    }
+
+    // MARK: - Result HUD
+
+    func showSuccess(title: String, body: String) async {
+        insightTask?.cancel()
+        let returnMode = resolvedReturnModeAfterResult()
+        hudMode = .result(kind: .success, title: title, body: body, returnTo: returnMode)
+        await pushHUD()
+        scheduleReturn(to: returnMode, afterNanoseconds: 2_200_000_000)
+    }
+
+    func showError(title: String, body: String) async {
+        insightTask?.cancel()
+        let returnMode = resolvedReturnModeAfterResult()
+        hudMode = .result(kind: .error, title: title, body: body, returnTo: returnMode)
+        await pushHUD()
+        scheduleReturn(to: returnMode, afterNanoseconds: 8_000_000_000)
+    }
+
+    private func scheduleReturn(to returnMode: HUDMode, afterNanoseconds delay: UInt64) {
         insightTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            try? await Task.sleep(nanoseconds: delay)
             guard let self, !Task.isCancelled else { return }
-            self.hudMode = previousMode
+            self.hudMode = returnMode
             await self.pushHUD()
         }
     }
@@ -195,6 +342,10 @@ final class GlassHUDManager {
                 await self.pushHUD()
             }
         }
+    }
+
+    private func resolvedReturnModeAfterResult() -> HUDMode {
+        activePatient == nil ? .standby : .ready
     }
 
     private func pushHUD() async {
@@ -220,11 +371,14 @@ final class GlassHUDManager {
         var isRec = false
         if case .recording = hudMode { isRec = true }
         var insight: BridgeClient.GlassInsight? = nil
-        if case .insight(let t, let b, _) = hudMode {
+        if case .result(_, let t, let b, _) = hudMode {
             insight = BridgeClient.GlassInsight(id: t + b, title: t, body: b)
         }
+        let summary = bridgeModeSummary()
         await client.pushGlassState(
             patient: activePatient,
+            mode: summary.mode,
+            message: summary.message,
             isRecording: isRec,
             recordingStart: recordingStart,
             sessionCount: sessionCount,
@@ -239,34 +393,87 @@ final class GlassHUDManager {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard let self, !Task.isCancelled else { break }
                 guard let client = self.bridgeClient else { continue }
-                if let cmd = await client.pollGlassCommand(), cmd == "toggle_recording" {
-                    NotificationCenter.default.post(
-                        name: .glassCaptouchRecordToggle,
-                        object: nil
-                    )
+                if let cmd = await client.pollGlassCommand() {
+                    postGlassCommandNotification(cmd)
                 }
             }
         }
     }
 
+    private func postGlassCommandNotification(_ command: String) {
+        var userInfo: [String: Any] = ["source": GlassRecordToggleSource.bridgeCommand.rawValue]
+        let notificationName: Notification.Name
+
+        switch command {
+        case "start_recording", "stop_recording":
+            userInfo["recording"] = command == "start_recording"
+            notificationName = .glassRecordingStateRequested
+        case "toggle_recording":
+            notificationName = .glassCaptouchRecordToggle
+        case "capture_photo":
+            notificationName = .glassCapturePhotoRequested
+        case "start_audio":
+            isAudioMemoRecording = true
+            notificationName = .glassAudioStartRequested
+        case "stop_audio":
+            isAudioMemoRecording = false
+            notificationName = .glassAudioStopRequested
+        case "start_live":
+            notificationName = .glassStandbyStartRequested
+        case "open_capture_history":
+            notificationName = .openCaptureHistoryRequested
+        case "primary_action":
+            notificationName = .glassPrimaryActionRequested
+        case "select_patient":
+            notificationName = .glassPatientPickerRequested
+        case "show_recommendations":
+            notificationName = .glassRecommendedAssessmentRequested
+        default:
+            return
+        }
+
+        NotificationCenter.default.post(name: notificationName, object: nil, userInfo: userInfo)
+    }
+
+    private func postHUDNotification(_ name: Notification.Name, userInfo extraUserInfo: [String: String] = [:]) {
+        var userInfo = extraUserInfo
+        userInfo["source"] = GlassRecordToggleSource.glassDisplayButton.rawValue
+        NotificationCenter.default.post(
+            name: name,
+            object: nil,
+            userInfo: userInfo
+        )
+    }
+
     private func buildView() -> FlexBox {
         switch hudMode {
-        case .off:
+        case .standby:
             return buildStandbyView()
-        case .context:
+        case .ready:
             return buildContextView()
         case .recording:
             return buildRecordingView()
-        case .insight(let title, let body, _):
-            return buildInsightView(title: title, body: body)
+        case .uploading:
+            return buildUploadingView()
+        case .analyzing:
+            return buildAnalyzingView()
+        case .patientSelect:
+            return buildPatientSelectionView()
+        case .captureHistory:
+            return buildCaptureHistoryView()
+        case .recommendations:
+            return buildRecommendedAssessmentView()
+        case .result(let kind, let title, let body, _):
+            return buildResultView(kind: kind, title: title, body: body)
         }
     }
 
     private func buildStandbyView() -> FlexBox {
-        FlexBox(direction: .column, spacing: 8) {
+        let hasPatient = !(activePatient?.isEmpty ?? true)
+        return FlexBox(direction: .column, spacing: 8) {
             buildHeaderCard(
-                title: "Care Live",
-                subtitle: "세션 준비 완료"
+                title: "Kinelo AR",
+                subtitle: hasPatient ? "환자 선택 완료" : "환자 선택 필요"
             )
             if let activePatient, !activePatient.isEmpty {
                 buildPatientCard(
@@ -274,42 +481,108 @@ final class GlassHUDManager {
                     detail: "선택 환자"
                 )
             }
-            buildInfoCard(
-                title: "라이브 시작 준비",
-                body: "iPhone에서 라이브를 시작하거나 안경 버튼으로 바로 진행하세요."
-            )
+            if hasPatient {
+                buildActionCard(
+                    marker: "LIVE",
+                    title: "라이브 시작",
+                    body: "선택하면 카메라 라이브 화면으로 들어갑니다.",
+                    buttonLabel: "라이브 시작",
+                    buttonStyle: .primary,
+                    iconName: .videoCamera
+                ) {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassStandbyStartRequested)
+                    }
+                }
+            } else {
+                buildActionCard(
+                    marker: "PATIENT",
+                    title: "환자 먼저 선택",
+                    body: "폰에서 환자를 선택하면 바로 기록을 시작할 수 있습니다.",
+                    buttonLabel: "환자 선택",
+                    buttonStyle: .primary,
+                    iconName: .person
+                ) {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassPatientPickerRequested)
+                    }
+                }
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: hasPatient ? "환자 변경" : "환자 선택", style: .secondary, iconName: .person, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassPatientPickerRequested)
+                    }
+                })
+                Button(label: "기록 보기", style: .secondary, iconName: .lightBulb, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.openCaptureHistoryRequested)
+                    }
+                })
+            }
         }
     }
 
     // Patient name + session counter + REC start button
     private func buildContextView() -> FlexBox {
+        let hasPatient = !(activePatient?.isEmpty ?? true)
         let patient = activePatient ?? "환자 미선택"
-        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
+        let sessionLine = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 영상 대기"
         return FlexBox(direction: .column, spacing: 8) {
             buildHeaderCard(
-                title: "Care Live Session",
-                subtitle: "라이브 연결됨"
+                title: "Kinelo AR",
+                subtitle: hasPatient ? "라이브 연결됨" : "환자 선택 필요"
             )
             buildPatientCard(
                 patient: patient,
                 detail: sessionLine
             )
-            buildInfoCard(
-                title: "핸즈프리 기록",
-                body: "관찰이 시작되면 안경에서 바로 녹화를 시작할 수 있습니다."
-            )
-            Button(label: "녹화 시작", style: .primary, iconName: .videoCamera, onClick: {
-                Task { @MainActor in
-                    NotificationCenter.default.post(
-                        name: .glassCaptouchRecordToggle,
-                        object: nil
-                    )
+            if hasPatient {
+                buildActionCard(
+                    marker: "START",
+                    title: "영상 시작",
+                    body: "손 제스처로 선택하면 세션 기록이 시작됩니다.",
+                    buttonLabel: "영상 시작",
+                    buttonStyle: .primary,
+                    iconName: .videoCamera
+                ) {
+                    Task { @MainActor in
+                        NotificationCenter.default.post(
+                            name: .glassCaptouchRecordToggle,
+                            object: nil,
+                            userInfo: ["source": GlassRecordToggleSource.glassDisplayButton.rawValue]
+                        )
+                    }
                 }
-            })
+            } else {
+                buildActionCard(
+                    marker: "PATIENT",
+                    title: "환자 선택",
+                    body: "환자 없이 영상을 기록하면 자동 저장과 차트 연결이 불안정합니다.",
+                    buttonLabel: "환자 선택",
+                    buttonStyle: .primary,
+                    iconName: .person
+                ) {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassPatientPickerRequested)
+                    }
+                }
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "추천 평가", style: .secondary, iconName: .checkmarkCircle, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassRecommendedAssessmentRequested)
+                    }
+                })
+                Button(label: "기록 보기", style: .secondary, iconName: .lightBulb, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.openCaptureHistoryRequested)
+                    }
+                })
+            }
         }
     }
 
-    // REC timer + session info + STOP button
     private func buildRecordingView() -> FlexBox {
         let elapsed = elapsedString()
         let patient = activePatient
@@ -321,30 +594,245 @@ final class GlassHUDManager {
             if let patient {
                 buildPatientCard(
                     patient: patient,
-                    detail: "실시간 기록 수집 중"
+                    detail: "움직임, 보조, 수행 상태 수집 중"
                 )
             }
-            buildInfoCard(
-                title: "기록 진행 중",
-                body: "중지하면 저장과 분석으로 바로 이어집니다."
-            )
-            Button(label: "녹화 중지", style: .secondary, iconName: .x, onClick: {
+            buildActionCard(
+                marker: "STOP",
+                title: "영상 중지",
+                body: "중지하면 저장, 업로드, 분석으로 이어집니다.",
+                buttonLabel: "영상 중지",
+                buttonStyle: .secondary,
+                iconName: .x
+            ) {
                 Task { @MainActor in
                     NotificationCenter.default.post(
                         name: .glassCaptouchRecordToggle,
-                        object: nil
+                        object: nil,
+                        userInfo: ["source": GlassRecordToggleSource.glassDisplayButton.rawValue]
                     )
                 }
-            })
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "사진 촬영", style: .primary, iconName: .videoCamera, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassCapturePhotoRequested)
+                    }
+                })
+                Button(
+                    label: self.isAudioMemoRecording ? "음성 종료" : "음성 메모",
+                    style: self.isAudioMemoRecording ? .primary : .secondary,
+                    iconName: .speechBubble,
+                    onClick: {
+                        Task { @MainActor in
+                            self.isAudioMemoRecording.toggle()
+                            self.postHUDNotification(
+                                self.isAudioMemoRecording
+                                    ? .glassAudioStartRequested
+                                    : .glassAudioStopRequested
+                            )
+                            await self.pushHUD()
+                        }
+                    }
+                )
+            }
+            buildInfoCard(
+                title: "현재 상태",
+                body: "중지는 한 번, 저장과 업로드는 앱이 이어서 처리합니다."
+            )
         }
     }
 
-    // AI chart summary — shown for 8 seconds then returns to previous mode
-    private func buildInsightView(title: String, body: String) -> FlexBox {
+    private func buildPatientSelectionView() -> FlexBox {
+        let hasCurrentPatient = !(activePatient?.isEmpty ?? true)
         return FlexBox(direction: .column, spacing: 8) {
             buildHeaderCard(
-                title: "Care Live Insight",
-                subtitle: "분석 결과 도착"
+                title: "환자 선택",
+                subtitle: patientCandidates.isEmpty ? "iPhone에서 검색" : "최근 환자 빠른 선택"
+            )
+            if let activePatient, !activePatient.isEmpty {
+                buildPatientCard(
+                    patient: activePatient,
+                    detail: "현재 선택됨"
+                )
+            }
+            if patientCandidates.isEmpty {
+                buildInfoCard(
+                    title: "최근 환자 없음",
+                    body: "iPhone에 열린 환자 선택 화면에서 검색하거나 새 환자를 추가하세요."
+                )
+            } else {
+                FlexBox(direction: .column, spacing: 8) {
+                    for candidate in patientCandidates {
+                        Button(label: candidate, style: .primary, iconName: .person, onClick: {
+                            Task { @MainActor in
+                                self.postHUDNotification(
+                                    .glassPatientSelectedFromHUD,
+                                    userInfo: ["patient_name": candidate]
+                                )
+                            }
+                        })
+                    }
+                }
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "iPhone 검색", style: .secondary, iconName: .person, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassPatientPickerRequested)
+                    }
+                })
+                if hasCurrentPatient {
+                    Button(label: "돌아가기", style: .secondary, iconName: .checkmarkCircle, onClick: {
+                        Task { @MainActor in
+                            await self.showStandby(patient: self.activePatient)
+                        }
+                    })
+                }
+            }
+        }
+    }
+
+    private func buildCaptureHistoryView() -> FlexBox {
+        return FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "기록 보기",
+                subtitle: captureHistorySummaries.isEmpty ? "저장 기록 없음" : "최근 저장 \(captureHistorySummaries.count)개"
+            )
+            if let activePatient, !activePatient.isEmpty {
+                buildPatientCard(
+                    patient: activePatient,
+                    detail: "현재 선택 환자"
+                )
+            }
+            if captureHistorySummaries.isEmpty {
+                buildInfoCard(
+                    title: "아직 기록이 없습니다",
+                    body: "영상 저장이나 전송 후 여기에 최근 기록이 표시됩니다."
+                )
+            } else {
+                FlexBox(direction: .column, spacing: 8) {
+                    for summary in captureHistorySummaries {
+                        buildInfoCard(
+                            title: summary,
+                            body: "상세 재생과 공유는 iPhone에서 확인"
+                        )
+                    }
+                }
+            }
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "iPhone 상세", style: .primary, iconName: .lightBulb, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(
+                            .openCaptureHistoryRequested,
+                            userInfo: ["open_phone": "true"]
+                        )
+                    }
+                })
+                Button(label: "추천 평가", style: .secondary, iconName: .checkmarkCircle, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.glassRecommendedAssessmentRequested)
+                    }
+                })
+            }
+        }
+    }
+
+    private func buildRecommendedAssessmentView() -> FlexBox {
+        let patient = activePatient ?? "환자 미선택"
+        return FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "추천 평가",
+                subtitle: selectedAssessment?.isEmpty == false ? "선택됨" : "다음 관찰 항목"
+            )
+            buildPatientCard(
+                patient: patient,
+                detail: "현재 세션 기준"
+            )
+            if let selectedAssessment, !selectedAssessment.isEmpty {
+                buildInfoCard(
+                    title: "오늘 평가",
+                    body: selectedAssessment
+                )
+            }
+            FlexBox(direction: .column, spacing: 8) {
+                for item in [
+                    "자세/정렬",
+                    "기능 과제",
+                    "안전 신호"
+                ] {
+                    Button(label: item, style: item == selectedAssessment ? .primary : .secondary, iconName: .checkmarkCircle, onClick: {
+                        Task { @MainActor in
+                            self.postHUDNotification(
+                                .glassAssessmentSelectedFromHUD,
+                                userInfo: ["assessment": item]
+                            )
+                        }
+                    })
+                }
+            }
+            buildInfoCard(
+                title: "관찰 힌트",
+                body: "정렬, 보상 움직임, 보조량, 피로/호흡 신호를 함께 확인"
+            )
+            FlexBox(direction: .row, spacing: 8, wrap: true) {
+                Button(label: "기록 보기", style: .secondary, iconName: .lightBulb, onClick: {
+                    Task { @MainActor in
+                        self.postHUDNotification(.openCaptureHistoryRequested)
+                    }
+                })
+                Button(label: "돌아가기", style: .secondary, iconName: .person, onClick: {
+                    Task { @MainActor in
+                        await self.showStandby(patient: self.activePatient)
+                    }
+                })
+            }
+        }
+    }
+
+    private func buildUploadingView() -> FlexBox {
+        FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "Kinelo AR",
+                subtitle: "업로드 중"
+            )
+            if let activePatient, !activePatient.isEmpty {
+                buildPatientCard(
+                    patient: activePatient,
+                    detail: "캡처 업로드 진행 중"
+                )
+            }
+            buildInfoCard(
+                title: "브리지 전송 중",
+                body: "캡처를 안전하게 올리고 있습니다."
+            )
+        }
+    }
+
+    private func buildAnalyzingView() -> FlexBox {
+        FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "Kinelo AR",
+                subtitle: "분석 중"
+            )
+            if let activePatient, !activePatient.isEmpty {
+                buildPatientCard(
+                    patient: activePatient,
+                    detail: "SOAP 초안 생성 중"
+                )
+            }
+            buildInfoCard(
+                title: "자동 기록 생성",
+                body: "이미지, 영상, 음성을 정리하고 있습니다."
+            )
+        }
+    }
+
+    private func buildResultView(kind: HUDResultKind, title: String, body: String) -> FlexBox {
+        let subtitle = kind == .success ? "기록 완료" : "확인 필요"
+        return FlexBox(direction: .column, spacing: 8) {
+            buildHeaderCard(
+                title: "Kinelo AR",
+                subtitle: subtitle
             )
             FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
                 Icon(name: .lightBulb)
@@ -353,7 +841,7 @@ final class GlassHUDManager {
             .padding(16)
             .background(.card)
             buildInfoCard(
-                title: "요약",
+                title: kind == .success ? "저장 결과" : "오류 안내",
                 body: body
             )
         }
@@ -388,21 +876,102 @@ final class GlassHUDManager {
         .padding(16)
     }
 
+    private func buildActionCard(
+        marker: String,
+        title: String,
+        body: String,
+        buttonLabel: String,
+        buttonStyle: ButtonStyle,
+        iconName: IconName,
+        onClick: @escaping @Sendable () -> Void
+    ) -> FlexBox {
+        FlexBox(direction: .column, spacing: 10) {
+            FlexBox(direction: .row, spacing: 8, crossAlignment: .center) {
+                Icon(name: iconName)
+                Text(marker, style: .body)
+            }
+            Text(title, style: .body)
+            Text(body, style: .meta, color: .secondary)
+            Button(label: buttonLabel, style: buttonStyle, iconName: iconName, onClick: onClick)
+        }
+        .padding(16)
+        .background(.card)
+        .onTap(onClick)
+    }
+
     private func buildDemoSummary() -> String {
         switch hudMode {
-        case .off:
+        case .standby:
             let patient = activePatient.map { " · \($0)" } ?? ""
             return "🟦 준비 완료\(patient)"
-        case .context:
+        case .ready:
             let patient = activePatient ?? "환자 미선택"
-            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 녹화 대기"
+            let status = sessionCount > 0 ? "세션 \(sessionCount)회 완료" : "첫 영상 대기"
             return "🟢 라이브  \(patient) · \(status)"
         case .recording:
             let elapsed = elapsedString()
             let suffix = activePatient.map { " · \($0)" } ?? ""
             return "🔴 REC \(elapsed) · 세션 \(max(sessionCount, 1))\(suffix)"
-        case .insight(let title, let body, _):
-            return "💡 \(title)  ·  \(body)"
+        case .uploading:
+            return "🟠 업로드 중"
+        case .analyzing:
+            return "🟣 분석 중"
+        case .patientSelect:
+            if patientCandidates.isEmpty {
+                return "👤 환자 선택 · iPhone 검색"
+            }
+            return "👤 환자 선택 · \(patientCandidates.prefix(3).joined(separator: ", "))"
+        case .captureHistory:
+            return captureHistorySummaries.isEmpty
+                ? "📚 기록 보기 · 저장 기록 없음"
+                : "📚 기록 보기 · 최근 \(captureHistorySummaries.count)개"
+        case .recommendations:
+            if let selectedAssessment, !selectedAssessment.isEmpty {
+                return "🧭 추천 평가 · \(selectedAssessment)"
+            }
+            return "🧭 추천 평가 · 자세/기능/안전"
+        case .result(let kind, let title, let body, _):
+            return "\(kind == .success ? "✅" : "⚠️") \(title) · \(body)"
+        }
+    }
+
+    private func bridgeModeSummary() -> (mode: String, message: String) {
+        switch hudMode {
+        case .standby:
+            return ("standby", activePatient == nil ? "라이브 연결을 기다리는 중" : "선택 환자 대기")
+        case .ready:
+            if let activePatient, !activePatient.isEmpty {
+                return ("ready", "하단 버튼으로 바로 시작")
+            }
+            return ("ready", "환자 선택 후 바로 기록할 수 있습니다.")
+        case .recording:
+            if let activePatient, !activePatient.isEmpty {
+                return ("recording", "\(activePatient) · 세션 \(max(sessionCount, 1)) 저장 준비")
+            }
+            return ("recording", "세션 \(max(sessionCount, 1)) 저장 준비")
+        case .uploading:
+            return ("uploading", "캡처를 브리지로 안전하게 전송 중")
+        case .analyzing:
+            return ("analyzing", "SOAP 초안과 요약을 생성 중")
+        case .patientSelect:
+            if patientCandidates.isEmpty {
+                return ("patient_select", "iPhone에서 환자를 검색하거나 새로 추가하세요")
+            }
+            return ("patient_select", "최근 환자 \(patientCandidates.count)명 중 선택")
+        case .captureHistory:
+            if captureHistorySummaries.isEmpty {
+                return ("history", "저장된 캡처 기록이 없습니다")
+            }
+            return ("history", "최근 저장 기록 \(captureHistorySummaries.count)개 확인 중")
+        case .recommendations:
+            if let selectedAssessment, !selectedAssessment.isEmpty {
+                return ("recommendations", "\(selectedAssessment) 평가 선택됨")
+            }
+            return ("recommendations", "자세/기능/안전 평가를 확인 중")
+        case .result(.success, _, let body, _):
+            return ("success", body)
+        case .result(.error, _, let body, _):
+            return ("error", body)
         }
     }
 

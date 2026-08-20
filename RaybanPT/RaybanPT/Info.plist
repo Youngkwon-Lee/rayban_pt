@@ -5,9 +5,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleName</key>
-	<string>Care Live</string>
+	<string>Kinelo AR HUD</string>
 	<key>CFBundleDisplayName</key>
-	<string>Care Live</string>
+	<string>Kinelo AR HUD</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>CFBundleShortVersionString</key>
@@ -58,7 +58,14 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+		<key>UIImageName</key>
+		<string>SmartGlassLaunchMark</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<false/>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
@@ -74,8 +81,13 @@
 	</array>
 	<key>MWDAT</key>
 	<dict>
+		<key>Analytics</key>
+		<dict>
+			<key>OptOut</key>
+			<true/>
+		</dict>
 		<key>AppLinkURLScheme</key>
-		<string>raybanpt://</string>
+		<string>kineloarhud://</string>
 		<key>MetaAppID</key>
 		<string>$(META_APP_ID)</string>
 		<key>ClientToken</key>
@@ -98,7 +110,9 @@
 			<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
+				<string>kineloar</string>
 				<string>raybanpt</string>
+				<string>kineloarhud</string>
 				<string>carelive</string>
 			</array>
 		</dict>

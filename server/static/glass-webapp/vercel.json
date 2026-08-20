@@ -1,0 +1,11 @@
+{
+  "rewrites": [
+    { "source": "/hud-test", "destination": "/index.html" },
+    { "source": "/connect/(.*)", "destination": "/index.html" },
+    {
+      "source": "/glass/(.*)",
+      "destination": "https://desktop-t43sn5m-1.tailde3b80.ts.net/glasspt/glass/$1"
+    },
+    { "source": "/(.*)", "destination": "/$1" }
+  ]
+}
