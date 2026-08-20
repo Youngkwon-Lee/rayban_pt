@@ -72,7 +72,10 @@ control), equipmentAndOrthosis(seating fit, tolerance), carePlan.
 ## 2. Labeling plan (what gets labeled, in which tool)
 
 Tool: `home-rehab-labeling` pediatric_home_v1 — already has the right clip
-taxonomy. Workbench: `python3 scripts/serve_workbench.py --port 8877`.
+taxonomy. Workbench:
+`python3 scripts/rehab_v1/serve_rehab_labeling_workbench.py` (default port
+8877; see `pediatric-labeling-runbook.md` for the verified procedure and
+known gaps).
 
 Per pilot session (target 1–2h labeling):
 
