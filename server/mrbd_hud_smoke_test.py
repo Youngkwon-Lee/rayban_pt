@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 import app as bridge
+import bridge_core  # (mutable config/state lives here)
 
 
 def require(condition: bool, message: str) -> None:
@@ -29,14 +30,14 @@ def main() -> None:
         or shortlink.headers.get("location") == "/glass-app/?api_key=mrbd-temp-20260622&candidate_id=enc-demo-a1f607c7",
         "demo QR shortlink redirect target mismatch",
     )
-    previous_bridge_key = bridge.BRIDGE_API_KEY
-    bridge.BRIDGE_API_KEY = "hud-shortlink-test-key"
+    previous_bridge_key = bridge_core.BRIDGE_API_KEY
+    bridge_core.BRIDGE_API_KEY = "hud-shortlink-test-key"
     try:
         hud_test_shortlink = client.get("/g/hud-test", follow_redirects=False)
         public_hud_state = client.get("/glass/state", headers={"x-hud-test": "1"})
         public_hud_command = client.get("/glass/command", headers={"x-hud-test": "1"})
     finally:
-        bridge.BRIDGE_API_KEY = previous_bridge_key
+        bridge_core.BRIDGE_API_KEY = previous_bridge_key
     hud_test_location = hud_test_shortlink.headers.get("location") or ""
     require(hud_test_shortlink.status_code == 302, "HUD test shortlink should redirect")
     require(

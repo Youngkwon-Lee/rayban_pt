@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
 
 import app as bridge  # noqa: E402
+import bridge_core  # noqa: E402  (mutable config/state lives here)
 import mlops_harness  # noqa: E402
 from lib.hud_state_machine import build_hud_fixture, build_hud_moai_bundle, summarize_hud_fixture  # noqa: E402
 from lib.moai_identity import resolve_moai_identity  # noqa: E402
@@ -78,18 +79,18 @@ def blank_jpeg_base64() -> str:
 
 
 def configure_isolated_storage(root: Path) -> None:
-    bridge.DB_PATH = root / "bridge.db"
-    bridge.UPLOAD_DIR = root / "uploads"
-    bridge.CHART_DIR = root / "charts"
-    bridge.MASKED_DIR = root / "masked"
+    bridge_core.DB_PATH = root / "bridge.db"
+    bridge_core.UPLOAD_DIR = root / "uploads"
+    bridge_core.CHART_DIR = root / "charts"
+    bridge_core.MASKED_DIR = root / "masked"
 
-    bridge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.CHART_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.MASKED_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.CHART_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.MASKED_DIR.mkdir(parents=True, exist_ok=True)
     bridge.ASYNC_RESULTS.clear()
 
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-    with sqlite3.connect(bridge.DB_PATH) as conn:
+    with sqlite3.connect(bridge_core.DB_PATH) as conn:
         conn.executescript(schema)
 
 
@@ -162,7 +163,7 @@ def main() -> None:
         require(active.status_code == 200, "consent lookup should succeed")
         require(active.json()["active"] is True, "consent should be active")
 
-        bridge.PILOT_CAPTURE_MODE = True
+        bridge_core.PILOT_CAPTURE_MODE = True
         pilot_missing = client.post(
             "/ingest",
             headers=auth_headers(scoped=True),
@@ -176,7 +177,7 @@ def main() -> None:
         )
         require(pilot_missing.status_code == 422, "pilot mode should require canonical metadata")
         require(error_code(pilot_missing.json()) == "PILOT_METADATA_REQUIRED", "pilot metadata error code mismatch")
-        bridge.PILOT_CAPTURE_MODE = False
+        bridge_core.PILOT_CAPTURE_MODE = False
 
         text = (
             "환자 김민수 010-1234-5678 test@example.com 900101-1234567 "
@@ -334,7 +335,7 @@ PTx.>
         require(recent_item["identity_completeness"]["complete"] is True, "recent event identity should be complete")
         require(recent_item["owner_org_id"] == SMOKE_ORG_ID, "recent event should expose org id")
 
-        masked_file = bridge.MASKED_DIR / f"{event_id}_masked.jpg"
+        masked_file = bridge_core.MASKED_DIR / f"{event_id}_masked.jpg"
         masked_file.write_bytes(base64.b64decode(blank_jpeg_base64()))
         masked_response = client.get(f"/masked-files/{masked_file.name}", headers=auth_headers())
         require(masked_response.status_code == 200, "masked artifact should be downloadable with api key")

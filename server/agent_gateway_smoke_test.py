@@ -15,6 +15,7 @@ os.environ["ALLOW_INSECURE_LAN"] = "false"
 from fastapi.testclient import TestClient  # noqa: E402
 
 import app as bridge  # noqa: E402
+import bridge_core  # noqa: E402  (mutable config/state lives here)
 
 
 API_KEY = os.environ["BRIDGE_API_KEY"]
@@ -30,17 +31,17 @@ def headers() -> dict[str, str]:
 
 
 def configure_isolated_storage(root: Path) -> None:
-    bridge.DB_PATH = root / "bridge.db"
-    bridge.UPLOAD_DIR = root / "uploads"
-    bridge.CHART_DIR = root / "charts"
-    bridge.MASKED_DIR = root / "masked"
-    bridge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.CHART_DIR.mkdir(parents=True, exist_ok=True)
-    bridge.MASKED_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.DB_PATH = root / "bridge.db"
+    bridge_core.UPLOAD_DIR = root / "uploads"
+    bridge_core.CHART_DIR = root / "charts"
+    bridge_core.MASKED_DIR = root / "masked"
+    bridge_core.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.CHART_DIR.mkdir(parents=True, exist_ok=True)
+    bridge_core.MASKED_DIR.mkdir(parents=True, exist_ok=True)
     bridge.ASYNC_RESULTS.clear()
 
     schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-    with sqlite3.connect(bridge.DB_PATH) as conn:
+    with sqlite3.connect(bridge_core.DB_PATH) as conn:
         conn.executescript(schema)
 
 

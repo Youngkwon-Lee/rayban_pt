@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import app as bridge
+import bridge_core  # mutable config/state lives here
 from lib.hud_state_machine import (
     build_hud_fixture,
     build_hud_moai_bundle,
@@ -452,8 +453,8 @@ def cmd_doctor(_args: argparse.Namespace) -> int:
         "checked_at": _now_iso(),
         "workspace": str(Path(__file__).resolve().parents[1]),
         "local_bridge": {
-            "db_path": str(bridge.DB_PATH),
-            "db_exists": bridge.DB_PATH.exists(),
+            "db_path": str(bridge_core.DB_PATH),
+            "db_exists": bridge_core.DB_PATH.exists(),
             "write_gate_env": WRITE_GATE_ENV,
             "write_gate_open": os.getenv(WRITE_GATE_ENV, "").strip().lower() in {"1", "true", "yes", "y", "on"},
         },
@@ -879,19 +880,19 @@ def cmd_readiness_report(args: argparse.Namespace) -> int:
 @contextmanager
 def _isolated_bridge_runtime():
     saved_paths = {
-        "DB_PATH": bridge.DB_PATH,
-        "UPLOAD_DIR": bridge.UPLOAD_DIR,
-        "CHART_DIR": bridge.CHART_DIR,
-        "MASKED_DIR": bridge.MASKED_DIR,
-        "RAW_MEDIA_DIR": bridge.RAW_MEDIA_DIR,
+        "DB_PATH": bridge_core.DB_PATH,
+        "UPLOAD_DIR": bridge_core.UPLOAD_DIR,
+        "CHART_DIR": bridge_core.CHART_DIR,
+        "MASKED_DIR": bridge_core.MASKED_DIR,
+        "RAW_MEDIA_DIR": bridge_core.RAW_MEDIA_DIR,
     }
     saved_flags = {
-        "REQUIRE_API_KEY": bridge.REQUIRE_API_KEY,
-        "BRIDGE_API_KEY": bridge.BRIDGE_API_KEY,
-        "REQUIRE_PATIENT_CONSENT": bridge.REQUIRE_PATIENT_CONSENT,
-        "PILOT_CAPTURE_MODE": bridge.PILOT_CAPTURE_MODE,
-        "AUDIO_STORE": bridge.AUDIO_STORE,
-        "VIDEO_STORE": bridge.VIDEO_STORE,
+        "REQUIRE_API_KEY": bridge_core.REQUIRE_API_KEY,
+        "BRIDGE_API_KEY": bridge_core.BRIDGE_API_KEY,
+        "REQUIRE_PATIENT_CONSENT": bridge_core.REQUIRE_PATIENT_CONSENT,
+        "PILOT_CAPTURE_MODE": bridge_core.PILOT_CAPTURE_MODE,
+        "AUDIO_STORE": bridge_core.AUDIO_STORE,
+        "VIDEO_STORE": bridge_core.VIDEO_STORE,
     }
     saved_async_results = dict(bridge.ASYNC_RESULTS)
     env_keys = ["PHI_REDACT", "SOAP_ENABLED", "IMAGE_STORE", "AUDIO_STORE", "VIDEO_STORE"]
@@ -900,23 +901,23 @@ def _isolated_bridge_runtime():
     with tempfile.TemporaryDirectory(prefix="rayban_pt_pilot_fixture_") as tmp:
         root = Path(tmp)
         try:
-            bridge.DB_PATH = root / "bridge.db"
-            bridge.UPLOAD_DIR = root / "uploads"
-            bridge.CHART_DIR = root / "charts"
-            bridge.MASKED_DIR = root / "masked"
-            bridge.RAW_MEDIA_DIR = root / "raw-media"
-            bridge.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-            bridge.CHART_DIR.mkdir(parents=True, exist_ok=True)
-            bridge.MASKED_DIR.mkdir(parents=True, exist_ok=True)
-            bridge.RAW_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+            bridge_core.DB_PATH = root / "bridge.db"
+            bridge_core.UPLOAD_DIR = root / "uploads"
+            bridge_core.CHART_DIR = root / "charts"
+            bridge_core.MASKED_DIR = root / "masked"
+            bridge_core.RAW_MEDIA_DIR = root / "raw-media"
+            bridge_core.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+            bridge_core.CHART_DIR.mkdir(parents=True, exist_ok=True)
+            bridge_core.MASKED_DIR.mkdir(parents=True, exist_ok=True)
+            bridge_core.RAW_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
             bridge.ASYNC_RESULTS.clear()
 
-            bridge.REQUIRE_API_KEY = True
-            bridge.BRIDGE_API_KEY = "pilot-fixture-key"
-            bridge.REQUIRE_PATIENT_CONSENT = True
-            bridge.PILOT_CAPTURE_MODE = True
-            bridge.AUDIO_STORE = False
-            bridge.VIDEO_STORE = False
+            bridge_core.REQUIRE_API_KEY = True
+            bridge_core.BRIDGE_API_KEY = "pilot-fixture-key"
+            bridge_core.REQUIRE_PATIENT_CONSENT = True
+            bridge_core.PILOT_CAPTURE_MODE = True
+            bridge_core.AUDIO_STORE = False
+            bridge_core.VIDEO_STORE = False
             os.environ.update(
                 {
                     "PHI_REDACT": "true",
@@ -928,22 +929,22 @@ def _isolated_bridge_runtime():
             )
 
             schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
-            with sqlite3.connect(bridge.DB_PATH) as conn:
+            with sqlite3.connect(bridge_core.DB_PATH) as conn:
                 conn.executescript(schema)
 
-            yield {"root": root, "api_key": bridge.BRIDGE_API_KEY}
+            yield {"root": root, "api_key": bridge_core.BRIDGE_API_KEY}
         finally:
-            bridge.DB_PATH = saved_paths["DB_PATH"]
-            bridge.UPLOAD_DIR = saved_paths["UPLOAD_DIR"]
-            bridge.CHART_DIR = saved_paths["CHART_DIR"]
-            bridge.MASKED_DIR = saved_paths["MASKED_DIR"]
-            bridge.RAW_MEDIA_DIR = saved_paths["RAW_MEDIA_DIR"]
-            bridge.REQUIRE_API_KEY = saved_flags["REQUIRE_API_KEY"]
-            bridge.BRIDGE_API_KEY = saved_flags["BRIDGE_API_KEY"]
-            bridge.REQUIRE_PATIENT_CONSENT = saved_flags["REQUIRE_PATIENT_CONSENT"]
-            bridge.PILOT_CAPTURE_MODE = saved_flags["PILOT_CAPTURE_MODE"]
-            bridge.AUDIO_STORE = saved_flags["AUDIO_STORE"]
-            bridge.VIDEO_STORE = saved_flags["VIDEO_STORE"]
+            bridge_core.DB_PATH = saved_paths["DB_PATH"]
+            bridge_core.UPLOAD_DIR = saved_paths["UPLOAD_DIR"]
+            bridge_core.CHART_DIR = saved_paths["CHART_DIR"]
+            bridge_core.MASKED_DIR = saved_paths["MASKED_DIR"]
+            bridge_core.RAW_MEDIA_DIR = saved_paths["RAW_MEDIA_DIR"]
+            bridge_core.REQUIRE_API_KEY = saved_flags["REQUIRE_API_KEY"]
+            bridge_core.BRIDGE_API_KEY = saved_flags["BRIDGE_API_KEY"]
+            bridge_core.REQUIRE_PATIENT_CONSENT = saved_flags["REQUIRE_PATIENT_CONSENT"]
+            bridge_core.PILOT_CAPTURE_MODE = saved_flags["PILOT_CAPTURE_MODE"]
+            bridge_core.AUDIO_STORE = saved_flags["AUDIO_STORE"]
+            bridge_core.VIDEO_STORE = saved_flags["VIDEO_STORE"]
             bridge.ASYNC_RESULTS.clear()
             bridge.ASYNC_RESULTS.update(saved_async_results)
             for key, value in saved_env.items():
