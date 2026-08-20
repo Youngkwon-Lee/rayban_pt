@@ -3217,15 +3217,6 @@ NEURAL_BAND_GESTURE_MAP = {
     "complete": "end_visit_session",
     "end_visit_session": "end_visit_session",
 }
-AGENT_ALLOWED_TOOLS = {"generate_session_cue"}
-AGENT_BLOCKED_ACTIONS = [
-    "production_supabase_write",
-    "patient_message",
-    "billing",
-    "delete_data",
-    "model_training",
-    "model_promotion",
-]
 
 
 def _short_lens_text(text: str, limit: int = 80) -> str:
@@ -3282,17 +3273,6 @@ def _build_dry_run_session_cue(payload: AgentCueDryRunRequest) -> dict:
         "source": "agent_gateway_dry_run",
         "created_at": datetime.utcnow().isoformat() + "Z",
     }
-
-
-def _existing_event_id_for_audit(event_id: Optional[str]) -> Optional[str]:
-    if not event_id:
-        return None
-    try:
-        with _conn() as conn:
-            row = conn.execute("SELECT id FROM events WHERE id = ?", (event_id,)).fetchone()
-        return event_id if row else None
-    except Exception:
-        return None
 
 
 def _lens_safe_patient_alias(value: Optional[str]) -> str:
@@ -4477,11 +4457,8 @@ __all__ = [
     "GLASS_COMMANDS",
     "GLASS_DEVICE_COMMANDS",
     "NEURAL_BAND_GESTURE_MAP",
-    "AGENT_ALLOWED_TOOLS",
-    "AGENT_BLOCKED_ACTIONS",
     "_short_lens_text",
     "_build_dry_run_session_cue",
-    "_existing_event_id_for_audit",
     "_lens_safe_patient_alias",
     "_visit_candidate_from_event_row",
     "_glass_remote_scope",

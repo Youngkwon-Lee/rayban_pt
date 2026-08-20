@@ -466,40 +466,6 @@ def recent_failures(limit: int = 20):
     }
 
 
-@app.post("/agent/cue-dry-run")
-def agent_cue_dry_run(payload: AgentCueDryRunRequest):
-    requested_tool = (payload.requested_tool or "").strip()
-    audit_event_id = _existing_event_id_for_audit(payload.event_id)
-    if requested_tool not in AGENT_ALLOWED_TOOLS:
-        _audit_log(audit_event_id, "warning", f"agent blocked tool={requested_tool or '-'}")
-        _error(403, "AGENT_TOOL_NOT_ALLOWED", "Only generate_session_cue is enabled in dry-run mode.")
-
-    cue = _build_dry_run_session_cue(payload)
-    glass_state_updated = False
-
-    if payload.update_glass:
-        with _glass_lock:
-            _glass_state["last_insight"] = cue
-            _glass_state["updated_at"] = datetime.utcnow().isoformat() + "Z"
-        glass_state_updated = True
-
-    _audit_log(
-        audit_event_id,
-        "info",
-        f"agent dry-run cue generated update_glass={str(glass_state_updated).lower()} mode={payload.mode}",
-    )
-    return {
-        "status": "dry_run",
-        "tool": requested_tool,
-        "cue": cue,
-        "glass_state_updated": glass_state_updated,
-        "allowed_actions": sorted(AGENT_ALLOWED_TOOLS),
-        "blocked_actions": AGENT_BLOCKED_ACTIONS,
-        "requires_clinician_review": True,
-        "writes_enabled": False,
-    }
-
-
 @app.get("/audit-logs")
 def audit_logs(limit: int = 50, level: str = "", event_id: str = ""):
     n = max(1, min(limit, 200))
@@ -558,6 +524,7 @@ from routers.charts import router as charts_router
 from routers.media import router as media_router
 from routers.visit_sessions import router as visit_sessions_router
 from routers.glass import router as glass_router
+from routers.agent_gateway import router as agent_gateway_router
 
 app.include_router(consents_router)
 app.include_router(ingest_router)
@@ -568,3 +535,4 @@ app.include_router(charts_router)
 app.include_router(media_router)
 app.include_router(visit_sessions_router)
 app.include_router(glass_router)
+app.include_router(agent_gateway_router)
