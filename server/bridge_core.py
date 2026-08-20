@@ -157,51 +157,6 @@ class HudTokenIssuePayload(BaseModel):
     app_path: str = "/glass-app/"
 
 
-class CaptureEventPayload(BaseModel):
-    visit_session_id: Optional[str] = None
-    encounter_id: Optional[str] = None
-    organization_id: Optional[str] = None
-    provider_person_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-    source_media_id: Optional[str] = None
-    source_event_id: Optional[str] = None
-    source_type: str = "therapist_tag"
-    event_type: str
-    candidate_type: Optional[str] = None
-    start_ms: Optional[int] = None
-    end_ms: Optional[int] = None
-    confidence: Optional[float] = None
-    status: str = "draft"
-    payload: dict = Field(default_factory=dict)
-    reviewed_by: Optional[str] = None
-
-
-class CaptureEventUpdatePayload(BaseModel):
-    start_ms: Optional[int] = None
-    end_ms: Optional[int] = None
-    confidence: Optional[float] = None
-    status: Optional[str] = None
-    payload: Optional[dict] = None
-    reviewed_by: Optional[str] = None
-
-
-class CaptureEventExtractPayload(BaseModel):
-    visit_session_id: Optional[str] = None
-    encounter_id: Optional[str] = None
-    organization_id: Optional[str] = None
-    provider_person_id: Optional[str] = None
-    subject_person_id: Optional[str] = None
-    source_event_id: Optional[str] = None
-    source_media_id: Optional[str] = None
-    text: str
-    source_type: str = "transcript"
-    start_ms: Optional[int] = None
-    end_ms: Optional[int] = None
-    confidence: Optional[float] = None
-    capture_origin: Optional[str] = None
-    create_events: bool = True
-
-
 def _error(status_code: int, code: str, detail: str):
     raise HTTPException(status_code=status_code, detail={"code": code, "message": detail})
 
@@ -2790,35 +2745,6 @@ class AgentCueDryRunRequest(BaseModel):
         extra = "forbid"
 
 
-class VisitSessionStartRequest(BaseModel):
-    organization_id: str
-    provider_person_id: str
-    provider_role: str = "unspecified"
-    subject_person_id: str
-    encounter_id: Optional[str] = None
-    patient_alias: str = "Patient"
-    history_summary: str = ""
-    update_glass: bool = True
-
-
-class VisitSessionPhaseRequest(BaseModel):
-    phase: str
-    cue: Optional[str] = None
-    update_glass: bool = True
-
-
-class VisitSessionRecordingRequest(BaseModel):
-    is_recording: bool
-    update_glass: bool = True
-
-
-class VisitSessionEventRequest(BaseModel):
-    event_id: str
-    role: Optional[str] = None
-    phase: Optional[str] = None
-    update_glass: bool = True
-
-
 class GlassVisitStartRequest(BaseModel):
     candidate_id: Optional[str] = None
     update_glass: bool = True
@@ -4475,9 +4401,6 @@ __all__ = [
     "_client_host",
     "_is_loopback_host",
     "HudTokenIssuePayload",
-    "CaptureEventPayload",
-    "CaptureEventUpdatePayload",
-    "CaptureEventExtractPayload",
     "_error",
     "_clean_scope_value",
     "_scope_from_request",
@@ -4578,10 +4501,6 @@ __all__ = [
     "GlassCommandRequest",
     "NeuralBandEventRequest",
     "AgentCueDryRunRequest",
-    "VisitSessionStartRequest",
-    "VisitSessionPhaseRequest",
-    "VisitSessionRecordingRequest",
-    "VisitSessionEventRequest",
     "GlassVisitStartRequest",
     "_apply_visit_session_hud",
     "_apply_hud_test_visit_state",
