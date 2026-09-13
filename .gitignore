@@ -37,6 +37,8 @@ Thumbs.db
 .claude/
 
 # Server
+__pycache__/
+*.py[cod]
 server/.venv/
 server/storage/
 server/__pycache__/

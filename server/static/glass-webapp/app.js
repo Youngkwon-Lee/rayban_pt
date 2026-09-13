@@ -15,7 +15,6 @@
     ? window.location.origin
     : (normalizeBaseUrl(params.get('bridge_url')) || PATH_CONFIG.bridgeUrl || window.location.origin);
   var POLL_MS = 2000;
-  var INSIGHT_DURATION_MS = 8000;
 
   var glassState = {
     patient: null,
@@ -34,10 +33,10 @@
     last_insight: null,
     updated_at: null,
   };
-  var lastInsightId = null;
-  var insightDismissTimer = null;
-  var insightProgressTimer = null;
-  var insightStartTime = null;
+  var openedCandidateId = null;
+  var openedInsightId = null;
+  var seenInsightId = null;
+  var detailContext = null;
   var statePollTimer = null;
   var timerPollTimer = null;
   var commandPollTimer = null;
@@ -45,10 +44,12 @@
   var visitCandidateOffset = 0;
   var lastCandidateLoadAt = 0;
   var sessionRecordPreview = null;
+  var previewSessionId = null;
   var recordPreviewLineIndex = 0;
   var recordPreviewOpen = false;
   var transportConnected = false;
   var commandPending = false;
+  var toastDismissTimer = null;
 
   function parsePathConfig(pathname) {
     var match = String(pathname || '').match(/^\/connect\/([^/]+)\/?$/);
@@ -131,6 +132,36 @@
       showToast('처리 중', 'error');
       return;
     }
+    if (command === 'review_candidate') {
+      var candidate = pendingCandidate();
+      if (!candidate) return;
+      openedCandidateId = candidate.id;
+      openedInsightId = null;
+      recordPreviewLineIndex = 0;
+      render();
+      focusCommand(0);
+      return;
+    }
+    if (command === 'view_insight') {
+      openedInsightId = insightKey();
+      seenInsightId = openedInsightId;
+      openedCandidateId = null;
+      render();
+      focusCommand(0);
+      return;
+    }
+    if (command === 'defer_review' || command === 'back_to_session') {
+      closeDetails();
+      if (command === 'defer_review') showToast('미승인 후보로 남겨두었습니다.', 'success');
+      return;
+    }
+    if (command === 'approve_candidate' || command === 'discard_candidate') {
+      if (!activeCandidate()) {
+        closeDetails();
+        showToast('후보를 다시 열어 확인하세요.', 'error');
+        return;
+      }
+    }
     if (command === 'start_visit') {
       startVisit();
       return;
@@ -157,16 +188,26 @@
       return;
     }
     setCommandPending(true);
+    var commandBody = { command: command };
+    if (command === 'approve_candidate' || command === 'discard_candidate') {
+      commandBody.candidate_id = openedCandidateId;
+    }
     fetch(apiUrl('/glass/command'), {
       method: 'POST',
       headers: apiHeaders(),
-      body: JSON.stringify({ command: command }),
+      body: JSON.stringify(commandBody),
     })
       .then(function (r) {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
       })
       .then(function (data) {
+        if (data.executed && data.executed.ok === false) {
+          if (data.executed.error_code === 'HUD_CANDIDATE_CHANGED') closeDetails();
+          showToast(lensSafeMessage(data.executed.message || '처리하지 못했습니다.'), 'error');
+          pollStateQuiet();
+          return;
+        }
         if (data.executed && data.executed.glass_state) {
           glassState = data.executed.glass_state;
           render();
@@ -224,6 +265,7 @@
         return r.json();
       })
       .then(function (data) {
+        if (glassState.visit_session_id) return;
         visitCandidate = data.candidate || null;
         if (!glassState.visit_session_id) sessionRecordPreview = null;
         recordPreviewLineIndex = 0;
@@ -349,6 +391,7 @@
         if (data.glass_state) {
           glassState = data.glass_state;
           sessionRecordPreview = previewBeforeStart || sessionRecordPreview;
+          previewSessionId = glassState.visit_session_id;
           visitCandidate = null;
           recordPreviewLineIndex = 0;
           recordPreviewOpen = false;
@@ -365,12 +408,26 @@
   }
 
   function render() {
+    var context = String(glassState.visit_session_id || '') + ':' + String(glassState.patient || '');
+    var candidate = pendingCandidate();
+    if (context !== detailContext || !candidate || candidate.id !== openedCandidateId) {
+      if (openedCandidateId) recordPreviewLineIndex = 0;
+      openedCandidateId = null;
+    }
+    if (context !== detailContext || openedInsightId !== insightKey()) openedInsightId = null;
+    if (context !== detailContext) seenInsightId = null;
+    if (!transportConnected || isBusy() || glassState.mode === 'error') {
+      openedCandidateId = null;
+      openedInsightId = null;
+      recordPreviewOpen = false;
+    }
+    detailContext = context;
     var home = document.getElementById('home');
     if (home) home.dataset.connected = transportConnected ? 'true' : 'false';
+    setText('session-stage', isWrapUp() ? '종료 후 검토' : (glassState.visit_session_id ? '세션 진행' : '시작 전 확인'));
     renderPatient();
     renderReadiness();
     renderStatus();
-    renderInsight();
     renderToggleButton();
     renderMiddleButton();
     renderEndButton();
@@ -384,7 +441,7 @@
     if (!transportConnected) {
       setText('patient-context-label', alias ? '최근 환자' : '환자');
     } else if (glassState.visit_session_id) {
-      setText('patient-context-label', '진행 중인 세션');
+      setText('patient-context-label', isWrapUp() ? '검토할 세션' : '진행 중인 세션');
     } else if (alias) {
       setText('patient-context-label', TARGET_CANDIDATE_ID ? '선택한 환자' : '다음 환자');
     } else {
@@ -401,7 +458,7 @@
     var ready = String(glassState.readiness || '').toLowerCase() || (hasError ? 'error' : 'ready');
     label.classList.toggle('ready', !hasError && ready === 'ready');
     label.classList.toggle('error', hasError || ready === 'error');
-    label.textContent = !transportConnected ? '오프라인' : (hasError ? '오류' : (ready === 'ready' ? '준비' : '확인'));
+    label.textContent = !transportConnected ? '오프라인' : (hasError ? '오류' : (isWrapUp() ? '미검토' : (ready === 'ready' ? '준비' : '확인')));
   }
 
   function renderStatus() {
@@ -412,9 +469,10 @@
     var copy = statusCopy(mode, glassState.message);
 
     card.dataset.mode = mode;
-    recDot.classList.toggle('hidden', mode !== 'recording');
-    timer.classList.toggle('hidden', mode !== 'recording');
-    timer.textContent = mode === 'recording' ? elapsedString(glassState.recording_start) : '';
+    var recording = transportConnected && Boolean(glassState.is_recording);
+    recDot.classList.toggle('hidden', !recording);
+    timer.classList.toggle('hidden', !recording);
+    timer.textContent = recording ? elapsedString(glassState.recording_start) : '';
 
     setText('status-kicker', copy.kicker);
     setText('status-title', copy.title);
@@ -434,7 +492,7 @@
   }
 
   function cycleRecordPreview() {
-    var preview = recordPreview();
+    var preview = visiblePreview();
     if (!preview || !preview.lines || !preview.lines.length) {
       showToast('표시할 기록 없음', 'error');
       return;
@@ -453,15 +511,53 @@
 
   function normalizedMode() {
     if (!transportConnected) return 'offline';
+    if (glassState.mode === 'error') return 'error';
+    if (isBusy()) return glassState.mode;
     if (activeCandidate()) return 'candidate_approval';
     if (glassState.is_recording) return 'recording';
+    if (glassState.mode === 'candidate_approval') return glassState.phase || 'pre_review';
     return glassState.mode || 'standby';
   }
 
-  function activeCandidate() {
+  function pendingCandidate() {
     var candidate = glassState.active_hud_candidate;
-    if (!candidate || candidate.status !== 'candidate') return null;
+    if (!candidate || !candidate.id || candidate.status !== 'candidate' || candidate.lens_safe === false) return null;
     return candidate;
+  }
+
+  function activeCandidate() {
+    var candidate = pendingCandidate();
+    return candidate && candidate.id === openedCandidateId ? candidate : null;
+  }
+
+  function isBusy() {
+    return glassState.mode === 'uploading' || glassState.mode === 'analyzing';
+  }
+
+  function isWrapUp() {
+    return glassState.mode === 'summary' && glassState.readiness === 'sync_pending';
+  }
+
+  function insightKey() {
+    var insight = glassState.last_insight;
+    if (!insight || insight.lens_safe === false || insight.source === 'moai_web.pre_review') return null;
+    return insight.id || (String(insight.title || '') + ':' + String(insight.body || ''));
+  }
+
+  function closeDetails() {
+    openedCandidateId = null;
+    openedInsightId = null;
+    recordPreviewOpen = false;
+    recordPreviewLineIndex = 0;
+    render();
+    focusCommand(0);
+  }
+
+  function visiblePreview() {
+    var candidate = activeCandidate();
+    if (candidate) return {lines: candidate.lines && candidate.lines.length ? candidate.lines : [candidate.title || '기록 후보', candidate.body || '승인 대기'], lens_safe: true};
+    if (openedInsightId) return null;
+    return recordPreview();
   }
 
   function statusCopy(mode, message) {
@@ -479,12 +575,21 @@
         caption: '연결되면 현재 세션 상태가 자동으로 복원됩니다.',
       };
     }
+    if (mode === 'error') {
+      return { kicker: '오류', title: '확인 필요', meta: '휴대폰 앱 상태를 확인하세요.', caption: '상태 확인을 눌러 다시 확인할 수 있습니다.' };
+    }
+    if (mode === 'uploading') {
+      return { kicker: '전송', title: '업로드 중', meta: m || '브리지로 전송 중입니다.', caption: '완료될 때까지 연결을 유지하세요.' };
+    }
+    if (mode === 'analyzing') {
+      return { kicker: '분석', title: '분석 중', meta: m || '요약과 차트 초안을 준비 중입니다.', caption: '검토 전까지 임시 초안입니다.' };
+    }
     if (hudCandidate) {
       return {
         kicker: '후보',
         title: '기록 후보 확인',
         meta: hudCandidate.title || '기록 후보',
-        caption: '승인하거나 폐기하세요.',
+        caption: '미승인 초안 · 위로 이동해 내용을 확인하세요. 나중에도 검토할 수 있습니다.',
         preview: {
           lines: hudCandidate.lines && hudCandidate.lines.length
             ? hudCandidate.lines
@@ -492,6 +597,13 @@
           lens_safe: hudCandidate.lens_safe !== false,
         },
       };
+    }
+    if (openedInsightId && mode !== 'offline' && mode !== 'error' && !isBusy()) {
+      var insight = glassState.last_insight;
+      return { kicker: '요청한 안내', title: lensSafeMessage(insight.title || '안내'), meta: lensSafeMessage(insight.body || ''), caption: '참고용 안내입니다. 뒤로 가면 세션 화면으로 돌아갑니다.' };
+    }
+    if (isWrapUp()) {
+      return { kicker: '미검토 초안', title: '휴대폰에서 검토하세요', meta: '기록과 초안을 확인하고 필요한 내용을 수정하세요.', caption: pendingCandidate() ? '미승인 후보가 남아 있습니다. HUD를 닫아도 검토는 완료되지 않습니다.' : 'HUD 마치기는 기록 승인이나 서명을 대신하지 않습니다.' };
     }
     if (!hasSession && selectedAlias) {
       return {
@@ -511,7 +623,7 @@
       };
     }
     if (mode === 'recording') {
-      return { kicker: '영상', title: '영상 기록 중', meta: '글래스 영상을 휴대폰에 기록 중입니다.', caption: '중지를 누르면 저장과 업로드를 시작합니다.' };
+      return { kicker: '영상', title: '영상 기록 중', meta: '글래스 영상을 휴대폰에 기록 중입니다.', caption: pendingCandidate() ? '미승인 후보가 있습니다. 여유가 있을 때 후보 보기를 누르세요.' : '중지를 누르면 저장과 업로드를 시작합니다.' };
     }
     if (preview && recordPreviewOpen && hasSession) {
       return {
@@ -557,7 +669,7 @@
     if (mode === 'error') {
       return { kicker: '오류', title: '확인 필요', meta: '휴대폰 앱 상태를 확인하세요.', caption: '상세 오류는 휴대폰 로그에만 표시됩니다.' };
     }
-    if (mode === 'ready') {
+    if (mode === 'ready' && !hasSession) {
       return {
         kicker: '준비',
         title: '환자 대기',
@@ -572,9 +684,9 @@
   }
 
   function recordPreview() {
-    var candidatePreview = visitCandidate && visitCandidate.record_preview;
+    var candidatePreview = !glassState.visit_session_id && visitCandidate && visitCandidate.record_preview;
     if (candidatePreview && candidatePreview.lens_safe !== false) return candidatePreview;
-    if (sessionRecordPreview && sessionRecordPreview.lens_safe !== false) return sessionRecordPreview;
+    if (sessionRecordPreview && previewSessionId === glassState.visit_session_id && sessionRecordPreview.lens_safe !== false) return sessionRecordPreview;
     var insight = glassState.last_insight;
     if (insight && insight.source === 'moai_web.pre_review' && insight.lens_safe !== false) {
       return {
@@ -643,64 +755,6 @@
     return Math.max(0, recordPreviewLineIndex);
   }
 
-  function renderInsight() {
-    var card = document.getElementById('insight-card');
-    var insight = glassState.last_insight;
-    var mode = normalizedMode();
-    var hideInModes = { recording: true, uploading: true, analyzing: true, offline: true };
-
-    if (!insight || hideInModes[mode]) {
-      card.classList.add('hidden');
-      setInsightLayoutVisible(false);
-      return;
-    }
-
-    var insightId = insight.id || (String(insight.title || '') + ':' + String(insight.body || ''));
-    if (insightId === lastInsightId) {
-      setInsightLayoutVisible(!card.classList.contains('hidden'));
-      return;
-    }
-    lastInsightId = insightId;
-    showInsightCard(insight.title || '확인 필요', insight.body || '');
-  }
-
-  function showInsightCard(title, body) {
-    clearTimeout(insightDismissTimer);
-    clearInterval(insightProgressTimer);
-
-    setText('insight-title', title);
-    setText('insight-body', body);
-
-    var card = document.getElementById('insight-card');
-    var progress = document.getElementById('insight-progress');
-    card.classList.remove('hidden');
-    setInsightLayoutVisible(true);
-    insightStartTime = Date.now();
-    progress.style.transform = 'scaleY(1)';
-
-    if (glassState.last_insight && glassState.last_insight.source === 'moai_web.pre_review') {
-      progress.style.transform = 'scaleY(0)';
-      return;
-    }
-
-    insightProgressTimer = setInterval(function () {
-      var elapsed = Date.now() - insightStartTime;
-      var remaining = Math.max(0, 1 - elapsed / INSIGHT_DURATION_MS);
-      progress.style.transform = 'scaleY(' + remaining + ')';
-    }, 250);
-
-    insightDismissTimer = setTimeout(function () {
-      clearInterval(insightProgressTimer);
-      card.classList.add('hidden');
-      setInsightLayoutVisible(false);
-    }, INSIGHT_DURATION_MS);
-  }
-
-  function setInsightLayoutVisible(visible) {
-    var home = document.getElementById('home');
-    if (home) home.classList.toggle('has-insight', Boolean(visible));
-  }
-
   function renderToggleButton() {
     var btn = document.getElementById('toggle-btn');
     var label = document.getElementById('toggle-label');
@@ -731,9 +785,35 @@
       if (icon) icon.textContent = '✓';
       return;
     }
+    if (openedInsightId) {
+      btn.dataset.action = 'back_to_session';
+      label.textContent = '세션으로';
+      if (icon) icon.textContent = '‹';
+      return;
+    }
+    if (glassState.mode === 'error') {
+      btn.dataset.action = 'primary_action';
+      label.textContent = '상태 확인';
+      if (icon) icon.textContent = '›';
+      return;
+    }
+    if (isWrapUp()) {
+      btn.dataset.action = 'close_hud';
+      label.textContent = 'HUD 마치기';
+      if (icon) icon.textContent = '✓';
+      return;
+    }
+    if (isBusy() || glassState.mode === 'summary') {
+      btn.removeAttribute('data-action');
+      btn.disabled = true;
+      btn.classList.add('hidden');
+      return;
+    }
     if (!glassState.visit_session_id) {
       label.textContent = visitCandidate || TARGET_CANDIDATE_ID ? '방문 시작' : '시작 대기';
       btn.dataset.action = 'start_visit';
+      btn.disabled = !visitCandidate && !TARGET_CANDIDATE_ID;
+      if (btn.disabled) btn.removeAttribute('data-action');
       if (icon) icon.textContent = '●';
       return;
     }
@@ -762,9 +842,33 @@
       return;
     }
     if (activeCandidate()) {
-      btn.dataset.action = 'primary_action';
-      label.textContent = '상태';
-      if (icon) icon.textContent = 'i';
+      btn.dataset.action = 'defer_review';
+      label.textContent = '나중에';
+      if (icon) icon.textContent = '‹';
+      btn.classList.remove('hidden');
+      return;
+    }
+    if (isBusy() || openedInsightId || glassState.mode === 'error') {
+      btn.removeAttribute('data-action');
+      btn.classList.add('hidden');
+      return;
+    }
+    if (pendingCandidate()) {
+      btn.dataset.action = 'review_candidate';
+      label.textContent = '후보 보기';
+      if (icon) icon.textContent = '›';
+      btn.classList.remove('hidden');
+      return;
+    }
+    if (isWrapUp()) {
+      btn.removeAttribute('data-action');
+      btn.classList.add('hidden');
+      return;
+    }
+    if (insightKey() && insightKey() !== seenInsightId && !isWrapUp()) {
+      btn.dataset.action = 'view_insight';
+      label.textContent = '안내 보기';
+      if (icon) icon.textContent = '›';
       btn.classList.remove('hidden');
       return;
     }
@@ -796,7 +900,7 @@
     var mode = normalizedMode();
     var readiness = String(glassState.readiness || '').toLowerCase();
     var hasSession = Boolean(glassState.visit_session_id);
-    if (!transportConnected) {
+    if (!transportConnected || glassState.mode === 'error') {
       label.textContent = 'HUD 닫기';
       btn.dataset.action = 'close_hud';
       if (icon) icon.textContent = '×';
@@ -820,6 +924,11 @@
       label.textContent = '닫기';
       btn.dataset.action = 'close_hud';
       if (icon) icon.textContent = '×';
+      return;
+    }
+    if (isBusy() || openedInsightId || isWrapUp()) {
+      btn.removeAttribute('data-action');
+      btn.classList.add('hidden');
       return;
     }
     if (readiness === 'sync_pending') {
@@ -906,12 +1015,16 @@
   }
 
   function showToast(msg, type) {
+    clearTimeout(toastDismissTimer);
     var toast = document.getElementById('toast');
     toast.textContent = lensSafeMessage(msg);
     toast.className = 'toast' + (type ? ' ' + type : '');
     toast.offsetHeight;
     toast.classList.add('visible');
-    window.setTimeout(function () { toast.classList.remove('visible'); }, 2500);
+    toastDismissTimer = window.setTimeout(function () {
+      toast.classList.remove('visible');
+      toast.textContent = '';
+    }, 2500);
   }
 
   function commandLabel(command) {
@@ -985,12 +1098,13 @@
   }
 
   function statusCardInteractive() {
-    var preview = recordPreview();
-    return transportConnected && Boolean(activeCandidate() || (preview && preview.lines && preview.lines.length));
+    var preview = visiblePreview();
+    var visible = Boolean(activeCandidate() || (!glassState.is_recording && !isBusy() && !isWrapUp() && (!glassState.visit_session_id || recordPreviewOpen)));
+    return transportConnected && visible && Boolean(preview && preview.lines && preview.lines.length);
   }
 
   function scrollRecordCard(delta) {
-    var preview = recordPreview();
+    var preview = visiblePreview();
     if (!preview || !preview.lines || !preview.lines.length) {
       showToast('표시할 기록 없음', 'error');
       return;
@@ -1084,12 +1198,13 @@
         return;
       }
       if (e.key === 'Enter' || e.key === ' ') {
-        selectFocused();
+        if (!e.repeat) selectFocused();
         e.preventDefault();
         return;
       }
       if (e.key === 'Escape') {
-        sendCommand(glassState.visit_session_id ? 'primary_action' : 'close_hud');
+        if (openedCandidateId || openedInsightId || recordPreviewOpen) closeDetails();
+        else sendCommand(glassState.visit_session_id ? 'primary_action' : 'close_hud');
         e.preventDefault();
       }
     });

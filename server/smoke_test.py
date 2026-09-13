@@ -618,12 +618,12 @@ PTx.>
         extract_approve = client.post(
             "/neural-band/event",
             headers=auth_headers(),
-            json={"gesture": "pinch", "device_id": "band-extract-1"},
+            json={"gesture": "approve", "device_id": "band-extract-1", "metadata": {"expected_candidate_id": extracted_candidate["id"]}},
         )
-        require(extract_approve.status_code == 200, "pinch should approve extracted HUD candidate")
+        require(extract_approve.status_code == 200, "explicit approval should approve the displayed extracted candidate")
         require(
             extract_approve.json()["executed"]["candidate"]["status"] == "confirmed_by_provider",
-            "pinch should confirm extracted candidate",
+            "explicit approval should confirm extracted candidate",
         )
 
         no_extract = client.post(
@@ -652,17 +652,48 @@ PTx.>
             },
         )
         require(hud_gesture_create.status_code == 200, "gesture HUD candidate create should succeed")
-        neural_approve = client.post(
+        displayed_candidate_id = hud_gesture_create.json()["candidate"]["id"]
+        # A physical activation must be resolved by the visible UI, never
+        # directly interpreted as clinical approval by the relay.
+        with bridge_core._glass_lock:
+            bridge_core._glass_pending_command.clear()
+            bridge_core._glass_pending_device_command.clear()
+        pinch = client.post(
             "/neural-band/event",
             headers=auth_headers(),
             json={"gesture": "pinch", "device_id": "band-candidate-1"},
         )
-        require(neural_approve.status_code == 200, "pinch gesture should approve active HUD candidate")
+        require(pinch.status_code == 200, "pinch should be delivered to the HUD")
+        require(pinch.json()["mapped_command"] == "select_focused", "pinch must select the focused UI element")
+        require(pinch.json()["executed"] is None, "pinch must not execute a candidate decision")
+        pinch_state = client.get("/glass/state", headers=auth_headers()).json()
+        require(pinch_state["active_hud_candidate"]["status"] == "candidate", "pinch must leave the candidate unapproved")
+        require(client.get("/glass/device-command", headers=auth_headers()).json()["command"] is None, "native recorder must not consume focus selection")
+        require(client.get("/glass/command", headers=auth_headers()).json()["command"] == "select_focused", "web HUD should consume pinch selection")
+        require(client.get("/glass/command", headers=auth_headers()).json()["command"] is None, "pinch should be delivered only once")
+
+        for gesture in ("approve", "accept", "yes", "reject", "discard", "delete", "no"):
+            missing_id = client.post("/neural-band/event", headers=auth_headers(), json={"gesture": gesture})
+            require(missing_id.status_code == 422, "semantic decisions require a displayed candidate ID")
+            require(error_code(missing_id.json()) == "HUD_CANDIDATE_REQUIRED", "missing ID must explain the review requirement")
+            stale_id = client.post("/neural-band/event", headers=auth_headers(), json={"gesture": gesture, "metadata": {"expected_candidate_id": "stale-candidate"}})
+            require(stale_id.status_code == 200, "stale candidate should return a decision result")
+            require(stale_id.json()["executed"]["error_code"] == "HUD_CANDIDATE_CHANGED", "stale ID must not decide a different candidate")
+        unchanged_candidate = client.get(f"/hud/candidates/{displayed_candidate_id}", headers=auth_headers()).json()["candidate"]
+        require(unchanged_candidate["status"] == "candidate", "blocked gestures must leave the database candidate unapproved")
+
+        neural_approve = client.post(
+            "/neural-band/event",
+            headers=auth_headers(),
+            json={"gesture": "approve", "device_id": "band-candidate-1", "metadata": {"expected_candidate_id": displayed_candidate_id}},
+        )
+        require(neural_approve.status_code == 200, "explicit approval should approve the displayed candidate")
         neural_approve_body = neural_approve.json()
-        require(neural_approve_body["mapped_command"] == "approve_candidate", "pinch should map to approve_candidate")
-        require(neural_approve_body["executed"]["candidate"]["status"] == "confirmed_by_provider", "pinch should approve candidate")
+        require(neural_approve_body["mapped_command"] == "approve_candidate", "explicit approval should map to approve_candidate")
+        require(neural_approve_body["executed"]["candidate"]["id"] == displayed_candidate_id, "approval must target the displayed candidate")
+        require(neural_approve_body["executed"]["candidate"]["status"] == "confirmed_by_provider", "explicit approval should confirm candidate")
         neural_targets = {op["target_table"] for op in neural_approve_body["executed"]["moai_write_plan"]["operations"]}
-        require("observations" in neural_targets, "pinch-approved candidate should produce observation plan")
+        require("observations" in neural_targets, "explicitly approved candidate should produce observation plan")
 
         hud_command_create = client.post(
             "/hud/candidates",
@@ -677,10 +708,24 @@ PTx.>
             },
         )
         require(hud_command_create.status_code == 200, "command HUD candidate create should succeed")
+        current_candidate_id = hud_command_create.json()["candidate"]["id"]
+        for decision in ("approve_candidate", "discard_candidate"):
+            stale_decision = client.post(
+                "/glass/command",
+                headers=auth_headers(),
+                json={"command": decision, "candidate_id": "stale-ui-candidate"},
+            )
+            require(stale_decision.status_code == 200, "stale candidate should return a decision result")
+            stale_result = stale_decision.json()["executed"]
+            require(stale_result["ok"] is False, "stale review must not execute")
+            require(stale_result["error_code"] == "HUD_CANDIDATE_CHANGED", "stale review must request a fresh review")
+            unchanged = client.get("/glass/state", headers=auth_headers()).json()["active_hud_candidate"]
+            require(unchanged["id"] == current_candidate_id, "stale review must preserve current candidate")
+            require(unchanged["status"] == "candidate", "stale review must not approve or discard current candidate")
         command_discard = client.post(
             "/glass/command",
             headers=auth_headers(),
-            json={"command": "discard_candidate"},
+            json={"command": "discard_candidate", "candidate_id": current_candidate_id},
         )
         require(command_discard.status_code == 200, "glass discard command should execute")
         command_discard_body = command_discard.json()

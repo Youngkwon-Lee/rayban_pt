@@ -96,11 +96,17 @@ Example candidate:
 }
 ```
 
-Gestures:
+Current Web HUD inputs:
 
-- pinch: approve
-- swipe right: edit on phone/web
-- swipe left: discard
+- pinch: activate the focused control; approval requires opening a candidate
+  and selecting the approval control
+- left/right: move button focus, or cycle fields while the candidate card is focused
+- Later / Escape: return to the session without approving or discarding
+- discard: explicitly select the discard control
+
+External semantic approval/discard gestures must include the reviewed candidate
+ID. See `neural-band-integration.md`; a bare pinch is not an approval shortcut.
+Detailed editing remains on the phone/web.
 
 Approved candidates become reviewed clinical facts. Unapproved candidates remain draft and are not gold training labels.
 

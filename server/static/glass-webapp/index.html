@@ -19,12 +19,12 @@
   </script>
 </head>
 <body>
-  <main id="app" class="app-root" aria-live="polite">
+  <main id="app" class="app-root">
     <section id="home" class="screen" aria-label="Kinelo AR 세션 HUD">
       <header class="hud-header panel">
         <div>
           <p class="eyebrow">Kinelo AR</p>
-          <h1>세션 HUD</h1>
+          <h1 id="session-stage">시작 전 확인</h1>
         </div>
         <div class="connection" id="conn-status" role="status" aria-live="polite">
           <span class="conn-dot" id="conn-dot" aria-hidden="true"></span>
@@ -53,17 +53,6 @@
         <p id="status-meta">라이브 연결을 기다리는 중</p>
         <div class="record-list hidden" id="record-list" aria-label="환자 기록 미리보기"></div>
         <p class="status-caption" id="status-caption">렌즈에는 최소 정보만 표시됩니다.</p>
-      </section>
-
-      <section class="cue-panel panel hidden" id="insight-card" aria-label="최근 안내">
-        <div>
-          <p class="meta-label">안내</p>
-          <p class="cue-title" id="insight-title">확인 필요</p>
-          <p class="cue-body" id="insight-body"></p>
-        </div>
-        <div class="cue-time" id="insight-timer-bar" aria-hidden="true">
-          <div id="insight-progress"></div>
-        </div>
       </section>
 
       <nav class="command-rail" id="command-rail" data-count="3" aria-label="HUD 명령">

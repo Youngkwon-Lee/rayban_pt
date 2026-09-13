@@ -58,6 +58,7 @@ class GlassStateUpdate(BaseModel):
 
 class GlassCommandRequest(BaseModel):
     command: str
+    candidate_id: Optional[str] = None
 
 
 class NeuralBandEventRequest(BaseModel):
@@ -210,7 +211,8 @@ def glass_state_post(update: GlassStateUpdate):
 @router.post("/glass/command")
 def glass_command_post(cmd: GlassCommandRequest, request: Request):
     scope = _hud_scope_from_request(request)
-    queued = _queue_glass_command(cmd.command, scope=scope)
+    metadata = {"expected_candidate_id": cmd.candidate_id} if cmd.candidate_id else None
+    queued = _queue_glass_command(cmd.command, scope=scope, metadata=metadata)
     response = {"ok": True, "command": queued["command"], "id": queued["id"]}
     if "executed" in queued:
         response["executed"] = queued["executed"]
@@ -227,6 +229,11 @@ def neural_band_event_post(event: NeuralBandEventRequest, request: Request):
         _error(400, "INVALID_NEURAL_BAND_GESTURE", f"gesture must map to one of: {allowed}")
 
     metadata = dict(event.metadata or {})
+    if command in {"approve_candidate", "discard_candidate"}:
+        candidate_id = metadata.get("expected_candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            _error(422, "HUD_CANDIDATE_REQUIRED", "검토한 후보 ID를 함께 보내세요.")
+        metadata["expected_candidate_id"] = candidate_id.strip()
     if event.device_id:
         metadata["device_id"] = event.device_id
     metadata["gesture"] = gesture

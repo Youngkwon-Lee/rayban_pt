@@ -2354,14 +2354,28 @@ def _get_whisper_model():
 
 def stt_whisper_local(audio_path: Optional[str]) -> str:
     if not audio_path:
-        return ""
+        _error(422, "STT_AUDIO_REQUIRED", "음성 변환할 오디오 파일이 없습니다.")
     try:
         model = _get_whisper_model()
-        segments, _ = model.transcribe(audio_path, language="ko")
+        transcribe_options = {
+            "language": os.getenv("WHISPER_LANGUAGE", "ko"),
+        }
+        initial_prompt = os.getenv("WHISPER_INITIAL_PROMPT", "").strip()
+        hotwords = os.getenv("WHISPER_HOTWORDS", "").strip()
+        if initial_prompt:
+            transcribe_options["initial_prompt"] = initial_prompt
+        if hotwords:
+            transcribe_options["hotwords"] = hotwords
+        segments, _ = model.transcribe(audio_path, **transcribe_options)
         text = " ".join(seg.text.strip() for seg in segments).strip()
-        return text or f"[STT_EMPTY] {audio_path}"
-    except Exception:
-        return f"[STT_STUB] {audio_path}"
+        if not text:
+            _error(422, "STT_EMPTY", "음성은 처리됐지만 인식된 문장이 없습니다.")
+        return text
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("stt failed error_type=%s", type(exc).__name__)
+        _error(503, "STT_FAILED", "음성 변환에 실패했습니다. 원본 음성과 모델 상태를 확인하세요.")
 
 
 def _process_event(
@@ -3180,7 +3194,7 @@ NEURAL_BAND_GESTURE_MAP = {
     "select": "select_focused",
     "enter": "select_focused",
     "confirm": "select_focused",
-    "pinch": "approve_candidate",
+    "pinch": "select_focused",
     "approve": "approve_candidate",
     "accept": "approve_candidate",
     "yes": "approve_candidate",
@@ -3906,6 +3920,15 @@ def _execute_visit_hud_command(
     if command in {"approve_candidate", "discard_candidate"}:
         with _conn() as conn:
             candidate = _active_hud_candidate(conn, status="candidate")
+            expected_id = (metadata or {}).get("expected_candidate_id")
+            if expected_id and (not candidate or candidate.get("id") != expected_id):
+                return {
+                    "ok": False,
+                    "executed": False,
+                    "command": command,
+                    "error_code": "HUD_CANDIDATE_CHANGED",
+                    "message": "후보가 변경되었습니다. 다시 열어 확인하세요.",
+                }
             if not candidate:
                 with _glass_lock:
                     _glass_state.update(
