@@ -408,12 +408,15 @@ final class StreamViewModel {
     }
 
     private func ensureStartedSession(selector: AutoDeviceSelector) async throws -> DeviceSession {
+        try Task.checkCancellation()
         if let session = deviceSession, session.state == .started {
             return session
         }
 
         let session: DeviceSession
-        if let existingSession = deviceSession {
+        // DAT 0.9 treats stopped sessions as terminal. Restart with a new
+        // session; never call start() again on a paused/starting session.
+        if let existingSession = deviceSession, existingSession.state != .stopped {
             session = existingSession
         } else {
             session = try wearables.createSession(deviceSelector: selector)
@@ -425,12 +428,14 @@ final class StreamViewModel {
             return session
         }
 
-        do {
-            try session.start()
-            print("[MWDAT] session.start() called")
-        } catch {
-            deviceSession = nil
-            throw error
+        if session.state == .idle {
+            do {
+                try session.start()
+                print("[MWDAT] session.start() called")
+            } catch {
+                if deviceSession === session { deviceSession = nil }
+                throw error
+            }
         }
 
         print("[MWDAT] session.state after start(): \(session.state)")
@@ -446,6 +451,7 @@ final class StreamViewModel {
             defer { errorMonitor.cancel() }
 
             for await state in session.stateStream() {
+                try Task.checkCancellation()
                 print("[MWDAT] session stateStream: \(state)")
                 if state == .started { break }
                 if state == .stopped {
@@ -454,12 +460,21 @@ final class StreamViewModel {
                     if statusMessage.hasPrefix("기기 연결") {
                         statusMessage = "글라스 준비 중 — 잠시 후 다시 시도하세요"
                     }
-                    deviceSession = nil
+                    if deviceSession === session { deviceSession = nil }
                     throw DeviceSessionError.noEligibleDevice
                 }
             }
         }
 
+        // In 0.9, stateStream() finishes immediately when subscribed after
+        // stop. Exhausting it (including cancellation) is not startup success.
+        try Task.checkCancellation()
+        guard deviceSession === session, session.state == .started else {
+            if deviceSession === session, session.state == .stopped {
+                deviceSession = nil
+            }
+            throw DeviceSessionError.noEligibleDevice
+        }
         return session
     }
 

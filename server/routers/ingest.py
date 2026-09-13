@@ -124,13 +124,14 @@ def _process_upload_job(
             code, msg, retryable = _normalize_error(e)
             logger.exception("upload job failed event_id=%s attempt=%s code=%s", event_id, i + 1, code)
             _audit_log(None, "error", f"upload failed outer_event_id={event_id} attempt={i+1} code={code} msg={msg}")
-            if i == attempts - 1:
+            if not retryable or i == attempts - 1:
                 _touch_async_result(event_id, {
                     "status": "error",
                     "error": msg,
                     "error_code": code,
                     "retryable": retryable,
                 })
+                break
     saved_path.unlink(missing_ok=True)
 
 

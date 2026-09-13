@@ -1,6 +1,7 @@
 # Meta Wearables Tooling Status
 
-Last checked: 2026-08-17 UTC.
+Official SDK/toolkit sources rechecked: 2026-09-08 KST. Historical device
+proofs below retain their original dates.
 
 This project uses two Meta Ray-Ban Display integration paths:
 
@@ -19,7 +20,9 @@ The current third-party capture path is not phone-free. DAT is a mobile-app SDK:
 ## Current Local Baseline
 
 - `RaybanPT` pins `meta-wearables-dat-ios` to `0.9.0`.
-- DAT analytics collection is explicitly opted out through `MWDAT.Analytics.OptOut=true` in the app `Info.plist`.
+- DAT analytics and SDK crash reporting are explicitly opted out through
+  `MWDAT.Analytics.OptOut=true` and `MWDAT.CrashReporting.OptOut=true` in
+  `Info.plist`. These are separate SDK settings, not Meta AI privacy controls.
 - `server/static/glass-webapp/` follows the MRBD Web App model:
   - fixed 600 x 600 viewport
   - black page background for additive-display transparency
@@ -31,15 +34,15 @@ The current third-party capture path is not phone-free. DAT is a mobile-app SDK:
   - `/glass/command` is the Web App/server-state queue.
   - `/glass/device-command` is the paired iPhone camera/audio queue.
   - Both queues are FIFO to avoid cross-consumer command loss.
-- Local Codex plugin cache remains `meta-wearables-webapp` `125.0.0`; upstream toolkit is
-  `v127`. The local app does not depend on the new text-input/offline skills, so refresh
-  the plugin separately when those capabilities are intentionally adopted.
+- The active Codex skill catalog and upstream toolkit both report
+  `meta-wearables-webapp` `127.0.0`. No plugin installation change is needed.
 
 ## Latest Official Tooling
 
 - Latest iOS DAT tag found: `0.9.0` (`2026-08-03`).
 - Official DAT repo: `https://github.com/facebook/meta-wearables-dat-ios`.
-- Official Web App toolkit repo: `https://github.com/facebookincubator/meta-wearables-webapp`.
+- Official Web App toolkit repo: `https://github.com/facebook/meta-wearables-webapp`
+  (moved from `facebookincubator`; upstream updated the install links on August 25).
 - Official Web App toolkit currently publishes plugin update `v127`, including on-glasses text composer, offline app-shell, back gesture, and optional pinch-drag guidance.
 - Public docs context: `https://wearables.developer.meta.com/llms.txt?full=true`.
 - Public remote MCP server: `https://mcp.developer.meta.com/wearables`.
@@ -65,6 +68,65 @@ New support worth tracking:
 - Display `ButtonGroup` component.
 - `DeviceType.supportsDisplay` capability predicate.
 - Camera Access background recording improvements.
+- Separate crash-reporting opt-out and `ListenerTokenBag` for explicit listener cleanup.
+- Session state/error streams finish at `.stopped`; subscribing after stop
+  produces an immediately finished stream, not a ready session.
+
+### September 8 lifecycle corrections
+
+Objective: prevent a stopped/cancelled startup or an expired Display connection
+from being treated as ready. Scope is the native DAT adapter and its SDK privacy
+configuration; mode remains `design/dry_run`.
+
+- A terminal session is replaced on the next startup request. Only `.idle`
+  sessions receive `start()`; paused/starting sessions are awaited rather than
+  restarted. Stream completion must still pass cancellation, current-session
+  identity, and `.started` checks before camera/display attachment.
+- Display `.stopping` cancels timers and command polling while retaining the
+  state listener until `.stopped`. Cleanup explicitly cancels the listener and
+  invalidates its connection generation. An in-flight command response is
+  checked again after the network await, preventing dispatch after disconnect
+  or into a replacement connection. Display reuse also requires the same
+  owning `DeviceSession`, so a new session cannot inherit an old display.
+- Crash reporting now follows the existing analytics opt-out policy.
+
+Evidence sources:
+
+- [DAT 0.9.0 changelog](https://github.com/facebook/meta-wearables-dat-ios/blob/9b1b83d791dfebff7afd452e924a256819094b64/CHANGELOG.md)
+- [Official session lifecycle and Display guidance](https://github.com/facebook/meta-wearables-dat-ios/blob/225f64ff1617e7acc8c407bb8d3ee132f7263d00/AGENTS.md)
+- [Web App toolkit repository migration](https://github.com/facebook/meta-wearables-webapp/commit/a2714f862c61b1ce9c6cb624fc7e4938087102db)
+- [Web App plugin version](https://github.com/facebook/meta-wearables-webapp/blob/a2714f862c61b1ce9c6cb624fc7e4938087102db/plugins/meta-wearables-webapp/.claude-plugin/plugin.json)
+
+Validation: run `python3 scripts/test_dat_session_startup.py` (nine scenarios
+executing the production startup method against deterministic SDK doubles)
+and `./scripts/build_ios.sh` from the project root, and
+`./.venv/bin/python mrbd_hud_smoke_test.py` plus `./.venv/bin/python smoke_test.py`
+from `server/`. These validate compilation and local bridge/HUD contracts, not
+physical callback timing. Stop on a failed check and fix the narrow cause;
+do not relax the existing physical-media assertion.
+
+September 8 proof results:
+
+- PASS: all nine startup adapter regression scenarios.
+- PASS: whole-app Swift typecheck against the actual DAT 0.9.0 simulator
+  frameworks, targeting `arm64-apple-ios17.6-simulator`, Swift 5 with default
+  `MainActor` isolation, `MemberImportVisibility`, and `DEBUG`. No diagnostics.
+- PASS: MRBD static contract, bridge safety and glass relay smoke tests;
+  `Info.plist` validation and both SDK opt-out values; `git diff --check`.
+- BLOCKED: both full Xcode build attempts stalled in `CreateBuildDescription`
+  at the external `clang -v -E -dM ... /dev/null` probe, before source
+  compilation. Running that probe separately returned exit 0. The two
+  task-owned builds were terminated; a full app build/link is not claimed.
+  Logs: `/tmp/rayban-meta-build-20260908.log`,
+  `/tmp/rayban-meta-build-retry-20260908.log`,
+  `/tmp/rayban-meta-typecheck-20260908.log`, and
+  `/tmp/rayban-meta-startup-regression-20260908.log` (temporary local evidence).
+
+Physical follow-up: pause/resume without a second session start, fold/unfold
+and explicitly restart, disconnect while a command request is in flight, and
+verify no command is dispatched from the old connection. SDK crash-report
+network behavior, physical lens rendering and Bluetooth/media transport have
+not been verified in this pass. No deployment or clinical write is part of it.
 
 Breaking changes handled in this repo:
 
@@ -140,7 +202,7 @@ codex plugin install ./plugins/mwdat-ios
 Web App plugin marketplace path:
 
 ```bash
-codex plugin marketplace add https://github.com/facebookincubator/meta-wearables-webapp
+codex plugin marketplace add https://github.com/facebook/meta-wearables-webapp
 codex plugin marketplace upgrade meta-wearables
 ```
 

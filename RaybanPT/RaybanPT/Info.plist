@@ -86,6 +86,11 @@
 			<key>OptOut</key>
 			<true/>
 		</dict>
+		<key>CrashReporting</key>
+		<dict>
+			<key>OptOut</key>
+			<true/>
+		</dict>
 		<key>AppLinkURLScheme</key>
 		<string>kineloarhud://</string>
 		<key>MetaAppID</key>

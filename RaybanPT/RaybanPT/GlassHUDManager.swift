@@ -61,6 +61,7 @@ final class GlassHUDManager {
     private(set) var demoHUDSummary: String? = nil
 
     private var display: Display?
+    private var displaySession: DeviceSession?
     private var isSimulated = false
     private var stateListenerToken: AnyListenerToken?
     private var displayStateContinuation: AsyncStream<DisplayState>.Continuation?
@@ -68,6 +69,7 @@ final class GlassHUDManager {
     private var elapsedTask: Task<Void, Never>?
     private var insightTask: Task<Void, Never>?
     private var commandPollTask: Task<Void, Never>?
+    private var transportGeneration = UUID()
 
     private var bridgeClient: BridgeClient? {
         let stored = UserDefaults.standard.string(forKey: "bridge_base_url")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -106,11 +108,11 @@ final class GlassHUDManager {
     // MARK: - Display lifecycle (called by StreamViewModel)
 
     func attachDisplay(to session: DeviceSession) async {
-        if display != nil, isDisplayConnected {
+        if display != nil, isDisplayConnected, displaySession === session {
             return
         }
 
-        if display != nil, !isDisplayConnected {
+        if display != nil {
             await resetDisplayTransport()
         }
 
@@ -118,7 +120,9 @@ final class GlassHUDManager {
         do {
             let capability = try session.addDisplay()
             display = capability
+            displaySession = session
             isSimulated = false
+            let generation = transportGeneration
             let (stream, continuation) = AsyncStream.makeStream(of: DisplayState.self)
             displayStateContinuation = continuation
             stateListenerToken = capability.statePublisher.listen { state in
@@ -127,18 +131,19 @@ final class GlassHUDManager {
             }
             displayStateTask = Task { [weak self] in
                 for await state in stream {
-                    guard let self, !Task.isCancelled else { return }
+                    guard let self, !Task.isCancelled,
+                          self.transportGeneration == generation else { return }
                     switch state {
                     case .started:
                         self.isDisplayConnected = true
                         self.startCommandPolling()
                         await self.pushHUD()
-                    case .stopping, .stopped:
+                    case .stopping:
                         self.isDisplayConnected = false
-                        self.stateListenerToken = nil
-                        self.displayStateContinuation?.finish()
-                        self.displayStateContinuation = nil
-                        self.display = nil
+                        self.stopDisplayTasks()
+                    case .stopped:
+                        await self.resetDisplayTransport()
+                        return
                     default:
                         break
                     }
@@ -163,30 +168,41 @@ final class GlassHUDManager {
     }
 
     func detachDisplay() async {
-        await resetDisplayTransport()
         isSimulated = false
         demoHUDSummary = nil
         hudMode = .standby
         activePatient = nil
         sessionCount = 0
         recordingStart = nil
+        await resetDisplayTransport()
     }
 
     private func resetDisplayTransport() async {
+        // Invalidate in-flight work before awaiting listener cancellation.
+        // A previous connection must never publish commands into a new one.
+        transportGeneration = UUID()
+        let oldToken = stateListenerToken
+        let oldDisplay = display
+        stopDisplayTasks()
+        stateListenerToken = nil
+        displayStateContinuation?.finish()
+        displayStateContinuation = nil
+        displayStateTask?.cancel()
+        displayStateTask = nil
+        display = nil
+        displaySession = nil
+        isDisplayConnected = false
+        oldDisplay?.stop()
+        await oldToken?.cancel()
+    }
+
+    private func stopDisplayTasks() {
         elapsedTask?.cancel()
         elapsedTask = nil
         insightTask?.cancel()
         insightTask = nil
         commandPollTask?.cancel()
         commandPollTask = nil
-        stateListenerToken = nil
-        displayStateContinuation?.finish()
-        displayStateContinuation = nil
-        displayStateTask?.cancel()
-        displayStateTask = nil
-        display?.stop()
-        display = nil
-        isDisplayConnected = false
     }
 
     // MARK: - Context HUD (shown while streaming, not recording)
@@ -388,12 +404,16 @@ final class GlassHUDManager {
 
     private func startCommandPolling() {
         commandPollTask?.cancel()
+        let generation = transportGeneration
         commandPollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
-                guard let self, !Task.isCancelled else { break }
+                guard let self, !Task.isCancelled, self.isDisplayConnected,
+                      self.transportGeneration == generation else { break }
                 guard let client = self.bridgeClient else { continue }
                 if let cmd = await client.pollGlassCommand() {
+                    guard !Task.isCancelled, self.isDisplayConnected,
+                          self.transportGeneration == generation else { break }
                     postGlassCommandNotification(cmd)
                 }
             }

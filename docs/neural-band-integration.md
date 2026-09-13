@@ -15,6 +15,32 @@ camera or microphone command and rapid inputs do not overwrite one another.
 
 ## Current command path
 
+### Candidate review and pinch — 2026-09-08
+
+`pinch` now maps to `select_focused` and is queued for the Web App at
+`/glass/command`. It does not decide a candidate on the server and is not
+consumed by the iPhone recorder. The Web App must be open to resolve the
+focused action; the relay does not fall back to approval if it is closed.
+
+Explicit semantic gestures (`approve`, `accept`, `yes`, `reject`, `discard`,
+`delete`, `no`) require `metadata.expected_candidate_id`, a nonempty string
+identifying the candidate the operator reviewed. Example payload:
+
+```json
+{
+  "gesture": "approve",
+  "metadata": { "expected_candidate_id": "<reviewed-candidate-id>" }
+}
+```
+
+Missing IDs return HTTP 422 with `HUD_CANDIDATE_REQUIRED`. An ID that no longer
+matches the active candidate returns `executed.ok=false` and
+`HUD_CANDIDATE_CHANGED`, leaving the current candidate unmodified. Update
+external adapters that previously sent bare approval/rejection gestures.
+The companion adapter already forwards metadata in its JSON input modes.
+This does not alter the native on-glasses button handlers or legacy ID-less
+`/glass/command` requests. Physical Neural Band timing remains unverified.
+
 - The local bridge accepts neural-band gestures at `POST /neural-band/event`.
 - Supported gestures currently map to recording, the current HUD `primary_action`, or a specific HUD workflow action.
 - Recording toggle gestures:
@@ -38,6 +64,7 @@ camera or microphone command and rapid inputs do not overwrite one another.
   - `photo`, `capture_photo`, `camera`, `snapshot`
   - `voice`, `audio`, `stt`, `start_audio`, `stop_audio`, `stop_voice`
 - Primary action gestures:
+  - `pinch` (focus activation, not unconditional approval)
   - `down`
   - `swipe_down`
   - `downward`
