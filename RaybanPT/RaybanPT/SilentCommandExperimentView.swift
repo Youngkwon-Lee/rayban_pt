@@ -27,6 +27,7 @@ final class SilentCommandExperimentModel: ObservableObject {
     private var mode: Mode?
     // label -> takes -> frames -> 9 motion features. Memory only.
     private var templates: [String: [[[Double]]]] = [:]
+    private var syntheticTrainingCounts: [String: Int] = [:]
     private var frames: [[Double]] = []
     private var referenceAngles: [Double]?
 
@@ -81,7 +82,9 @@ final class SilentCommandExperimentModel: ObservableObject {
         guard sensing, !recording, Self.labels.contains(label) else { return }
         begin(.train(label))
         if demoMode {
-            frames = syntheticFrames(for: label, take: templates[label, default: []].count)
+            let nextTake = syntheticTrainingCounts[label, default: 0]
+            syntheticTrainingCounts[label] = nextTake + 1
+            frames = syntheticFrames(for: label, take: Double(nextTake))
             frameCount = frames.count
             endRecording()
             status = "[합성 데이터] " + status
@@ -96,9 +99,15 @@ final class SilentCommandExperimentModel: ObservableObject {
             status = "명령 두 가지를 각각 최소 3회 학습하세요."
             return
         }
+        if demoMode && (templates[demoLabel]?.count ?? 0) < 3 {
+            status = "선택한 명령을 먼저 3회 이상 학습하세요."
+            return
+        }
         begin(.decode)
         if demoMode {
-            frames = syntheticFrames(for: demoLabel, take: 7)
+            // A fractional take never equals an integer-indexed synthetic training take.
+            let unseenTake = Double(syntheticTrainingCounts[demoLabel, default: 0]) - 0.5
+            frames = syntheticFrames(for: demoLabel, take: unseenTake)
             frameCount = frames.count
             endRecording()
             status = "[합성 데이터 · 정답 \(demoLabel)] " + status
@@ -108,9 +117,9 @@ final class SilentCommandExperimentModel: ObservableObject {
     }
 
     // Deterministic synthetic traces, not measurements or real speech signals.
-    private func syntheticFrames(for label: String, take: Int) -> [[Double]] {
+    private func syntheticFrames(for label: String, take: Double) -> [[Double]] {
         let classIndex = Double(Self.labels.firstIndex(of: label) ?? 0)
-        let shift = Double(take % 5) * 0.012
+        let shift = take * 0.012
         return (0..<48).map { frame in
             let t = Double(frame) / 47.0
             let center = 0.28 + classIndex * 0.095 + shift
@@ -124,6 +133,20 @@ final class SilentCommandExperimentModel: ObservableObject {
                 sin(omega) * 0.5 * pulse, cos(omega) * 0.3 * pulse
             ]
         }
+    }
+
+    func checkSyntheticIdleRejection() {
+        guard demoMode, sensing, !recording else { return }
+        guard eligibleLabels().count >= 2 else {
+            status = "먼저 서로 다른 명령 2개 이상을 각각 3회 학습하세요."
+            return
+        }
+        // No mouth or head movement: an unknown baseline must not trigger an action.
+        let idle = Array(repeating: Array(repeating: 0.0, count: 9), count: 48)
+        guess = recognize(idle)
+        status = guess == nil
+            ? "[합성 무동작] 거부됨. 합성 테스트만 통과했으며 실제 오탐률은 미검증입니다."
+            : "[합성 무동작] 오탐 후보 발생. 모델 개선 전 실제 명령에 연결하지 마세요."
     }
 
     func endRecording() {
@@ -161,6 +184,7 @@ final class SilentCommandExperimentModel: ObservableObject {
     func reset() {
         guard !recording else { return }
         templates = [:]
+        syntheticTrainingCounts = [:]
         counts = [:]
         guess = nil
         evaluation = "명령 두 가지를 각각 3회 이상 학습하면 교차검증을 표시합니다."
@@ -296,8 +320,8 @@ struct SilentCommandExperimentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("연구용 · AirPods 센서만 사용").font(.headline)
-                    Text("음성 받아쓰기가 아닌 다섯 가지 무음 명령의 움직임 패턴 분류입니다. Ray-Ban 자체 센서는 사용하지 않습니다.")
+                    Text("연구용 · AirPods 없이 합성 데모 가능").font(.headline)
+                    Text("실제 무음 발화 인식이 아닌 다섯 가지 움직임 패턴 분류 실험입니다. 합성 데모는 무음 발화의 인식률을 검증하지 않습니다.")
                         .font(.subheadline).foregroundStyle(.secondary)
 
                     Button(model.sensing ? "입력 활성화됨" : "AirPods 센서 시작") {
@@ -348,6 +372,13 @@ struct SilentCommandExperimentView: View {
                             .accessibilityIdentifier("silentCaptureStopButton")
                     }
                     Text(model.evaluation).font(.footnote).foregroundStyle(.secondary)
+                    if model.demoMode {
+                        Button("합성 무동작 오탐 검사") {
+                            model.checkSyntheticIdleRejection()
+                        }
+                        .disabled(model.recording)
+                        .accessibilityIdentifier("silentIdleRejectionCheckButton")
+                    }
 
                     if let guess = model.guess {
                         VStack(alignment: .leading, spacing: 8) {
