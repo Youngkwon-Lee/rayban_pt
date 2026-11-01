@@ -61,4 +61,12 @@ Next field validation: with synthetic command labels and no patients, compare 5 
 Independent implementation inspired by the public MIT-license experiment https://github.com/joeblau/subvox (no source code copied).
 Apple interface: https://developer.apple.com/documentation/coremotion/cmheadphonemotionmanager
 
-Device build/run and hardware evaluation are unverified. No merge or production release intended.
+## 2026-11-02 Mac build and SDK research update
+
+- Connected MacBook: Xcode 27.2, Swift 6.4.2, iOS generic device Debug build with `CODE_SIGNING_ALLOWED=NO`. A placeholder local `Secrets.xcconfig` was generated from the committed example **inside a disposable clone only**; no real app secrets were accessed. Swift 6.4 required `internal import Combine` in the new experiment view.
+- App's Xcode build **passed at SHA `a32741ecb8e3780907fc1b2072cb0577aa8c4be6`**, on the isolated Mac clone. Subsequent non-app documentation/spike changes require a fresh build to assert a newer SHA.
+- Meta SDK 1.0.1 `MWDATMotion` + `MWDATMockDevice` API-only spike was separately checked by `swiftc -typecheck` using official 1.0.1 frameworks at SDK tag commit `0bd369298eef6a980ad0bdb6c8a5502f2c02a08c`; source Git blob `b2533a5e4e30d866f15603ff20984b2af896e550` matches the checked local file. Repro instructions and limitations: `experiments/meta-motion-sdk101/README.md`.
+- The iPhone 12 Pro is connected and has `yk.RaybanPT` already installed. No install/overwrite performed. The Mac currently has **no usable iOS Simulator runtime**, so neither the synthetic UI flow nor Meta MockDevice session was actually launched.
+- No real glasses hardware/IMU, AirPods, sensor accuracy, patient data, clinical actions, app SDK upgrade, branch merge, or deployment was tested or performed.
+
+No merge or production release intended.
