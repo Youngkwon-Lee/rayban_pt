@@ -106,7 +106,7 @@ final class SilentCommandExperimentModel: ObservableObject {
         begin(.decode)
         if demoMode {
             // A fractional take never equals an integer-indexed synthetic training take.
-            let unseenTake = Double(syntheticTrainingCounts[demoLabel, default: 0]) - 0.5
+            let unseenTake = SilentMotionSynthetic.unseenTake(afterTrainingCount: syntheticTrainingCounts[demoLabel, default: 0])
             frames = syntheticFrames(for: demoLabel, take: unseenTake)
             frameCount = frames.count
             endRecording()
@@ -116,23 +116,9 @@ final class SilentCommandExperimentModel: ObservableObject {
         status = "학습한 명령 하나를 소리 없이 표현하고 구간 종료를 누르세요."
     }
 
-    // Deterministic synthetic traces, not measurements or real speech signals.
+    // Synthetic generator lives in a Foundation-only module so it can be tested without iOS hardware.
     private func syntheticFrames(for label: String, take: Double) -> [[Double]] {
-        let classIndex = Double(Self.labels.firstIndex(of: label) ?? 0)
-        let shift = take * 0.012
-        return (0..<48).map { frame in
-            let t = Double(frame) / 47.0
-            let center = 0.28 + classIndex * 0.095 + shift
-            let pulse = exp(-pow((t - center) / 0.13, 2))
-            let omega = 2 * Double.pi * (1.2 + classIndex * 0.50) * t
-            return [
-                sin(omega + shift) * pulse, cos(omega + shift) * pulse,
-                (0.3 + 0.14 * classIndex) * pulse,
-                sin(2 * omega) * pulse, cos(2 * omega) * pulse,
-                sin(omega / 2) * pulse, (0.12 + 0.05 * classIndex) * pulse,
-                sin(omega) * 0.5 * pulse, cos(omega) * 0.3 * pulse
-            ]
-        }
+        SilentMotionSynthetic.trace(labelIndex: Self.labels.firstIndex(of: label) ?? 0, take: take)
     }
 
     func checkSyntheticIdleRejection() {
@@ -142,7 +128,7 @@ final class SilentCommandExperimentModel: ObservableObject {
             return
         }
         // No mouth or head movement: an unknown baseline must not trigger an action.
-        let idle = Array(repeating: Array(repeating: 0.0, count: 9), count: 48)
+        let idle = SilentMotionSynthetic.idle()
         guess = recognize(idle)
         status = guess == nil
             ? "[합성 무동작] 거부됨. 합성 테스트만 통과했으며 실제 오탐률은 미검증입니다."
