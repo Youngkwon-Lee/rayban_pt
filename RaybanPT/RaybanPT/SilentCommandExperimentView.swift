@@ -15,6 +15,7 @@ final class SilentCommandExperimentModel: ObservableObject {
 
     @Published private(set) var status = "AirPods를 iPhone에 연결하고 센서를 시작하세요."
     @Published private(set) var sensing = false
+    @Published private(set) var demoMode = false
     @Published private(set) var recording = false
     @Published private(set) var frameCount = 0
     @Published private(set) var counts: [String: Int] = [:]
@@ -50,9 +51,17 @@ final class SilentCommandExperimentModel: ObservableObject {
         status = sensing ? "센서 시작됨. 입만 움직여 단어를 학습하세요." : "센서 연결 또는 동작 권한을 확인하세요."
     }
 
+    func startSyntheticDemo() {
+        guard !sensing else { return }
+        demoMode = true
+        sensing = true
+        status = "합성 센서 데이터로 화면과 분류 알고리즘을 시험합니다. 실제 무음 발화 검증은 아닙니다."
+    }
+
     func stopSensor() {
         sensor.stopDeviceMotionUpdates()
         sensing = false
+        demoMode = false
         recording = false
         mode = nil
         frames = []
@@ -71,17 +80,50 @@ final class SilentCommandExperimentModel: ObservableObject {
     func startTraining(_ label: String) {
         guard sensing, !recording, Self.labels.contains(label) else { return }
         begin(.train(label))
+        if demoMode {
+            frames = syntheticFrames(for: label, take: templates[label, default: []].count)
+            frameCount = frames.count
+            endRecording()
+            status = "[합성 데이터] " + status
+            return
+        }
         status = "'\(label)'를 소리 없이 입 모양으로 표현한 뒤 구간 종료를 누르세요."
     }
 
-    func startRecognition() {
+    func startRecognition(demoLabel: String) {
         guard sensing, !recording else { return }
         guard Self.labels.filter({ (templates[$0]?.count ?? 0) >= 3 }).count >= 2 else {
             status = "명령 두 가지를 각각 최소 3회 학습하세요."
             return
         }
         begin(.decode)
+        if demoMode {
+            frames = syntheticFrames(for: demoLabel, take: 7)
+            frameCount = frames.count
+            endRecording()
+            status = "[합성 데이터 · 정답 \(demoLabel)] " + status
+            return
+        }
         status = "학습한 명령 하나를 소리 없이 표현하고 구간 종료를 누르세요."
+    }
+
+    // Deterministic synthetic traces, not measurements or real speech signals.
+    private func syntheticFrames(for label: String, take: Int) -> [[Double]] {
+        let classIndex = Double(Self.labels.firstIndex(of: label) ?? 0)
+        let shift = Double(take % 5) * 0.012
+        return (0..<48).map { frame in
+            let t = Double(frame) / 47.0
+            let center = 0.28 + classIndex * 0.095 + shift
+            let pulse = exp(-pow((t - center) / 0.13, 2))
+            let omega = 2 * Double.pi * (1.2 + classIndex * 0.50) * t
+            return [
+                sin(omega + shift) * pulse, cos(omega + shift) * pulse,
+                (0.3 + 0.14 * classIndex) * pulse,
+                sin(2 * omega) * pulse, cos(2 * omega) * pulse,
+                sin(omega / 2) * pulse, (0.12 + 0.05 * classIndex) * pulse,
+                sin(omega) * 0.5 * pulse, cos(omega) * 0.3 * pulse
+            ]
+        }
     }
 
     func endRecording() {
@@ -258,12 +300,25 @@ struct SilentCommandExperimentView: View {
                     Text("음성 받아쓰기가 아닌 다섯 가지 무음 명령의 움직임 패턴 분류입니다. Ray-Ban 자체 센서는 사용하지 않습니다.")
                         .font(.subheadline).foregroundStyle(.secondary)
 
-                    Button(model.sensing ? "센서 활성화됨" : "AirPods 센서 시작") {
+                    Button(model.sensing ? "입력 활성화됨" : "AirPods 센서 시작") {
                         model.startSensor()
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(model.sensing)
                     .accessibilityIdentifier("silentSensorStartButton")
+
+                    Button("AirPods 없는 합성 데이터 데모") {
+                        model.startSyntheticDemo()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.sensing)
+                    .accessibilityIdentifier("silentSyntheticDemoButton")
+
+                    if model.demoMode {
+                        Text("합성 데이터 전용: 실제 센서·무음 발화 성능과 무관합니다.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
 
                     Text(model.status).font(.subheadline)
                         .accessibilityIdentifier("silentSensorStatus")
@@ -282,7 +337,7 @@ struct SilentCommandExperimentView: View {
 
                     Divider()
                     Text("2. 명령 인식").font(.headline)
-                    Button("인식 구간 시작") { model.startRecognition() }
+                    Button("인식 구간 시작") { model.startRecognition(demoLabel: selected) }
                         .disabled(!model.sensing || model.recording)
 
                     if model.recording {
@@ -314,7 +369,7 @@ struct SilentCommandExperimentView: View {
 
                     Button("학습 데이터 초기화", role: .destructive) { model.reset() }
                         .disabled(model.recording)
-                    Text("동작 데이터는 이 화면의 메모리에만 남으며 닫으면 폐기됩니다. 마이크·카메라·서버·환자기록으로 전송되지 않습니다.")
+                    Text("동작 데이터와 합성 샘플은 메모리에만 남으며 닫으면 폐기됩니다. 마이크·카메라·서버·환자기록으로 전송되지 않습니다.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
