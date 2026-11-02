@@ -48,3 +48,18 @@ Official SDK references:
 - The old QA app may still be installed. Before interpreting a new run, verify whether the diagnostic binary was installed; if not, unlock the iPhone and reinstall this exact QA app, then run once and retrieve the JSON with an updated timestamp. Do not keep repeating a stale/locked attempt.
 - The SDK 1.0.1 MockDeviceKit interfaces and SpecificDeviceSelector behavior were compared with the public Meta documentation. A visible selector alone does not prove the session is eligible or the medium link is available. These diagnostics distinguish those possibilities rather than assume a cause.
 - **Still unverified:** any successfully received Mock Motion.samples frame, physical glasses motion, and silent mouth/jaw decoding. Main and installed production Kinelo apps remain unchanged.
+
+## Runtime PASS (2026-11-02 10:51 KST)
+
+The user unlocked their connected iPhone 12 Pro, allowing the QA app to be installed and launched. With the **same separate QA bundle** `com.kinelo.motionmockqa20261102` and **Meta DAT SDK 1.0.1**, the app's real MockDeviceKit stream succeeded.
+
+- Install: `devicectl device install app` exit **0**, separate QA bundle only (not the existing Kinelo AR HUD).
+- Launch: `devicectl device process launch` exit **0**.
+- Fetched QA app's own `Documents/meta-motion-mock-qa-result.json`; run timestamp **2026-11-02T01:51:49Z** (10:51:49 KST).
+- Actual QA result: **PASS: 가상 Motion 프레임 수신**.
+- `samples=30`, `accelerometerSamples=30`, `gyroscopeSamples=30`, `firstTimestampNs=0`, `lastTimestampNs=2900000000`, `timestampMonotonic=true`. This corresponds to 30 synthetic frames over 2.9 seconds at 10 Hz.
+- Reproducible proof snapshot: `evidence/motion-mock-qa-pass-2026-11-02.json`.
+- QA source Git blob used in this signed build: `f89b4d5d829634613a0bcbe6df3b205c404936dd`. The app is isolated from normal `rayban_pt` workflows.
+
+**Interpretation:** This verifies actual iPhone app execution through Meta's MockDeviceKit → DeviceSession → Motion.samples with deterministic simulated glasses motion. It supersedes the earlier `noEligibleDevice` and locked-device failures for **this setup**. It does **not** establish real Ray-Ban hardware IMU access, silent speech decoding, gesture accuracy, or clinical readiness. No main merge, production deployment, SDK upgrade in the regular app, patient data or backend writes.
+
