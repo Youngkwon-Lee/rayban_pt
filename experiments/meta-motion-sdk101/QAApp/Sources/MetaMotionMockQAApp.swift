@@ -154,9 +154,16 @@ struct MotionQAView: View {
                 : "FAIL: 프레임 부족·센서 누락 또는 타임스탬프 오류"
             status = "수신 종료"
         } catch {
+            let failedPhase = status
             let count = Wearables.shared.devices.count
             let reg = Wearables.shared.registrationState
-            status = "오류: \(error); devices=\(count); reg=\(reg)"
+            let actualDevice = glasses.flatMap {
+                Wearables.shared.deviceForIdentifier($0.deviceIdentifier)
+            }
+            let link = actualDevice.map { String(describing: $0.linkState) } ?? "unavailable"
+            let compatibility = actualDevice.map { String(describing: $0.compatibility()) } ?? "unavailable"
+            let don = actualDevice.map { String(describing: $0.donState) } ?? "unavailable"
+            status = "phase=\(failedPhase); error=\(error); devices=\(count); reg=\(reg); link=\(link); compatibility=\(compatibility); don=\(don)"
             finalResult = "FAIL: SDK/세션 오류"
         }
 
