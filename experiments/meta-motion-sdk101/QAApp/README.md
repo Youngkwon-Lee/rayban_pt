@@ -37,3 +37,14 @@ The app generates deterministic 30-frame fake signals in RAM, sets \`MockGlasses
 Official SDK references:
 - https://github.com/meta/meta-wearables-dat-ios/blob/1.0.1/CHANGELOG.md
 - https://github.com/meta/meta-wearables-dat-ios/blob/1.0.1/AGENTS.md
+
+## Follow-up (2026-11-02 09:21 KST)
+
+- The paired iPhone 12 Pro was still physically **locked**. A fresh app launch was denied with FBSOpenApplicationServiceErrorDomain / SBMainWorkspace Locked. No bypass was attempted.
+- Read-only retrieval of the QA app's own Documents JSON succeeded. The latest available data remained timestamped **2026-11-02T00:06:36Z** with **0 samples** and "FAIL: SDK/세션 오류", WearablesError(rawValue: 1) — **not** a new passing run.
+- Added phase, device count, registration, link-state, compatibility and donned-state diagnostics to the QA source. The new source Git blob is **f89b4d5d829634613a0bcbe6df3b205c404936dd**.
+- Latest diagnostic source passed a **generic iOS Debug build (CODE_SIGNING_ALLOWED=NO)** and a **generic iOS signed build** under Xcode 27.2, bundle ID com.kinelo.motionmockqa20261102 and the existing Apple development team.
+- A build requiring the physical device as an Xcode destination timed out while Xcode reported the iPhone as "Connecting". The subsequent QA-only reinstall remained stalled for over 60 seconds; only that installation process was stopped. **Installation of the revised diagnostic binary is NOT verified**.
+- The old QA app may still be installed. Before interpreting a new run, verify whether the diagnostic binary was installed; if not, unlock the iPhone and reinstall this exact QA app, then run once and retrieve the JSON with an updated timestamp. Do not keep repeating a stale/locked attempt.
+- The SDK 1.0.1 MockDeviceKit interfaces and SpecificDeviceSelector behavior were compared with the public Meta documentation. A visible selector alone does not prove the session is eligible or the medium link is available. These diagnostics distinguish those possibilities rather than assume a cause.
+- **Still unverified:** any successfully received Mock Motion.samples frame, physical glasses motion, and silent mouth/jaw decoding. Main and installed production Kinelo apps remain unchanged.
