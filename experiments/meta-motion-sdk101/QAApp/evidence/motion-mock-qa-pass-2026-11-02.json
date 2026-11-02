@@ -1,0 +1,13 @@
+{
+  "accelerometerSamples": 30,
+  "firstTimestampNs": 0,
+  "gyroscopeSamples": 30,
+  "lastTimestampNs": 2900000000,
+  "mode": "mock-only",
+  "result": "PASS: 가상 Motion 프레임 수신",
+  "samples": 30,
+  "sdk": "1.0.1",
+  "status": "수신 종료",
+  "time": "2026-11-02T01:51:49Z",
+  "timestampMonotonic": true
+}
