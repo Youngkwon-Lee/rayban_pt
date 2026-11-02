@@ -20,6 +20,8 @@
 	<string>스마트 글라스로 촬영한 사진을 저장합니다.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>스마트 글라스로 촬영한 사진을 사진 앱에 저장하고 확인합니다.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>AirPods 움직임으로 무음 명령 입력 가능성을 기기 내부에서 실험합니다.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>스마트 글라스 마이크로 환자 음성을 녹음합니다.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>

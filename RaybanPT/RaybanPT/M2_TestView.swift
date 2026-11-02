@@ -1714,6 +1714,8 @@ private struct TextTab: View {
     @State private var showConsentAlert = false
     @State private var pendingText = ""
     @State private var pendingConsentPatientName = ""
+    @State private var showSilentCommandExperiment = false
+    @State private var confirmedSilentCommand: String?
 
     var body: some View {
         ScrollView {
@@ -1756,6 +1758,21 @@ private struct TextTab: View {
                         .accessibilityIdentifier("clinicalMemoInput")
                 }
 
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        showSilentCommandExperiment = true
+                    } label: {
+                        Label("AirPods 무음 명령 실험", systemImage: "earbuds")
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("silentCommandExperimentButton")
+                    if let confirmedSilentCommand {
+                        Text("로컬 확인 명령: \(confirmedSilentCommand) (실행·전송 안 함)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Button {
                     dismissKeyboard()
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -1777,6 +1794,11 @@ private struct TextTab: View {
         .keyboardDoneToolbar()
         .navigationTitle("텍스트")
         .navigationBarTitleDisplayMode(.large)
+        .sheet(isPresented: $showSilentCommandExperiment) {
+            SilentCommandExperimentView { command in
+                confirmedSilentCommand = command
+            }
+        }
         .alert("환자 동의 확인", isPresented: $showConsentAlert) {
             Button("동의 기록 후 전송") {
                 confirmConsentAndSend()
