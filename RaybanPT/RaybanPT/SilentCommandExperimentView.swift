@@ -26,8 +26,8 @@ final class SilentCommandExperimentModel: ObservableObject {
     private enum Mode { case train(String), decode }
     private let sensor = CMHeadphoneMotionManager()
     private var mode: Mode?
-    // label -> takes -> frames -> 9 motion features. Memory only.
-    private var templates: [String: [[[Double]]]] = [:]
+    // The very same Foundation-only classifier is used by the Meta Motion QA app.
+    private var classifier = SilentMotionPatternClassifier(labels: SilentCommandExperimentModel.labels)
     private var syntheticTrainingCounts: [String: Int] = [:]
     private var frames: [[Double]] = []
     private var referenceAngles: [Double]?
@@ -96,11 +96,11 @@ final class SilentCommandExperimentModel: ObservableObject {
 
     func startRecognition(demoLabel: String) {
         guard sensing, !recording else { return }
-        guard Self.labels.filter({ (templates[$0]?.count ?? 0) >= 3 }).count >= 2 else {
+        guard classifier.eligibleLabels().count >= 2 else {
             status = "명령 두 가지를 각각 최소 3회 학습하세요."
             return
         }
-        if demoMode && (templates[demoLabel]?.count ?? 0) < 3 {
+        if demoMode && classifier.count(for: demoLabel) < 3 {
             status = "선택한 명령을 먼저 3회 이상 학습하세요."
             return
         }
@@ -149,13 +149,13 @@ final class SilentCommandExperimentModel: ObservableObject {
         }
         switch mode {
         case .train(let label):
-            var saved = templates[label, default: []]
-            saved.append(sample)
-            if saved.count > 8 { saved.removeFirst() }
-            templates[label] = saved
-            counts[label] = saved.count
-            evaluation = leaveOneOut()
-            status = "'\(label)' 학습 \(saved.count)회 완료."
+            guard classifier.train(label: label, frames: sample) else {
+                status = "동작이 없거나 유효하지 않은 샘플입니다. 다시 학습하세요."
+                return
+            }
+            counts[label] = classifier.count(for: label)
+            evaluation = classifier.leaveOneOutSummary()
+            status = "'\(label)' 학습 \(classifier.count(for: label))회 완료."
         case .decode:
             guess = recognize(sample)
             status = guess.map { "후보 '\($0.label)' — 사용자 확인 전에는 실행하지 않습니다." }
@@ -170,7 +170,7 @@ final class SilentCommandExperimentModel: ObservableObject {
 
     func reset() {
         guard !recording else { return }
-        templates = [:]
+        classifier.clear()
         syntheticTrainingCounts = [:]
         counts = [:]
         guess = nil
@@ -198,103 +198,17 @@ final class SilentCommandExperimentModel: ObservableObject {
         atan2(sin(angle), cos(angle))
     }
 
-    private func scales() -> [Double] {
-        let allFrames = templates.values.flatMap { $0 }.flatMap { $0 }
-        guard !allFrames.isEmpty else { return Array(repeating: 1.0, count: 9) }
-        return (0..<9).map { index in
-            let mean = allFrames.reduce(0.0) { $0 + $1[index] } / Double(allFrames.count)
-            let variance = allFrames.reduce(0.0) { acc, row in
-                let diff = row[index] - mean
-                return acc + diff * diff
-            } / Double(allFrames.count)
-            return max(sqrt(variance), 0.01)
-        }
-    }
-
-    // Remove constant offsets within each take, then scale by training variation.
-    private func normalize(_ sample: [[Double]], using scale: [Double]) -> [[Double]] {
-        let means = (0..<9).map { index in
-            sample.reduce(0.0) { $0 + $1[index] } / Double(sample.count)
-        }
-        return sample.map { row in
-            (0..<9).map { (row[$0] - means[$0]) / scale[$0] }
-        }
-    }
-
-    // Banded dynamic time warping; compares only short, manually segmented takes.
-    private func dtw(_ a: [[Double]], _ b: [[Double]]) -> Double {
-        guard !a.isEmpty, !b.isEmpty else { return .infinity }
-        let n = a.count, m = b.count
-        let band = max(max(8, abs(n - m) + 8), max(n, m) / 3)
-        var previous = [Double](repeating: .infinity, count: m + 1)
-        previous[0] = 0
-        for i in 1...n {
-            var current = [Double](repeating: .infinity, count: m + 1)
-            let lo = max(1, i - band), hi = min(m, i + band)
-            if lo <= hi {
-                for j in lo...hi {
-                    var squared = 0.0
-                    for k in 0..<9 {
-                        let d = a[i - 1][k] - b[j - 1][k]
-                        squared += d * d
-                    }
-                    current[j] = sqrt(squared / 9) + min(previous[j], min(previous[j - 1], current[j - 1]))
-                }
-            }
-            previous = current
-        }
-        return previous[m] / Double(max(n, m))
-    }
-
     private func eligibleLabels() -> [String] {
-        Self.labels.filter { (templates[$0]?.count ?? 0) >= 3 }
-    }
-
-    private func leaveOneOut() -> String {
-        guard eligibleLabels().count >= 2 else { return "서로 다른 명령을 각각 3회 이상 학습하세요." }
-        let scale = scales()
-        let entries: [(label: String, rows: [[Double]])] = eligibleLabels().flatMap { label in
-            (templates[label] ?? []).map { (label: label, rows: normalize($0, using: scale)) }
-        }
-        var correct = 0
-        for i in entries.indices {
-            var best = Double.infinity, winner = ""
-            for j in entries.indices where j != i {
-                let d = dtw(entries[i].rows, entries[j].rows)
-                if d < best { best = d; winner = entries[j].label }
-            }
-            if winner == entries[i].label { correct += 1 }
-        }
-        let percent = Int(100 * Double(correct) / Double(entries.count))
-        return "훈련 데이터 leave-one-out: \(correct)/\(entries.count) (\(percent)%). 실제 재착용·새 세션 정확도는 미검증."
+        classifier.eligibleLabels()
     }
 
     private func recognize(_ sample: [[Double]]) -> SilentCommandGuess? {
-        let labels = eligibleLabels()
-        guard labels.count >= 2 else { return nil }
-        let scale = scales()
-        let query = normalize(sample, using: scale)
-        var results: [(label: String, distance: Double, threshold: Double)] = []
-        for label in labels {
-            let training = (templates[label] ?? []).map { normalize($0, using: scale) }
-            let nearest = training.map { dtw(query, $0) }.min() ?? .infinity
-            let internalDistances = training.indices.map { i in
-                training.indices.filter { $0 != i }
-                    .map { dtw(training[i], training[$0]) }.min() ?? .infinity
-            }
-            if let worst = internalDistances.max(), worst.isFinite {
-                results.append((label, nearest, max(worst * 1.25, 0.001)))
-            }
-        }
-        let ranked = results.sorted { $0.distance < $1.distance }
-        guard ranked.count >= 2 else { return nil }
-        let best = ranked[0], next = ranked[1]
-        let margin = (next.distance - best.distance) / max(next.distance, 0.001)
-        guard best.distance.isFinite, best.distance <= best.threshold, margin >= 0.25 else {
-            return nil
-        }
-        return SilentCommandGuess(label: best.label, distance: best.distance, margin: margin)
+        guard let prediction = classifier.predict(sample) else { return nil }
+        return SilentCommandGuess(label: prediction.label,
+                                  distance: prediction.distance,
+                                  margin: prediction.margin)
     }
+
 }
 
 struct SilentCommandExperimentView: View {

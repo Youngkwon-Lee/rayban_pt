@@ -15,6 +15,9 @@ targets:
     sources:
       - Sources
       - ../MetaMotionMockSpike.swift
+      - ../MetaMotionCommandAdapter.swift
+      - ../../../RaybanPT/RaybanPT/SilentMotionPatternClassifier.swift
+      - ../../../RaybanPT/RaybanPT/SilentMotionSynthetic.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.kinelo.motionmockqa20261102

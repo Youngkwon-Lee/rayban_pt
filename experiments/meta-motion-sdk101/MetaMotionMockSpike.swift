@@ -11,6 +11,19 @@ struct GlassesMotionFrame: Sendable {
     let gyroscopeRadiansPerSecond: SIMD3<Float>?
     let orientationQuaternionXYZW: SIMD4<Float>?
 
+    init(_ sample: MWDATMockDevice.MotionSample) {
+        timestampNs = sample.timestampNs
+        accelerationMetersPerSecondSquared = sample.accelerometer.map {
+            SIMD3($0.x, $0.y, $0.z)
+        }
+        gyroscopeRadiansPerSecond = sample.gyroscope.map {
+            SIMD3($0.x, $0.y, $0.z)
+        }
+        orientationQuaternionXYZW = sample.orientation.map {
+            SIMD4($0.x, $0.y, $0.z, $0.w)
+        }
+    }
+
     init(_ sample: MWDATMotion.MotionSample) {
         timestampNs = sample.timestampNs
         if let v = sample.accelerometer {
@@ -39,7 +52,9 @@ enum MetaMotionMockSpikeError: Error {
 enum MetaMotionMockSpike {
     // Requires the host test app to call Wearables.configure() and to manage its
     // own isolated test lifecycle. Mock samples contain no personal information.
-    static func prepareMockGlasses() throws -> any MockGlasses {
+    static func prepareMockGlasses(
+        motionFeed customFeed: [MWDATMockDevice.MotionSample]? = nil
+    ) throws -> any MockGlasses {
         let kit = MockDeviceKit.shared
         kit.enable(config: MockDeviceKitConfig(
             initiallyRegistered: true,
@@ -60,7 +75,7 @@ enum MetaMotionMockSpike {
                 source: .glasses
             )
         }
-        glasses.services.motion.setMotionFeed(feed)
+        glasses.services.motion.setMotionFeed(customFeed ?? feed)
         return glasses
     }
 

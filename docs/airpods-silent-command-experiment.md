@@ -70,3 +70,10 @@ Apple interface: https://developer.apple.com/documentation/coremotion/cmheadphon
 - No real glasses hardware/IMU, AirPods, sensor accuracy, patient data, clinical actions, app SDK upgrade, branch merge, or deployment was tested or performed.
 
 No merge or production release intended.
+
+## Shared classifier and Meta MockDevice end-to-end (2026-11-02)
+
+- `RaybanPT/RaybanPT/SilentMotionPatternClassifier.swift` is now the single shared Foundation-only DTW classifier for the optional AirPods experiment and the Meta 1.0.1 QA app; no patient/backend writes.
+- `experiments/meta-motion-sdk101/MetaMotionCommandAdapter.swift` maps SDK motion samples (acceleration, gyroscope, quaternion-relative orientation) into 9-feature takes, validating timestamps and missing/nonfinite components. Sensor coordinate systems require separate calibration.
+- QA app on an unlocked iPhone 12 Pro: 30/30 mock frames delivered and converted, synthetic `다음` recognized as `다음`, synthetic idle rejected; exact result and scope are recorded in `experiments/meta-motion-sdk101/QAApp/evidence/motion-mock-classifier-pass-2026-11-02.json`.
+- This is **not a real Ray-Ban input or silent speech test**. `rayban_pt` still pins Meta SDK 0.9.0; SDK 1.0.1 is used exclusively in the experimental QA app. Draft PR only.

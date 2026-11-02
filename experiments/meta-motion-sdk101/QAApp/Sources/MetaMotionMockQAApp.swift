@@ -24,6 +24,10 @@ struct MotionQAView: View {
     @State private var lastTimestamp: Int64?
     @State private var timestampMonotonic = true
     @State private var finalResult = "PENDING"
+    @State private var predictedCommand = "없음"
+    @State private var classifierResult = "NOT_RUN"
+    @State private var idleRejected = false
+    @State private var featureFrameCount = 0
 
     var body: some View {
         NavigationStack {
@@ -41,6 +45,14 @@ struct MotionQAView: View {
                 Text("수신 프레임: \(sampleCount)")
                 Text("가속도: \(accelerometerCount) · 자이로: \(gyroscopeCount)")
                 Text("타임스탬프 단조 증가: \(timestampMonotonic ? "예" : "아니오")")
+                Divider()
+                Text("합성 명령 정답: 다음 · 비교 명령: 이전")
+                Text("분류 후보: \(predictedCommand)")
+                Text("분류 검증: \(classifierResult)")
+                Text("무동작 거부: \(idleRejected ? "PASS" : "미통과/미실행")")
+                Text("변환된 9축 프레임: \(featureFrameCount)")
+                Text("후보는 화면과 로컬 QA JSON에만 남습니다. 실제 명령은 실행되지 않습니다.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if let firstTimestamp, let lastTimestamp {
                     Text("타임스탬프: \(firstTimestamp) → \(lastTimestamp)")
                         .font(.footnote.monospacedDigit())
@@ -78,7 +90,12 @@ struct MotionQAView: View {
         firstTimestamp = nil
         lastTimestamp = nil
         timestampMonotonic = true
+        predictedCommand = "없음"
+        classifierResult = "NOT_RUN"
+        idleRejected = false
+        featureFrameCount = 0
 
+        var receivedMotionFrames: [GlassesMotionFrame] = []
         var glasses: (any MockGlasses)?
         var session: DeviceSession?
         var motion: MWDATMotion.Motion?
@@ -92,7 +109,12 @@ struct MotionQAView: View {
                 status = "SDK 설정 유지 중"
             }
             status = "MockDeviceKit 초기화"
-            let mock = try MetaMotionMockSpike.prepareMockGlasses()
+            // New untrained take is injected through the actual Meta SDK mock stream.
+            let heldOutFeed = MetaMotionCommandAdapter.makeFeed(labelIndex: 0, take: 2.5)
+            guard heldOutFeed.count == MetaMotionCommandAdapter.framesPerTake else {
+                throw QAError.invalidSyntheticFeed
+            }
+            let mock = try MetaMotionMockSpike.prepareMockGlasses(motionFeed: heldOutFeed)
             glasses = mock
             // Meta's MockDeviceKit guidance: powered + unfolded devices become
             // visible asynchronously; never create a session before that event.
@@ -130,6 +152,7 @@ struct MotionQAView: View {
             status = "Motion.samples 수신 (최대 12초)"
             let readTask = Task {
                 for await sample in readerMotion.samples {
+                    receivedMotionFrames.append(GlassesMotionFrame(sample))
                     sampleCount += 1
                     if sample.accelerometer != nil { accelerometerCount += 1 }
                     if sample.gyroscope != nil { gyroscopeCount += 1 }
@@ -148,11 +171,29 @@ struct MotionQAView: View {
             await readTask.value
             watchTask.cancel()
 
-            finalResult = (sampleCount >= 1 && accelerometerCount >= 1 &&
-                           gyroscopeCount >= 1 && timestampMonotonic)
-                ? "PASS: 가상 Motion 프레임 수신"
-                : "FAIL: 프레임 부족·센서 누락 또는 타임스탬프 오류"
-            status = "수신 종료"
+            // Both this test and the AirPods text-tab experiment now use
+            // the EXACT same Foundation-only SilentMotionPatternClassifier.
+            let classifier = MetaMotionCommandAdapter.trainedClassifier()
+            let features = MetaMotionCommandAdapter.features(receivedMotionFrames)
+            featureFrameCount = features?.count ?? 0
+            let guess = features.flatMap { classifier?.predict($0) }
+            predictedCommand = guess?.label ?? "거부됨"
+            idleRejected = classifier.map {
+                MetaMotionCommandAdapter.syntheticNoMotionIsRejected($0)
+            } ?? false
+            let validTransport = sampleCount == MetaMotionCommandAdapter.framesPerTake &&
+                accelerometerCount == sampleCount &&
+                gyroscopeCount == sampleCount &&
+                timestampMonotonic
+            let validInference = classifier != nil &&
+                featureFrameCount == sampleCount &&
+                guess?.label == MetaMotionCommandAdapter.expectedLabel &&
+                idleRejected
+            classifierResult = validInference ? "PASS" : "FAIL"
+            finalResult = (validTransport && validInference)
+                ? "PASS: Mock Motion → 명령 분류"
+                : "FAIL: Motion 프레임/변환/분류 검증 미통과"
+            status = "수신·분류 종료"
         } catch {
             let failedPhase = status
             let count = Wearables.shared.devices.count
@@ -196,6 +237,12 @@ struct MotionQAView: View {
             "accelerometerSamples": accelerometerCount,
             "gyroscopeSamples": gyroscopeCount,
             "timestampMonotonic": timestampMonotonic,
+            "syntheticCommandExpected": MetaMotionCommandAdapter.expectedLabel,
+            "syntheticCommandPredicted": predictedCommand,
+            "syntheticClassifierResult": classifierResult,
+            "syntheticIdleRejected": idleRejected,
+            "convertedFeatureFrames": featureFrameCount,
+            "realSpeechAccuracy": "NOT_MEASURED",
             "firstTimestampNs": firstTimestamp as Any? ?? NSNull(),
             "lastTimestampNs": lastTimestamp as Any? ?? NSNull(),
             "time": ISO8601DateFormatter().string(from: Date())
@@ -214,4 +261,5 @@ struct MotionQAView: View {
 private enum QAError: Error {
     case sessionNeverStarted(String)
     case mockNotSelectable(String)
+    case invalidSyntheticFeed
 }

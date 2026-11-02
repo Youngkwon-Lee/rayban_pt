@@ -63,3 +63,20 @@ The user unlocked their connected iPhone 12 Pro, allowing the QA app to be insta
 
 **Interpretation:** This verifies actual iPhone app execution through Meta's MockDeviceKit → DeviceSession → Motion.samples with deterministic simulated glasses motion. It supersedes the earlier `noEligibleDevice` and locked-device failures for **this setup**. It does **not** establish real Ray-Ban hardware IMU access, silent speech decoding, gesture accuracy, or clinical readiness. No main merge, production deployment, SDK upgrade in the regular app, patient data or backend writes.
 
+
+## 2026-11-02 11:08 KST — Motion stream to shared classifier PASS
+
+The iPhone 12 Pro QA app was installed under the existing isolated bundle ID `com.kinelo.motionmockqa20261102` (no install of production `rayban_pt`). With Meta DAT **1.0.1** pinned for this QA app, it received the deterministic 30-frame synthetic command trace through **actual SDK** `MockDeviceKit → DeviceSession → MWDATMotion.Motion.samples`. The trace was converted to nine features and classified using **the same Foundation-only `SilentMotionPatternClassifier`** now used by the normal app's optional AirPods research tab.
+
+**Grounded evidence:** `evidence/motion-mock-classifier-pass-2026-11-02.json`, recorded on 2026-11-02T02:08:23Z (11:08:23 KST).
+- Transport: 30 Motion samples, 30 accelerometer, 30 gyroscope, timestamps 0..2,900,000,000 ns in strictly increasing order.
+- Adapter: 30 valid nine-feature frames from the received mock stream, including quaternion-relative orientation slots.
+- Model: labels `다음` / `이전`, three synthetic examples per label. The unseen synthetic `다음` (take 2.5) was classified as `다음`. Synthetic motionless control was rejected.
+- The result is **synthetic label consistency**, not silent speech accuracy. Training and test use the same procedural synthetic signal family; no physical jaw/lip/head signal has been evaluated.
+- No camera, microphone, patient data, backend sync, clinical note write, actual command activation, existing app overwrite, main merge or production release.
+
+**Reproduction:** `xcodegen generate --spec project.yml`; build the QA target with your own signing team. For this verified session, the remote Xcode workspace used an isolated local checkout of SDK tag 1.0.1 (git `0bd369298eef6a980ad0bdb6c8a5502f2c02a08c`) rather than changing the main app's 0.9.0 pin. Run QA on an unlocked iPhone and read its own Documents JSON, confirming a *fresh timestamp*.
+
+**Classifier validity/safety conditions:** at least 12 complete finite frames, strictly increasing timestamps and accelerometer/gyro/orientation availability for the adapter. The classifier rejects constant motion/idle, unknown labels, missing inputs and ambiguous match distances; candidates never execute a clinical action. Rotation features are relative quaternion vector parts, **not** directly interchangeable with AirPods' Euler-angle channels. Each sensor type requires its own calibration and validation.
+
+**Next actual-device gate:** confirm a compatible Ray-Ban is connected, SDK `MotionSource.glasses` rather than mock, real sensor permissions/firmware, consistent sample timestamps, and held-out sessions comparing silent mouthing with head-only motion. Do not claim silent speech or merge the app SDK upgrade based on this mock PASS.
