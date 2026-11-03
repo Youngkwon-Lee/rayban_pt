@@ -1,0 +1,20 @@
+{
+  "sdk": "1.0.1",
+  "mode": "physical_discovery_only",
+  "recordedAt": "2026-11-03T08:03:43Z",
+  "registrationState": "RegistrationState(rawValue: 3)",
+  "deviceCount": 1,
+  "connectedCount": 0,
+  "donnedCount": 0,
+  "deviceStates": [
+    "기기 1: 연결=connecting, 호환성=undefined, 착용=unknown, 세션후보=true"
+  ],
+  "specificSelectorEligible": [
+    true
+  ],
+  "autoSelectorEligible": false,
+  "rawSamplesSaved": false,
+  "deviceIdentifiersSaved": false,
+  "clinicalWrites": false,
+  "note": "Selector activeDevice presence does not prove DeviceSession can be created."
+}
