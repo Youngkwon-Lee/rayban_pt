@@ -49,3 +49,21 @@ Official prerequisites: https://github.com/meta/meta-wearables-dat-ios/blob/main
 - The latest compiled and signed QA code hash is Git blob `9169a2fb2c6c4c05d9cd2aaa8f62653ffbad9f93`. The additional code writes **read-only metadata** into the QA app's local `Documents/real-motion-discovery.json` when the operator refreshes device listings (and on first view appearance).
 - **Next blocker:** In the iPhone QA app, use its explicit `Meta AI 앱에서 QA 앱 등록` button, approve registration in the companion app, return, and tap `기기 목록 새로고침` only after a real compatible glasses device is paired and connected. Developer Mode and experimental Motion enablement may be required; do not bypass unavailable capabilities. Never use real patient data.
 - Only after registration changes to `.registered` and a connected glasses device appears should a benign nonpatient IMU trial be started. The old synthetic MockDeviceKit PASS is separate from this physical discovery failure.
+
+
+## DAT glasses-app update recovery (2026-11-03)
+
+**Confirmed device blocker (read-only QA evidence from 2026-11-03T08:28:11Z):** The real-glasses trial failed at session start (0 IMU samples; session `stopping → stopped`). A one-shot `DeviceSession.errorStream()` event identified `datAppOnTheGlassesUpdateRequired`. This means the Meta DAT component **on the glasses** needs an update; it is distinct from a general Bluetooth pairing failure or the ordinary glasses firmware update path.
+
+The QA app now:
+
+- Reads **only its own previous local trial summary** on launch and shows the verified DAT-update requirement. It does not read or store the device identifier or sensor time series.
+- Shows **Meta AI에서 안경 DAT 업데이트 열기** after the confirmed error. The explicit button calls the official `Wearables.shared.openDATGlassesAppUpdate()` API; it does not silently open Meta AI or install an update, and it displays navigation errors without retry loops.
+- Prevents another physical Motion trial while the known DAT-update blocker is active.
+- Provides **업데이트 완료 후 상태 재확인** after the person reviews/applies the update in Meta AI. This clears the local gate for a future **manually initiated** trial; it neither claims the update succeeded nor automatically measures the sensor.
+- Re-detects and explicitly records `datAppOnTheGlassesUpdateRequired` from SDK error streams; it reports `BLOCKED: DAT_GLASSES_APP_UPDATE_REQUIRED` rather than the former generic failure. All previous session state/error evidence remains available, with `datGlassesAppUpdateRequired` added to the summary JSON.
+- Does **not** call `openFirmwareUpdate()` because that is a different update flow. Does not modify the normal `rayban_pt` app, Meta SDK 0.9.0 pin, or any clinical data.
+
+**Validation:** The new QA source has Git blob `059bb5ec72ac20e0054020619680004c6a960ff1`, built and signed with Xcode 27.2 on an isolated macOS XcodeGen project using Meta DAT 1.0.1 tag `0bd369298eef6a980ad0bdb6c8a5502f2c02a08c`. A code-signed iOS build passed and was **installed** in the separate QA bundle `com.kinelo.realmotionqa20261103` (devicectl exit 0); its previous on-device JSON still has the same `datAppOnTheGlassesUpdateRequired` event, so the blocker can be restored on next app launch. **Not yet verified:** tapping the button and the resulting Meta AI navigation, completion of any glasses update, a post-update successful real-glasses session, or actual IMU samples. No firmware modification, merge, or production release was performed.
+
+Official Meta SDK: `plugins/mwdat-ios/skills/permissions-registration/SKILL.md` and `session-lifecycle/SKILL.md` in `meta/meta-wearables-dat-ios` (check exact SDK version support in the shipping frameworks).
