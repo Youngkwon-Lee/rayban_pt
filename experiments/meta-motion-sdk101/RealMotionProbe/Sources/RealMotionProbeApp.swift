@@ -55,6 +55,9 @@ final class RealMotionProbeModel: ObservableObject {
     @Published private(set) var sessionErrorEvents: [String] = []
     @Published private(set) var linkAtTrialStart = ""
     @Published private(set) var compatibilityAtTrialStart = ""
+    @Published private(set) var datUpdateRequired = false
+    @Published private(set) var datUpdateNavigationInProgress = false
+    @Published private(set) var datUpdateNavigationStatus = ""
 
     enum Trial: String, CaseIterable, Identifiable {
         case still = "정지"
@@ -67,6 +70,46 @@ final class RealMotionProbeModel: ObservableObject {
     private var firstNs: Int64?
     private var lastNs: Int64?
     private var previousNs: Int64?
+
+    init() {
+        restorePreviousDATUpdateRequirement()
+    }
+
+    // Restore only the app's own nonidentifying last error to offer the right
+    // recovery action. No hardware access or update is triggered on launch.
+    private func restorePreviousDATUpdateRequirement() {
+        let url = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("real-motion-probe-summary.json")
+        guard let data = try? Data(contentsOf: url),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = payload["sessionErrorEvents"] as? [String],
+              errors.contains("datAppOnTheGlassesUpdateRequired") else { return }
+        datUpdateRequired = true
+        datUpdateNavigationStatus = "지난 실기기 검사에서 안경 측 DAT 앱 업데이트가 필요하다고 확인됐습니다."
+    }
+
+    // Only opens Meta AI's official DAT-glasses-app update page.
+    // The user must independently review/confirm any update in Meta AI.
+    func openGlassesDATUpdateScreen() async {
+        guard datUpdateRequired, !running, !datUpdateNavigationInProgress else { return }
+        datUpdateNavigationInProgress = true
+        defer { datUpdateNavigationInProgress = false }
+        do {
+            try await Wearables.shared.openDATGlassesAppUpdate()
+            datUpdateNavigationStatus = "Meta AI에 안경 DAT 업데이트 화면 열기를 요청했습니다. 실제 업데이트는 Meta AI에서 확인하세요."
+        } catch {
+            datUpdateNavigationStatus = "Meta AI 업데이트 화면을 열지 못했습니다: \(error)"
+        }
+    }
+
+    // User-controlled acknowledgment after updating; does NOT start a session,
+    // imply the update succeeded, or alter glasses firmware.
+    func acknowledgeDATUpdateAndRefresh() {
+        guard !running else { return }
+        datUpdateRequired = false
+        datUpdateNavigationStatus = "업데이트 완료 여부는 다음 수동 센서 검사로 확인합니다."
+        refreshDevices()
+    }
 
     func refreshDevices() {
         let wearables = Wearables.shared
@@ -90,6 +133,9 @@ final class RealMotionProbeModel: ObservableObject {
             : specificSelectorEligible.contains(true)
                 ? "세션 후보 기기를 선택하세요. 실기기 수집은 수동으로만 시작합니다."
                 : "안경은 보이지만 세션 후보가 없습니다. SDK·펌웨어 호환성을 점검하세요."
+        if datUpdateRequired {
+            status = "안경 측 DAT 앱 업데이트가 필요합니다. 아래 버튼으로 Meta AI 업데이트 화면을 열어 확인하세요."
+        }
         saveDiscoverySummary()
     }
 
@@ -152,6 +198,11 @@ final class RealMotionProbeModel: ObservableObject {
     func runPhysicalMotionProbe() async {
         guard !running else { return }
         refreshDevices()
+        guard !datUpdateRequired else {
+            result = "BLOCKED: DAT_GLASSES_APP_UPDATE_REQUIRED"
+            status = "이전 SDK 오류에 따라 안경 DAT 업데이트가 필요합니다. 업데이트 화면을 먼저 확인하세요."
+            return
+        }
         guard availableDevices.indices.contains(selectedDeviceIndex) else {
             result = "BLOCKED: NO_DEVICE"
             return
@@ -209,6 +260,10 @@ final class RealMotionProbeModel: ObservableObject {
                     if Task.isCancelled { break }
                     if sessionErrorEvents.count < 10 {
                         sessionErrorEvents.append(String(describing: error))
+                    }
+                    if error == .datAppOnTheGlassesUpdateRequired {
+                        datUpdateRequired = true
+                        datUpdateNavigationStatus = "안경의 DAT 구성요소 업데이트가 필요합니다. Meta AI에서 확인하세요."
                     }
                 }
             }
@@ -283,6 +338,11 @@ final class RealMotionProbeModel: ObservableObject {
         try? await Task.sleep(for: .milliseconds(150))
         stateMonitor?.cancel()
         errorMonitor?.cancel()
+        if datUpdateRequired || sessionErrorEvents.contains("datAppOnTheGlassesUpdateRequired") {
+            datUpdateRequired = true
+            result = "BLOCKED: DAT_GLASSES_APP_UPDATE_REQUIRED"
+            status = "안경 측 DAT 앱 업데이트가 필요해 세션이 종료됐습니다. 아래 안내 버튼을 누르세요."
+        }
         saveSummary(durationSeconds: Date().timeIntervalSince(startTime))
     }
 
@@ -300,6 +360,7 @@ final class RealMotionProbeModel: ObservableObject {
             "timestampMonotonic": monotonicTimestamp,
             "sessionStateEvents": sessionStateEvents,
             "sessionErrorEvents": sessionErrorEvents,
+            "datGlassesAppUpdateRequired": datUpdateRequired,
             "linkAtTrialStart": linkAtTrialStart,
             "compatibilityAtTrialStart": compatibilityAtTrialStart,
             "firstTimestampNs": firstNs as Any? ?? NSNull(),
@@ -361,6 +422,27 @@ struct RealMotionProbeView: View {
                     }
                 }
 
+                if model.datUpdateRequired {
+                    Section("안경 측 DAT 업데이트 필요") {
+                        Text("SDK 오류: datAppOnTheGlassesUpdateRequired. 안경 연결이나 일반 펌웨어 상태와 별개로 DAT 구성요소 업데이트가 필요합니다.")
+                            .font(.footnote)
+                        Button("Meta AI에서 안경 DAT 업데이트 열기") {
+                            Task { await model.openGlassesDATUpdateScreen() }
+                        }
+                        .disabled(model.running || model.datUpdateNavigationInProgress)
+                        .accessibilityIdentifier("realMotionDATUpdateButton")
+                        Text(model.datUpdateNavigationStatus)
+                            .font(.caption)
+                        Button("업데이트 완료 후 상태 재확인") {
+                            model.acknowledgeDATUpdateAndRefresh()
+                        }
+                        .disabled(model.running || model.datUpdateNavigationInProgress)
+                        .accessibilityIdentifier("realMotionRecheckAfterDATUpdate")
+                        Text("업데이트는 자동 실행되지 않습니다. Meta AI에서 직접 검토한 뒤 재검사해야 합니다.")
+                            .font(.caption)
+                    }
+                }
+
                 Section("수동 IMU 측정") {
                     Picker("시험 조건", selection: $model.trial) {
                         ForEach(RealMotionProbeModel.Trial.allCases) {
@@ -370,7 +452,7 @@ struct RealMotionProbeView: View {
                     Button("실제 안경 IMU 측정 시작") {
                         Task { await model.runPhysicalMotionProbe() }
                     }
-                    .disabled(model.running)
+                    .disabled(model.running || model.datUpdateRequired)
                     .accessibilityIdentifier("realMotionStart")
                     Text(model.status)
                 }
