@@ -77,6 +77,34 @@ final class RealMotionProbeModel: ObservableObject {
         status = availableDevices.isEmpty
             ? "연결된 DAT 기기가 없습니다. Meta AI 앱, 안경 연결, Developer Mode를 확인하세요."
             : "기기를 선택하고 실기기 수집 시작을 누르세요."
+        saveDiscoverySummary()
+    }
+
+    /// Read-only metadata snapshot: no hardware IDs, personal data, or raw IMU frames.
+    private func saveDiscoverySummary() {
+        let wearables = Wearables.shared
+        let devices = wearables.devices.compactMap { wearables.deviceForIdentifier($0) }
+        let summary: [String: Any] = [
+            "sdk": "1.0.1",
+            "mode": "physical_discovery_only",
+            "registrationState": registration,
+            "deviceCount": availableDevices.count,
+            "connectedCount": devices.filter { $0.linkState == .connected }.count,
+            "donnedCount": devices.filter { $0.donState == .donned }.count,
+            "deviceStates": deviceDescriptions,
+            "recordedAt": ISO8601DateFormatter().string(from: Date()),
+            "rawSamplesSaved": false,
+            "deviceIdentifiersSaved": false,
+            "clinicalWrites": false
+        ]
+        do {
+            let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("real-motion-discovery.json")
+            try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys, .prettyPrinted])
+                .write(to: output, options: .atomic)
+        } catch {
+            status += " · 기기 상태 요약 저장 실패"
+        }
     }
 
     func registerWithMetaAI() async {

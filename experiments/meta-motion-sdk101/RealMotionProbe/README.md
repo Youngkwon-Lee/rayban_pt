@@ -40,3 +40,12 @@ A PASS only establishes real inertial data transport. Whether silent mouthing ge
 
 Official API: https://github.com/meta/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/motion/SKILL.md
 Official prerequisites: https://github.com/meta/meta-wearables-dat-ios/blob/main/plugins/mwdat-ios/skills/getting-started/SKILL.md
+
+## iPhone discovery result (2026-11-03 13:48 KST)
+
+- At 2026-11-03T04:48:12Z, the **separate** QA bundle `com.kinelo.realmotionqa20261103` was codesigned, installed and launched successfully on the connected iPhone 12 Pro. The existing Kinelo AR HUD apps were not changed.
+- After launch, `Wearables.shared.devices` returned **0** devices; connected count **0**, donned count **0**. The SDK registration state reported `RegistrationState(rawValue: 2)` (the SDK's enum lists `unavailable, available, registering, registered`; ordinal 2 is registering). No real glasses motion was started or read, and there is no IMU PASS claim.
+- Verifiable exact QA app result: `evidence/real-motion-discovery-2026-11-03.json`. It contains only registration state, generic counts, no hardware identity or IMU data.
+- The latest compiled and signed QA code hash is Git blob `9169a2fb2c6c4c05d9cd2aaa8f62653ffbad9f93`. The additional code writes **read-only metadata** into the QA app's local `Documents/real-motion-discovery.json` when the operator refreshes device listings (and on first view appearance).
+- **Next blocker:** In the iPhone QA app, use its explicit `Meta AI 앱에서 QA 앱 등록` button, approve registration in the companion app, return, and tap `기기 목록 새로고침` only after a real compatible glasses device is paired and connected. Developer Mode and experimental Motion enablement may be required; do not bypass unavailable capabilities. Never use real patient data.
+- Only after registration changes to `.registered` and a connected glasses device appears should a benign nonpatient IMU trial be started. The old synthetic MockDeviceKit PASS is separate from this physical discovery failure.

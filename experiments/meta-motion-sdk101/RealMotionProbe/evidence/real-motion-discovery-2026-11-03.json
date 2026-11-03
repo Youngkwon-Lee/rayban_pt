@@ -1,0 +1,13 @@
+{
+  "clinicalWrites": false,
+  "connectedCount": 0,
+  "deviceCount": 0,
+  "deviceIdentifiersSaved": false,
+  "deviceStates": [],
+  "donnedCount": 0,
+  "mode": "physical_discovery_only",
+  "rawSamplesSaved": false,
+  "recordedAt": "2026-11-03T04:48:12Z",
+  "registrationState": "RegistrationState(rawValue: 2)",
+  "sdk": "1.0.1"
+}
