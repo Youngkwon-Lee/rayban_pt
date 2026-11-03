@@ -1,0 +1,33 @@
+{
+  "sdk": "1.0.1",
+  "mode": "physical_glasses",
+  "trial": "정지",
+  "result": "FAIL: SESSION_OR_MOTION_ERROR",
+  "status": "세션 시작 오류: sessionNotStarted(\"stopped\")",
+  "durationSeconds": 8.430994987487793,
+  "firstTimestampNs": null,
+  "lastTimestampNs": null,
+  "framesTotal": 0,
+  "framesFromGlasses": 0,
+  "framesWithAccelerometer": 0,
+  "framesWithGyroscope": 0,
+  "timestampMonotonic": true,
+  "recordedAt": "2026-11-03T08:07:37Z",
+  "deviceIdentifiersSaved": false,
+  "rawSamplesSaved": false,
+  "speechAccuracy": "NOT_MEASURED",
+  "prestartDiscovery": {
+    "recordedAt": "2026-11-03T08:07:28Z",
+    "registrationState": "RegistrationState(rawValue: 3)",
+    "deviceCount": 1,
+    "connectedCount": 1,
+    "donnedCount": 1,
+    "deviceStates": [
+      "기기 1: 연결=connected, 호환성=compatible, 착용=donned, 세션후보=true"
+    ],
+    "specificSelectorEligible": [
+      true
+    ],
+    "autoSelectorEligible": false
+  }
+}

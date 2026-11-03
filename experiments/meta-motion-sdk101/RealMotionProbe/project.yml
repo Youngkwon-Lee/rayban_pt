@@ -1,0 +1,52 @@
+name: RealMotionProbe
+options:
+  bundleIdPrefix: com.kinelo
+  deploymentTarget:
+    iOS: "17.6"
+  xcodeVersion: "27.2"
+packages:
+  MetaWearablesDAT:
+    url: https://github.com/meta/meta-wearables-dat-ios
+    exactVersion: 1.0.1
+targets:
+  RealMotionProbe:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.kinelo.realmotionqa20261103
+        PRODUCT_NAME: RealMotionProbe
+        SWIFT_VERSION: "6.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: Meta Real Motion QA
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Editor
+            CFBundleURLName: com.kinelo.realmotionqa20261103
+            CFBundleURLSchemes: [kinelomotionqa]
+        NSBluetoothAlwaysUsageDescription: "Meta Ray-Ban IMU 테스트용 블루투스 연결"
+        NSLocalNetworkUsageDescription: "Meta Ray-Ban IMU 테스트용 로컬 통신"
+        NSBonjourServices: ["_bonjour._tcp"]
+        UIBackgroundModes: [processing, bluetooth-central, bluetooth-peripheral, external-accessory]
+        UISupportedExternalAccessoryProtocols: [com.meta.ar.wearable]
+        MWDAT:
+          Analytics:
+            OptOut: true
+          CrashReporting:
+            OptOut: true
+          AppLinkURLScheme: "kinelomotionqa://"
+          MetaAppID: "0"
+          ClientToken: "dev-mode-only"
+          TeamID: "$(DEVELOPMENT_TEAM)"
+    dependencies:
+      - package: MetaWearablesDAT
+        product: MWDATCore
+      - package: MetaWearablesDAT
+        product: MWDATMotion

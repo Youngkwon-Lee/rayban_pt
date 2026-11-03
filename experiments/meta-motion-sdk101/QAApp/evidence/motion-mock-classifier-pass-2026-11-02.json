@@ -1,0 +1,19 @@
+{
+  "accelerometerSamples": 30,
+  "convertedFeatureFrames": 30,
+  "firstTimestampNs": 0,
+  "gyroscopeSamples": 30,
+  "lastTimestampNs": 2900000000,
+  "mode": "mock-only",
+  "realSpeechAccuracy": "NOT_MEASURED",
+  "result": "PASS: Mock Motion → 명령 분류",
+  "samples": 30,
+  "sdk": "1.0.1",
+  "status": "수신·분류 종료",
+  "syntheticClassifierResult": "PASS",
+  "syntheticCommandExpected": "다음",
+  "syntheticCommandPredicted": "다음",
+  "syntheticIdleRejected": true,
+  "time": "2026-11-02T02:08:23Z",
+  "timestampMonotonic": true
+}
